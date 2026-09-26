@@ -29,6 +29,7 @@ import { isSyncDisabledConfig } from '../../../core/sync-policy.ts';
 import type { Check } from '../../doctor.ts';
 import { ownedContentFreshness } from '../../../core/shared-skills/content-freshness.ts';
 import { connectorAuthorities } from '../../../core/persistence/connector-authority.ts';
+import { parseSourceConfig } from '../../../core/sources-load.ts';
 
 /** Local aliases; the shared warn-once memo lives in core so it can't fork per module. */
 const _resolveEnvNumber = resolveEnvNumber;
@@ -391,20 +392,20 @@ export async function checkUndeclaredDbOnlyPages(engine: BrainEngine): Promise<C
   try {
     // #3880: archived sources are out of scope for filesystem audits (v34
     // legacy fallback, house style per pickSoleNonDefaultSource).
-    let sources: Array<{ id: string; local_path: string | null; kind: string | null }>;
+    let sources: Array<{ id: string; local_path: string | null; config: unknown }>;
     try {
-      sources = await engine.executeRaw<{ id: string; local_path: string | null; kind: string | null }>(
-        `SELECT id, local_path, config->>'kind' AS kind FROM sources WHERE local_path IS NOT NULL AND archived IS NOT TRUE`,
+      sources = await engine.executeRaw<{ id: string; local_path: string | null; config: unknown }>(
+        `SELECT id, local_path, config FROM sources WHERE local_path IS NOT NULL AND archived IS NOT TRUE`,
       );
     } catch {
-      sources = await engine.executeRaw<{ id: string; local_path: string | null; kind: string | null }>(
-        `SELECT id, local_path, config->>'kind' AS kind FROM sources WHERE local_path IS NOT NULL`,
+      sources = await engine.executeRaw<{ id: string; local_path: string | null; config: unknown }>(
+        `SELECT id, local_path, config FROM sources WHERE local_path IS NOT NULL`,
       );
     }
     // #5503: connector_database sources are DB-only by design; a leftover pre-activation cache at local_path is not their canonical copy.
-    const authorities = await connectorAuthorities(engine, sources);
+    const authorities = await connectorAuthorities(engine, sources.map(s => ({ id: s.id, kind: parseSourceConfig(s.config).kind })));
     const connectorDb = new Set([...authorities].filter(([, a]) => a === 'connector_database').map(([id]) => id));
-    const connectorNote = connectorDb.size > 0 ? ` ${connectorDb.size} API connector source(s) skipped: connector_database pages are DB-only by design (back them up with gbrain export).` : '';
+    const connectorNote = connectorDb.size > 0 ? ` ${connectorDb.size} API connector source(s) skipped: connector_database pages are DB-only by design (recover them with gbrain sync --source <id> --full).` : '';
     const checkable = sources.filter(s => s.local_path && existsSync(s.local_path) && !connectorDb.has(s.id));
     if (checkable.length === 0) {
       return { name, status: 'ok', message: `Not applicable (no sources with a local repo path on this host).${connectorNote}` };
@@ -457,7 +458,7 @@ export async function checkUndeclaredDbOnlyPages(engine: BrainEngine): Promise<C
     return {
       name,
       status: 'warn',
-      message: `${total} DB page(s) have no backing file and sit outside every declared/default db_only path — invisible to file-lane backup/recovery. Sample: ${samples.join('; ')}. Fix: restore or export the files, or declare their prefixes under storage.db_only in gbrain.yml (derive-phase defaults already cover: ${DERIVE_PHASE_DB_ONLY_DEFAULTS.join(' ')})`,
+      message: `${total} DB page(s) have no backing file and sit outside every declared/default db_only path — invisible to file-lane backup/recovery. Sample: ${samples.join('; ')}. Fix: restore or export the files, or declare their prefixes under storage.db_only in gbrain.yml (derive-phase defaults already cover: ${DERIVE_PHASE_DB_ONLY_DEFAULTS.join(' ')})${connectorNote}`,
       details: { total, per_source: perSource, sample_slugs: samples },
     };
   } catch (e) {
