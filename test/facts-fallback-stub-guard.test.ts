@@ -189,8 +189,9 @@ describe('writeSingleFact × resolution provenance (#4108 matrix)', () => {
 
 /**
  * #5504: connector writes (`crossSourceResolution`) whose entity page lives in
- * another federated source. The connector source `g-conn` has its own
- * local_path; `default` (federated: true) holds the person pages above.
+ * another federated source. The connector source `g-conn` (federated: true,
+ * the writer rule) has its own local_path; `default` (federated: true) holds
+ * the person pages above.
  */
 describe('writeSingleFact × cross-source resolution (#5504)', () => {
   let connDir: string;
@@ -198,7 +199,7 @@ describe('writeSingleFact × cross-source resolution (#5504)', () => {
 
   beforeAll(async () => {
     await engine.executeRaw(
-      `INSERT INTO sources (id, name) VALUES ('g-conn', 'g-conn') ON CONFLICT (id) DO NOTHING`,
+      `INSERT INTO sources (id, name, config) VALUES ('g-conn', 'g-conn', '{"federated": true}'::jsonb) ON CONFLICT (id) DO NOTHING`,
     );
     await engine.putPage('people/gina-example', {
       type: 'person',
