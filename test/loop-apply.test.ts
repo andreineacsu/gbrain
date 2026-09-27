@@ -246,6 +246,8 @@ describe('applyThreadLoopVerdict', () => {
   });
 
   test('#5504: alias in the one other FEDERATED source resolves when g1 holds no candidate', async () => {
+    // The writer rule: only a federated connector source resolves outside itself.
+    await engine.executeRaw(`UPDATE sources SET config = '{"kind":"google","federated":true}'::jsonb WHERE id = 'g1'`);
     await engine.executeRaw(
       `INSERT INTO sources (id, name, config) VALUES ('b-fed', 'b-fed', '{"federated": true}'::jsonb)`,
     );

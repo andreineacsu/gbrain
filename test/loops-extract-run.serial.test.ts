@@ -673,8 +673,8 @@ describe('runLoopsExtract', () => {
 
 /**
  * #5504: the counterparty's person page lives in another federated source.
- * Connector source `g-xs` (federation unset, own local_path) extracts a
- * commitment naming a person whose page exists only in `b-fed`
+ * Connector source `g-xs` (federated: true, the writer rule; own local_path)
+ * extracts a commitment naming a person whose page exists only in `b-fed`
  * (federated: true, own local_path). `g1` above has federation unset, so it
  * is never a candidate and its own `people/alice-example` never contests.
  */
@@ -691,7 +691,7 @@ describe('runLoopsExtract: counterparty page in another federated source (#5504)
     fedDir = mkdtempSync(join(tmpdir(), 'loops-xs-fed-'));
     auditDir = mkdtempSync(join(tmpdir(), 'loops-xs-audit-'));
     await engine.executeRaw(
-      `INSERT INTO sources (id, name, local_path) VALUES ($1, $1, $2)`,
+      `INSERT INTO sources (id, name, local_path, config) VALUES ($1, $1, $2, '{"federated": true}'::jsonb)`,
       [XS, xsDir],
     );
     await engine.executeRaw(

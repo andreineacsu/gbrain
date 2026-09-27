@@ -26,7 +26,7 @@ import { normalizeAlias } from '../search/alias-normalize.ts';
 import { foldNonDecomposingLatin } from '../latin-fold.ts';
 import { isUndefinedTableError } from '../utils.ts';
 import { privatePagesFilterFragment } from '../search/private-visibility.ts';
-import { isSourceFederated, sourceFederationState } from '../sources-load.ts';
+import { loadAllSources } from '../sources-load.ts';
 
 /**
  * Canonicalize a free-form entity reference to a page slug.
@@ -310,8 +310,9 @@ export interface ConnectorResolveResult extends ResolveResult {
  * with the non-fuzzy steps only, and only a `people/` or `companies/` page
  * can be matched there. One contested source with such a match wins; none,
  * or two or more sources holding candidates, keep the writing source's
- * fallback. A writing source configured `federated: false` never looks
- * outside itself. Other callers keep the single-source resolvers.
+ * fallback. Only a writing source that is itself non-archived and configured
+ * `federated: true` looks outside itself. Other callers keep the
+ * single-source resolvers.
  */
 export async function resolveConnectorEntitySlug(
   engine: BrainEngine,
@@ -352,7 +353,7 @@ export async function resolveConnectorEntitySlug(
  */
 const CROSS_SOURCE_ENTITY_DIRS = ['people', 'companies'] as const;
 
-function isCrossSourceEntitySlug(slug: string): boolean {
+export function isCrossSourceEntitySlug(slug: string): boolean {
   return CROSS_SOURCE_ENTITY_DIRS.some((dir) => slug.startsWith(`${dir}/`));
 }
 
@@ -385,24 +386,23 @@ async function resolveNonFuzzy(
 
 /**
  * Sources a connector write may resolve into: every other non-archived source
- * configured `federated: true` (the `isSourceFederated` inclusion rule), or
- * none when the writing source is itself `federated: false`.
+ * configured `federated: true` (the `isSourceFederated` inclusion rule), and
+ * none unless the writing source is itself one of them. A writer that is
+ * archived, `federated: false` or has federation unset stays inside itself:
+ * the read side (`cross-source-ref.ts`, same loader) attaches rows only from
+ * federated sources, so a row it wrote under another source's slug would
+ * reach no card.
  */
 async function crossSourceTargets(engine: BrainEngine, source_id: string): Promise<string[]> {
-  let rows: Array<{ id: string; config: unknown; archived: boolean | null }>;
+  let federated: string[];
   try {
-    rows = await engine.executeRaw<{ id: string; config: unknown; archived: boolean | null }>(
-      `SELECT id, config, archived FROM sources ORDER BY id`,
-    );
+    federated = (await loadAllSources(engine, { federatedOnly: true })).map((row) => row.id);
   } catch (err) {
     console.error(`[gbrain] cross-source entity resolution skipped for source=${source_id}: ${err instanceof Error ? err.message : String(err)}`);
     return [];
   }
-  const writer = rows.find((row) => row.id === source_id);
-  if (writer && sourceFederationState(writer.config) === 'isolated') return [];
-  return rows
-    .filter((row) => row.id !== source_id && row.archived !== true && isSourceFederated(row.config))
-    .map((row) => row.id);
+  if (!federated.includes(source_id)) return [];
+  return federated.filter((id) => id !== source_id);
 }
 
 /**

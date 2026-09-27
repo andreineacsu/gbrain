@@ -73,7 +73,7 @@ MEMORY VERB (v1): budget-packed session-boundary bundle for a set of standing en
 | `budget_tokens` | number | Server-side token budget (char/4). Cards pack first, then facts; each item costs its rendered line and the envelope + section headers are reserved, so `text` fits the budget. Response adds budget_tokens, budget_used (tokens of `text`), dropped_count. |
 | `since` | string | ISO 8601 datetime. When set, open-thread events are filtered to those after this cursor. |
 | `session_id` | string | Opaque session id; keys the hot-memory cache and (on the push path) the session cursor. |
-| `include_private` | boolean | Local trusted callers only: widen ALL arms to include private facts. Ignored (world-only) for remote callers. Default false. |
+| `include_private` | boolean | Local trusted callers only: widen ALL arms to include private facts, and entity cards to include the facts and open loops other federated sources attach to the entity. Ignored (world-only, own source) for remote callers. Default false. |
 
 ## `delta`
 
@@ -86,7 +86,7 @@ MEMORY VERB (v1): "what changed since T" for heartbeats — pages updated after 
 | `entities` | string | Optional comma-separated entity scope for thread-event deltas. Capped at 8. |
 | `budget_tokens` | number | Server-side token budget (char/4). Pages pack first, then facts; each item costs its rendered line and the envelope + section headers + every thread line are reserved, so `text` fits the budget. Threads are never dropped (budget_used can exceed the budget only when the header + threads alone do). Response adds budget_tokens, budget_used (tokens of `text`), dropped_count. |
 | `session_id` | string | Opaque session id. Drives the per-session cursor: the first call establishes it, each call advances it to the newest DELIVERED change (at-least-once — with has_more:true the undelivered tail returns on the next wake). Without it, pass an explicit `since` for a stateless delta. |
-| `include_private` | boolean | Local trusted callers only: widen ALL arms to include private facts. Ignored (world-only) for remote callers. Default false. |
+| `include_private` | boolean | Local trusted callers only: widen ALL arms to include private facts, and entity cards to include the facts and open loops other federated sources attach to the entity. Ignored (world-only, own source) for remote callers. Default false. |
 
 ## `edit_page`
 

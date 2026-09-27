@@ -48,7 +48,7 @@ import type {
   TakeResolution, SynthesisEvidenceInput,
   TakesScorecard, TakesScorecardOpts, CalibrationBucket, CalibrationCurveOpts,
   FactRow, FactInsertStatus,
-  NewFact, FactListOpts, FactsHealth,
+  NewFact, FactListOpts, FactsByEntityOpts, FactsHealth,
   SourceRow,
 } from './engine.ts';
 import { DREAM_VERDICT_TTL_SECONDS, clampSearchLimit } from './engine.ts';
@@ -2335,7 +2335,7 @@ export class PGLiteEngine implements BrainEngine {
   async listFactsByEntity(
     source_id: string,
     entitySlug: string,
-    opts?: FactListOpts,
+    opts?: FactsByEntityOpts,
   ): Promise<FactRow[]> {
     return factsImpl.listFactsByEntity(unscopedExecutor(this.engineSql, 'facts: unscoped on master (EO4 inventory)'), source_id, entitySlug, opts);
   }
