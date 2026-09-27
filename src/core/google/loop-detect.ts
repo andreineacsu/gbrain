@@ -15,6 +15,8 @@
  *    closes loops — it comes FROM a real colleague, so no mute could
  *    exclude it without silencing that person's genuine email
  *  - list mail (List-Unsubscribe) never opens loops
+ *  - auto-submitted mail (RFC 3834 Auto-Submitted other than "no") neither
+ *    opens nor closes loops
  *  - self-threads (all participants are my addresses) never open loops
  *  - CC-only inbound does not owe a reply (must be in To:)
  *  - outbound without a question mark is FYI, not an ask; a question mark
@@ -132,6 +134,10 @@ export function detectThreadLoop(
   // could exclude it without silencing that person entirely. And they must
   // not CLOSE one either: a calendar invite is not a reply, so letting it
   // flip the turn would silently answer a real outbound loop.
+  //
+  // RFC 3834 auto-submitted mail (tracker notifications, auto-replies) is
+  // excluded the same way: it declares itself machine mail.
+  //
   // My acknowledgement-only reply to their question is not an answer: drop
   // it so the turn stays theirs and the reply-owed loop neither closes nor
   // restarts its clock. An acknowledgement of a message that asked nothing
@@ -139,7 +145,7 @@ export function detectThreadLoop(
   const substantive: GmailMessageMeta[] = [];
   let theirQuestionPending = false;
   for (const m of messages) {
-    if (isNoiseSender(m.fromAddress) || isCalendarSystemMail(m)) continue;
+    if (isNoiseSender(m.fromAddress) || isCalendarSystemMail(m) || m.autoSubmitted) continue;
     if (!isMine(m, myAddresses)) {
       theirQuestionPending = asksQuestion(m.bodyText);
     } else if (theirQuestionPending && isAcknowledgementOnly(m.bodyText)) {
@@ -268,7 +274,8 @@ export function __clearSuppressionCacheForTests(engine?: BrainEngine): void {
 /**
  * Apply the verdict: close thread loops that no longer hold, upsert the ones
  * that do (dedup key 'thread:<threadId>:<loop_type>' — reopen on conflict).
- * Counterparty slug resolution is alias-exact within the same source.
+ * Counterparty slug resolution is alias-exact within the same source, or in
+ * one other federated source when this one holds no candidate (#5504).
  */
 export async function applyThreadLoopVerdict(
   engine: BrainEngine,
@@ -322,8 +329,8 @@ async function upsertThreadLoop(
 ): Promise<void> {
   let counterpartySlug: string | null = null;
   try {
-    const { resolveEntitySlugWithSource } = await import('../entities/resolve.ts');
-    const resolved = await resolveEntitySlugWithSource(engine, sourceId, spec.counterpartyEmail);
+    const { resolveConnectorEntitySlug } = await import('../entities/resolve.ts');
+    const resolved = await resolveConnectorEntitySlug(engine, sourceId, spec.counterpartyEmail);
     // Only alias-exact/high-confidence resolutions count — a slugify
     // fallback would fabricate a person that doesn't exist.
     if (resolved && resolved.source !== 'fallback_slugify') counterpartySlug = resolved.slug;
