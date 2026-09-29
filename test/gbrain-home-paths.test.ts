@@ -131,6 +131,11 @@ const ALLOWLIST: AllowEntry[] = [
     reason: LEGACY_FALLBACK_READ,
   },
   {
+    file: 'src/commands/doctor/checks/verbs-reflex.ts',
+    expr: "join(process.env.HOME || homedir(), '.gbrain', 'integrations', 'retrieval-reflex', 'heartbeat.jsonl')",
+    reason: LEGACY_FALLBACK_READ,
+  },
+  {
     file: 'src/core/skillopt/held-out.ts',
     expr: "path.join(home, '.gbrain', 'skillopt-captures')",
     reason: ALREADY_HONORS_GBRAIN_HOME,

@@ -61,4 +61,34 @@ describe('buildRetrievalReflexCheck', () => {
       rmSync(gbrainHome, { recursive: true, force: true });
     }
   });
+
+  // A host process running without GBRAIN_HOME (or old code until restart)
+  // writes to the legacy $HOME/.gbrain path; the newest heartbeat wins.
+  const older = new Date(Date.now() - 60_000).toISOString();
+  const newer = new Date(Date.now() - 1_000).toISOString();
+  test.each([
+    { label: 'legacy only', legacyTs: newer, gbrainTs: null, expected: newer },
+    { label: 'both, legacy newer', legacyTs: newer, gbrainTs: older, expected: newer },
+    { label: 'both, GBRAIN_HOME newer', legacyTs: older, gbrainTs: newer, expected: newer },
+  ])('reads the legacy HOME/.gbrain heartbeat too: $label', async ({ legacyTs, gbrainTs, expected }) => {
+    const home = mkdtempSync(join(tmpdir(), 'rr-doctor-legacy-home-'));
+    const gbrainHome = mkdtempSync(join(tmpdir(), 'rr-doctor-legacy-gbhome-'));
+    const writeHeartbeat = (root: string, ts: string) => {
+      const dir = join(root, '.gbrain', 'integrations', 'retrieval-reflex');
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'heartbeat.jsonl'), JSON.stringify({ ts, event: 'inject', pointers: 1 }) + '\n');
+    };
+    writeHeartbeat(home, legacyTs);
+    if (gbrainTs) writeHeartbeat(gbrainHome, gbrainTs);
+    try {
+      await withEnv({ GBRAIN_RETRIEVAL_REFLEX: 'true', HOME: home, GBRAIN_HOME: gbrainHome }, async () => {
+        const c = buildRetrievalReflexCheck(null);
+        expect((c.details as any)?.last_fired).toBe(expected);
+        expect((c.details as any)?.fired_recently).toBe(true);
+      });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(gbrainHome, { recursive: true, force: true });
+    }
+  });
 });

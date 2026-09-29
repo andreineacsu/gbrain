@@ -5,6 +5,7 @@
  * doctor.ts) and buildChecks / doctorReportRemote consume them.
  */
 import { join } from 'path';
+import { homedir } from 'os';
 import { existsSync, readFileSync } from 'fs';
 import { loadConfig } from '../../../core/config.ts';
 import { reflexEnabled, reflexHeartbeatPath } from '../../../core/context/reflex.ts';
@@ -65,6 +66,28 @@ export async function buildMemoryVerbsCheck(): Promise<Check> {
   }
 }
 
+/**
+ * Where the heartbeat writer put the file before it honored GBRAIN_HOME. A
+ * host process still on old code, or one started without GBRAIN_HOME while
+ * the CLI has it, keeps writing here. HOME is read first so tests can
+ * redirect it at runtime (Bun fixes os.homedir() at process start).
+ */
+function legacyReflexHeartbeatPath(): string {
+  return join(process.env.HOME || homedir(), '.gbrain', 'integrations', 'retrieval-reflex', 'heartbeat.jsonl');
+}
+
+/** Last heartbeat ts in the file, or null when absent/unreadable. */
+function readLastHeartbeatTs(hbPath: string): string | null {
+  try {
+    if (!existsSync(hbPath)) return null;
+    const lines = readFileSync(hbPath, 'utf8').trim().split('\n').filter(Boolean);
+    const last = lines.length ? JSON.parse(lines[lines.length - 1]) : null;
+    return last && typeof last.ts === 'string' ? last.ts : null;
+  } catch {
+    return null; // heartbeat unreadable: treat as never fired
+  }
+}
+
 export function buildRetrievalReflexCheck(skillsDir: string | null): Check {
   const name = 'retrieval_reflex_health';
   try {
@@ -82,16 +105,17 @@ export function buildRetrievalReflexCheck(skillsDir: string | null): Check {
       };
     }
 
-    // Heartbeat is the authority for "is it firing".
+    // Heartbeat is the authority for "is it firing". Read the legacy
+    // $HOME/.gbrain file too and keep whichever fired most recently.
     const hbPath = reflexHeartbeatPath();
-    let lastFired: string | null = null;
-    try {
-      if (existsSync(hbPath)) {
-        const lines = readFileSync(hbPath, 'utf8').trim().split('\n').filter(Boolean);
-        const last = lines.length ? JSON.parse(lines[lines.length - 1]) : null;
-        if (last && typeof last.ts === 'string') lastFired = last.ts;
+    const legacyHbPath = legacyReflexHeartbeatPath();
+    let lastFired = readLastHeartbeatTs(hbPath);
+    if (legacyHbPath !== hbPath) {
+      const legacyFired = readLastHeartbeatTs(legacyHbPath);
+      if (legacyFired && (!lastFired || new Date(legacyFired).getTime() > new Date(lastFired).getTime())) {
+        lastFired = legacyFired;
       }
-    } catch { /* heartbeat unreadable — treat as never fired */ }
+    }
     const firedRecently =
       !!lastFired && Date.now() - new Date(lastFired).getTime() < 7 * 24 * 60 * 60 * 1000;
 
