@@ -5,8 +5,12 @@
 // per-row validation failure → JSONL audit, dry-run mode, limit honored.
 
 import { describe, test, expect, beforeEach } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { MarkdownGreenfieldSource } from '../../src/core/ingestion/sources/markdown-greenfield.ts';
 import type { IngestionEvent, IngestionSourceContext } from '../../src/core/ingestion/types.ts';
+import { withEnv } from '../helpers/with-env.ts';
 
 interface FakeFs {
   files: Record<string, string>;
@@ -234,6 +238,35 @@ describe('v0.41 T7: validation failure → JSONL audit', () => {
     // Empty file with no frontmatter → no type → skipped_no_type (not audited)
     expect(src.stats.skipped_no_type).toBe(1);
   });
+});
+
+describe('default auditDir follows the shared audit resolver', () => {
+  const cases: Array<{ name: string; auditOverride: string | undefined; expectedDir: (gbrainHome: string) => string }> = [
+    { name: 'GBRAIN_AUDIT_DIR unset -> <GBRAIN_HOME>/.gbrain/audit', auditOverride: undefined, expectedDir: (h) => join(h, '.gbrain', 'audit') },
+    { name: 'GBRAIN_AUDIT_DIR set -> the override', auditOverride: '/fake/audit-override', expectedDir: () => '/fake/audit-override' },
+  ];
+
+  for (const c of cases) {
+    test(c.name, async () => {
+      const gbrainHome = mkdtempSync(join(tmpdir(), 'greenfield-gbrain-home-'));
+      const osHome = mkdtempSync(join(tmpdir(), 'greenfield-os-home-'));
+      try {
+        const fs = makeFakeFs({
+          [`${REPO}/atoms/2026-05-24/bad.md`]: '---\ntype: atom\ntitle: [unclosed\n---\nbody',
+        });
+        await withEnv({ GBRAIN_HOME: gbrainHome, HOME: osHome, GBRAIN_AUDIT_DIR: c.auditOverride }, async () => {
+          const src = new MarkdownGreenfieldSource({ repoPath: REPO, ...fsOpts(fs) });
+          await src.start(makeCtx());
+        });
+        const auditPaths = Object.keys(fs.audit);
+        expect(auditPaths).toHaveLength(1);
+        expect(auditPaths[0]!.startsWith(c.expectedDir(gbrainHome) + '/')).toBe(true);
+      } finally {
+        rmSync(gbrainHome, { recursive: true, force: true });
+        rmSync(osHome, { recursive: true, force: true });
+      }
+    });
+  }
 });
 
 describe('v0.41 T7: --dry-run mode', () => {

@@ -48,6 +48,7 @@ import { join, relative, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { dataFrontmatter as matter } from '../../data-frontmatter.ts';
 import { computeContentHash } from '../types.ts';
+import { resolveAuditDir } from '../../audit-week-file.ts';
 import type {
   IngestionSource,
   IngestionSourceContext,
@@ -63,7 +64,7 @@ export interface MarkdownGreenfieldOpts {
   dryRun?: boolean;
   /** Limit total files processed (useful for staged testing). */
   limit?: number;
-  /** Audit JSONL output dir (default: ~/.gbrain/audit). */
+  /** Audit JSONL output dir (default: resolveAuditDir()). */
   auditDir?: string;
   /** Test seam: alternative fs read. */
   _readFile?: (path: string) => string;
@@ -113,7 +114,7 @@ export class MarkdownGreenfieldSource implements IngestionSource {
       repoPath: opts.repoPath ?? join(homedir(), 'git', 'brain'),
       dryRun: opts.dryRun ?? false,
       limit: opts.limit,
-      auditDir: opts.auditDir ?? join(homedir(), '.gbrain', 'audit'),
+      auditDir: opts.auditDir ?? resolveAuditDir(),
       _readFile: opts._readFile ?? ((p) => readFileSync(p, 'utf-8')),
       _existsSync: opts._existsSync ?? existsSync,
       _readdirSync: opts._readdirSync ?? ((p) => readdirSync(p)),
