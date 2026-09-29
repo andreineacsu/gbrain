@@ -25,7 +25,7 @@ import { existsSync, mkdirSync, writeFileSync, readFileSync, appendFileSync } fr
 import { join } from 'path';
 import type { Migration, OrchestratorOpts, OrchestratorResult, OrchestratorPhaseResult } from './types.ts';
 import type { BrainEngine } from '../../core/engine.ts';
-import { loadConfig, toEngineConfig } from '../../core/config.ts';
+import { loadConfig, toEngineConfig, gbrainPath } from '../../core/config.ts';
 import { createEngine } from '../../core/engine-factory.ts';
 import { scanBrainSources, type AuditReport } from '../../core/brain-writer.ts';
 
@@ -37,10 +37,7 @@ export function __setTestEngineOverride(engine: BrainEngine | null): void {
   testEngineOverride = engine;
 }
 
-function gbrainDir(): string {
-  return join(process.env.HOME || '', '.gbrain');
-}
-function migrationsDir(): string { return join(gbrainDir(), 'migrations'); }
+function migrationsDir(): string { return gbrainPath('migrations'); }
 function auditReportPath(): string { return join(migrationsDir(), 'v0.22.4-audit.json'); }
 function pendingHostWorkPath(): string { return join(migrationsDir(), 'pending-host-work.jsonl'); }
 
