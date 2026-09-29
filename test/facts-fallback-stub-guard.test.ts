@@ -26,6 +26,8 @@ import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { CROSS_SOURCE_PROVENANCE_PREFIX, writeSingleFact } from '../src/core/facts/write-single.ts';
 import { runExtractFacts } from '../src/core/cycle/extract-facts.ts';
+import { forgetFactInFence } from '../src/core/facts/forget.ts';
+import { buildEntityCard } from '../src/core/verbs/entity-card.ts';
 import { readRecentStubGuardEvents } from '../src/core/facts/stub-guard-audit.ts';
 import { withEnv } from './helpers/with-env.ts';
 
@@ -216,6 +218,7 @@ describe('writeSingleFact × cross-source resolution (#5504)', () => {
   });
 
   afterEach(async () => {
+    await engine.executeRaw(`DELETE FROM fact_withdrawals WHERE source_id = 'g-conn'`);
     await engine.executeRaw(`DELETE FROM sources WHERE id = 'c-fed'`);
     await engine.executeRaw(`DELETE FROM pages WHERE source_id = 'g-conn' AND slug = 'people/felicia-example'`);
     rmSync(connDir, { recursive: true, force: true });
@@ -285,6 +288,30 @@ describe('writeSingleFact × cross-source resolution (#5504)', () => {
     const events = await auditEvents();
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ slug: 'felicia-example', source_id: 'g-conn', reason: 'unprefixed' });
+  });
+
+  // Withdrawals are subject-scoped on the resolved slug. For a cross-source
+  // row that slug names a page in another source, so forget and the
+  // re-extract check must both key on it, or the forgotten commitment
+  // comes back on the next extraction.
+  test('forget withdraws the cross-source fact for its subject only: off the card, re-extract refused, another subject still inserts', async () => {
+    const commitmentsOnCard = async () => {
+      const res = await buildEntityCard(engine, 'default', 'people/felicia-example', { remote: false });
+      expect(res.found).toBe(true);
+      return res.card!.open_threads.map((t) => t.text).filter((t) => t === 'Promised the widget-co deck');
+    };
+    const written = await connectorWrite('Felicia Example');
+    expect(await commitmentsOnCard()).toEqual(['Promised the widget-co deck']);
+
+    const forgotten = await forgetFactInFence(engine, written.id, { sourceId: 'g-conn' });
+
+    expect(forgotten).toMatchObject({ ok: true, path: 'legacy_db' });
+    expect(await engine.executeRaw(`SELECT source_id, subject FROM fact_withdrawals`))
+      .toEqual([{ source_id: 'g-conn', subject: 'people/felicia-example' }]);
+    expect(await commitmentsOnCard()).toEqual([]);
+    await expect(connectorWrite('Felicia Example')).rejects.toThrow('fact_withdrawn');
+    const other = await connectorWrite('Acme Example');
+    expect(other).toMatchObject({ status: 'inserted', entity_slug: 'companies/acme-example' });
   });
 
   test('entity page in the connector source itself: fence written as today', async () => {
