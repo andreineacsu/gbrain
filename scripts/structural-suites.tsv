@@ -216,11 +216,12 @@ test/migrate.test.ts	resolveSessionTimeouts — env var overrides	5	readFileSync
 test/migrate.test.ts	v117 — context_volunteer_events_table	5	readFileSync
 test/migration-resume.test.ts	Bug 3 — orchestrator no longer writes the ledger directly	6	bun-file
 test/migrations-v0_11_0.test.ts	AGENTS.md marker injection	6	readFileSync
+test/migrations-v0_11_0.test.ts	GBRAIN_HOME resolution (#5549)	2	readFileSync
 test/migrations-v0_11_0.test.ts	cron manifest rewrite — gbrain builtins only	8	readFileSync
 test/migrations-v0_14_0.test.ts	Bug 5 + Bug 8 — v0_14_0 module shape	3	bun-file
 test/migrations-v0_14_0.test.ts	Bug 5 — Phase B host-work entry dedup	2	readFileSync
 test/migrations-v0_14_0.test.ts	Bug 8 — max_stalled default bumped in schema files	3	bun-file
-test/migrations-v0_22_4.test.ts	v0.22.4 migration (B11)	9	readFileSync
+test/migrations-v0_22_4.test.ts	v0.22.4 migration (B11)	10	readFileSync
 test/model-pricing.test.ts	DRIFT GUARD — derived views stay equal to canonical (re-hardcode trip-wire)	4	readFileSync
 test/model-pricing.test.ts	no heavy import (cycle guard)	1	readFileSync
 test/models-doctor-embed.test.ts	models doctor — embedding reachability probe (v0.40.x)	3	readFileSync
@@ -298,7 +299,7 @@ test/skillpack-check-report-only.test.ts	(file-level)	2	readFileSync
 test/skillpack-harness-bridge.test.ts	review-driven hardening (ship pre-landing findings)	5	readFileSync
 test/skillpack-harvest.test.ts	addToBundleManifest	1	readFileSync
 test/skillpack-harvest.test.ts	runHarvest — happy path	2	readFileSync
-test/skillpack-harvest.test.ts	runHarvest — privacy linter integration (T7)	2	readFileSync
+test/skillpack-harvest.test.ts	runHarvest — privacy linter integration (T7)	3	readFileSync
 test/skillpack-init-brain-pack.test.ts	runInitBrainPack	5	readFileSync
 test/skillpack-init-pack.test.ts	runInitScaffold — cathedral default	6	readFileSync
 test/skillpack-install.test.ts	managed-block receipt + cumulative semantics (v0.19)	4	readFileSync
