@@ -1,9 +1,10 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { withEnv } from './helpers/with-env.ts';
 import { checkUpgradeErrors } from '../src/commands/doctor.ts';
+import { recordUpgradeError } from '../src/commands/upgrade.ts';
 import { LATEST_VERSION } from '../src/core/migrate.ts';
 import { VERSION } from '../src/version.ts';
 
@@ -146,6 +147,30 @@ describe('checkUpgradeErrors', () => {
       expect(check?.message).toContain('2026-08-22');
       expect(check?.message).not.toContain('2026-08-20');
     });
+  });
+
+  test('#5549: a record written by `gbrain upgrade` lands in GBRAIN_HOME, where doctor reads it', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'gbrain-upgrade-errors-home-'));
+    try {
+      await withHome(async (gbrainHome) => {
+        await withEnv({ HOME: home }, async () => {
+          recordUpgradeError({
+            phase: 'post-upgrade',
+            fromVersion: '0.1.0.0',
+            toVersion: '999.999.999.999',
+            error: 'boom',
+            hint: 'gbrain apply-migrations --yes',
+          });
+          expect(existsSync(join(gbrainHome, '.gbrain', 'upgrade-errors.jsonl'))).toBe(true);
+          expect(existsSync(join(home, '.gbrain'))).toBe(false);
+          const check = await checkUpgradeErrors(null);
+          expect(check?.status).toBe('warn');
+          expect(check?.message).toContain('0.1.0.0 → 999.999.999.999');
+        });
+      });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test('malformed JSON on the last line → null (best-effort, does not throw)', async () => {

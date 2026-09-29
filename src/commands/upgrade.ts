@@ -3,6 +3,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync, rea
 import { basename, join, dirname, resolve } from 'path';
 import { parseSemver, semverGt } from '../core/semver.ts';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
+import { gbrainPath } from '../core/config.ts';
 import { VERSION } from '../version.ts';
 
 const GBRAIN_GITHUB_REPO = 'garrytan/gbrain';
@@ -279,7 +280,7 @@ function verifyUpgrade(): string {
 }
 
 /**
- * Append a structured record to ~/.gbrain/upgrade-errors.jsonl when a
+ * Append a structured record to the gbrain home's upgrade-errors.jsonl when a
  * best-effort phase of the upgrade fails (e.g., `gbrain post-upgrade`
  * silently bombing). Without this trail, users end up with half-upgraded
  * brains and no signal. `gbrain doctor` reads this file and surfaces the
@@ -293,9 +294,8 @@ export function recordUpgradeError(record: {
   hint: string;
 }): void {
   try {
-    const dir = join(process.env.HOME || '', '.gbrain');
-    mkdirSync(dir, { recursive: true });
-    const path = join(dir, 'upgrade-errors.jsonl');
+    const path = gbrainPath('upgrade-errors.jsonl');
+    mkdirSync(dirname(path), { recursive: true });
     const line = JSON.stringify({
       ts: new Date().toISOString(),
       phase: record.phase,
@@ -311,11 +311,15 @@ export function recordUpgradeError(record: {
   }
 }
 
+/** Where `gbrain upgrade` records the prior version for `post-upgrade`. */
+export function upgradeStatePath(): string {
+  return gbrainPath('upgrade-state.json');
+}
+
 function saveUpgradeState(oldVersion: string, newVersion: string) {
   try {
-    const dir = join(process.env.HOME || '', '.gbrain');
-    mkdirSync(dir, { recursive: true });
-    const statePath = join(dir, 'upgrade-state.json');
+    const statePath = upgradeStatePath();
+    mkdirSync(dirname(statePath), { recursive: true });
     const state: Record<string, unknown> = existsSync(statePath)
       ? JSON.parse(readFileSync(statePath, 'utf-8'))
       : {};
@@ -429,7 +433,7 @@ export async function runPostUpgrade(args: string[] = []): Promise<void> {
   await applySelfUpgradeSetup(noAutopilotInstall);
   // Cosmetic: print feature pitches for migrations newer than the prior binary.
   try {
-    const statePath = join(process.env.HOME || '', '.gbrain', 'upgrade-state.json');
+    const statePath = upgradeStatePath();
     if (existsSync(statePath)) {
       const state = JSON.parse(readFileSync(statePath, 'utf-8'));
       const from = state?.last_upgrade?.from;
