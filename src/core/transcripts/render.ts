@@ -28,11 +28,9 @@
  */
 
 import { safeDump } from 'js-yaml';
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { DEFAULT_BYTES_BLOCK } from '../content-sanity.ts';
 import { applyRedaction, planRedaction, type EchoDictionary, type RedactionPlan } from '../secret-scan.ts';
-import { loadPatterns } from '../skillpack/harvest-lint.ts';
+import { defaultPrivatePatternsPath, loadPatterns } from '../skillpack/harvest-lint.ts';
 import { sanitizeForJsonb } from '../batch-rows.ts';
 import { ensureWellFormed, truncateUtf8 } from '../text-safe.ts';
 import { BUILTIN_PATTERNS } from '../conversation-parser/builtins.ts';
@@ -70,9 +68,9 @@ export const TRANSCRIPT_IMPORT_VERSION = 1;
 
 // ── Redaction ────────────────────────────────────────────────────────────────
 
-/** Default user-pattern file — the same convention skillpack harvest uses. */
+/** Default user-pattern file, from the same resolver skillpack harvest uses. */
 export function defaultUserPatternsPath(): string {
-  return join(homedir(), '.gbrain', 'harvest-private-patterns.txt');
+  return defaultPrivatePatternsPath();
 }
 
 /**

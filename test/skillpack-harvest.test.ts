@@ -15,6 +15,7 @@
 
 import { describe, expect, it, afterEach } from 'bun:test';
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -27,6 +28,7 @@ import { join } from 'path';
 import { tmpdir } from 'os';
 
 import { HarvestError, runHarvest, addToBundleManifest } from '../src/core/skillpack/harvest.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 const created: string[] = [];
 afterEach(() => {
@@ -210,6 +212,26 @@ describe('runHarvest — privacy linter integration (T7)', () => {
     // Manifest NOT updated.
     const manifest = JSON.parse(readFileSync(join(gbrainRoot, 'openclaw.plugin.json'), 'utf-8'));
     expect(manifest.skills).not.toContain('skills/my-fork-skill');
+  });
+
+  it('default patterns file resolves under GBRAIN_HOME, not the OS home', async () => {
+    const hostRoot = scratchHost();
+    const gbrainRoot = scratchGbrain();
+    appendFileSync(join(hostRoot, 'skills', 'my-fork-skill', 'SKILL.md'), 'Mentions AcmeExampleSecret.\n');
+    const gbrainHome = mkdtempSync(join(tmpdir(), 'sp-h-home-'));
+    created.push(gbrainHome);
+    mkdirSync(join(gbrainHome, '.gbrain'), { recursive: true });
+    writeFileSync(join(gbrainHome, '.gbrain', 'harvest-private-patterns.txt'), '\\bAcmeExampleSecret\\b\n');
+    const osHome = mkdtempSync(join(tmpdir(), 'sp-h-oshome-'));
+    created.push(osHome);
+
+    const result = await withEnv({ GBRAIN_HOME: gbrainHome, HOME: osHome }, () =>
+      runHarvest({ slug: 'my-fork-skill', hostRepoRoot: hostRoot, gbrainRoot }),
+    );
+
+    expect(result.status).toBe('lint_failed');
+    expect(result.lintHits.some(h => h.includes('AcmeExampleSecret'))).toBe(true);
+    expect(existsSync(join(gbrainRoot, 'skills', 'my-fork-skill'))).toBe(false);
   });
 
   it('--no-lint bypasses the linter (editorial workflow opt-out)', () => {

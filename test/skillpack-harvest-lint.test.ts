@@ -13,7 +13,7 @@
  */
 
 import { describe, expect, it, afterEach } from 'bun:test';
-import { mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 
@@ -21,9 +21,11 @@ import {
   DEFAULT_PRIVATE_PATTERNS,
   PrivacyLintConfigError,
   PrivacyLintError,
+  defaultPrivatePatternsPath,
   loadPatterns,
   runPrivacyLint,
 } from '../src/core/skillpack/harvest-lint.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 const created: string[] = [];
 afterEach(() => {
@@ -169,4 +171,33 @@ describe('runPrivacyLint — user patterns file', () => {
     expect(patterns.some(p => p.source === 'Unique')).toBe(true);
     expect(patterns.some(p => p.source === 'AlsoUnique')).toBe(true);
   });
+});
+
+describe('defaultPrivatePatternsPath -- resolves under GBRAIN_HOME, legacy fallback', () => {
+  const cases: Array<{ name: string; current: boolean; legacy: boolean; expected: 'current' | 'legacy' }> = [
+    { name: 'only the GBRAIN_HOME file exists', current: true, legacy: false, expected: 'current' },
+    { name: 'neither file exists', current: false, legacy: false, expected: 'current' },
+    { name: 'only the legacy homedir file exists', current: false, legacy: true, expected: 'legacy' },
+    { name: 'both files exist', current: true, legacy: true, expected: 'current' },
+  ];
+
+  for (const c of cases) {
+    it(`${c.name} -> ${c.expected}`, async () => {
+      const gbrainHome = scratch();
+      const legacyDir = scratch();
+      const currentPath = join(gbrainHome, '.gbrain', 'harvest-private-patterns.txt');
+      const legacyPath = join(legacyDir, 'harvest-private-patterns.txt');
+      if (c.current) {
+        mkdirSync(join(gbrainHome, '.gbrain'), { recursive: true });
+        writeFileSync(currentPath, 'CurrentPattern\n');
+      }
+      if (c.legacy) writeFileSync(legacyPath, 'LegacyPattern\n');
+
+      await withEnv({ GBRAIN_HOME: gbrainHome, HOME: scratch() }, () => {
+        expect(defaultPrivatePatternsPath(legacyPath)).toBe(
+          c.expected === 'current' ? currentPath : legacyPath,
+        );
+      });
+    });
+  }
 });

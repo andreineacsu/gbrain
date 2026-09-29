@@ -33,12 +33,11 @@ import {
   statSync,
   writeFileSync,
 } from 'fs';
-import { homedir } from 'os';
 import { dirname, join, relative } from 'path';
 
 import { copyArtifacts, walkSourceDir } from './copy.ts';
 import { loadSkillSources } from './bundle.ts';
-import { runPrivacyLint, PrivacyLintError } from './harvest-lint.ts';
+import { defaultPrivatePatternsPath, runPrivacyLint, PrivacyLintError } from './harvest-lint.ts';
 
 export interface HarvestOptions {
   /** Slug of the skill to harvest (e.g. "my-fork-skill"). */
@@ -51,7 +50,7 @@ export interface HarvestOptions {
   noLint?: boolean;
   /** Dry-run: preview, no writes. */
   dryRun?: boolean;
-  /** Custom private-patterns file (defaults to ~/.gbrain/harvest-private-patterns.txt). */
+  /** Custom private-patterns file (defaults to defaultPrivatePatternsPath()). */
   privatePatternsPath?: string;
   /** Allow overwriting an existing gbrain/skills/<slug>/ tree. */
   overwriteLocal?: boolean;
@@ -90,11 +89,6 @@ export class HarvestError extends Error {
 }
 
 const PLUGIN_JSON = 'openclaw.plugin.json';
-const DEFAULT_PRIVATE_PATTERNS_PATH = join(
-  homedir(),
-  '.gbrain',
-  'harvest-private-patterns.txt',
-);
 
 export function runHarvest(opts: HarvestOptions): HarvestResult {
   const dryRun = opts.dryRun ?? false;
@@ -179,7 +173,7 @@ export function runHarvest(opts: HarvestOptions): HarvestResult {
     try {
       runPrivacyLint(
         filesCopied,
-        opts.privatePatternsPath ?? DEFAULT_PRIVATE_PATTERNS_PATH,
+        opts.privatePatternsPath ?? defaultPrivatePatternsPath(),
       );
     } catch (err) {
       if (err instanceof PrivacyLintError) {

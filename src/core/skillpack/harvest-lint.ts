@@ -1,7 +1,7 @@
 /**
  * skillpack/harvest-lint.ts — privacy linter for `gbrain skillpack harvest`.
  *
- * Reads `~/.gbrain/harvest-private-patterns.txt` (one regex per line,
+ * Reads `<gbrain home>/harvest-private-patterns.txt` (one regex per line,
  * user-maintained) plus a small built-in default list of patterns that
  * commonly leak when harvesting from a personal fork into gbrain core:
  *
@@ -19,6 +19,9 @@
  */
 
 import { existsSync, readFileSync } from 'fs';
+import { homedir } from 'os';
+import { join } from 'path';
+import { gbrainPath } from '../config.ts';
 
 export class PrivacyLintError extends Error {
   constructor(
@@ -45,6 +48,25 @@ export const DEFAULT_PRIVATE_PATTERNS: string[] = [
   // Slack channel: whitespace/line-start, then `#alnum-with-dashes` (len ≥ 3).
   String.raw`(?:^|\s)#[a-z0-9][a-z0-9_\-]{2,}\b`,
 ];
+
+const PRIVATE_PATTERNS_FILENAME = 'harvest-private-patterns.txt';
+
+/**
+ * Default user-pattern file, resolved per call so GBRAIN_HOME is honored.
+ * Shared by skillpack harvest and the transcripts import lane.
+ *
+ * Falls back to the legacy `homedir()/.gbrain` copy when only that one
+ * exists: these are redaction patterns, so a GBRAIN_HOME user whose file
+ * predates GBRAIN_HOME support must not silently lose them (fail closed).
+ * `legacyPath` is a test seam.
+ */
+export function defaultPrivatePatternsPath(
+  legacyPath: string = join(homedir(), '.gbrain', PRIVATE_PATTERNS_FILENAME),
+): string {
+  const current = gbrainPath(PRIVATE_PATTERNS_FILENAME);
+  if (!existsSync(current) && existsSync(legacyPath)) return legacyPath;
+  return current;
+}
 
 /**
  * Load patterns: user file (if present) + defaults. Each pattern
