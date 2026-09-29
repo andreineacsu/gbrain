@@ -141,7 +141,7 @@ Missing Files (need restore):
   media/x/tweet-0987654321
   ... and 47 more
 
-Use: gbrain export --restore-only --source default --repo "/data/brain"
+Use: gbrain export --restore-only --source default --repo /data/brain
 
 Configuration:
 --------------
@@ -162,7 +162,8 @@ exactly when that export would restore it: the page is under a `db_only`
 directory (even one nested in a `db_tracked` directory) and its recorded source
 file, else `<slug>.md`, is absent from the repo. The `Use:` command therefore
 writes exactly the listed files, into `--dir` (default `./export` under the
-current directory, not into the repo). A page whose recorded path is unsafe
+current directory, not into the repo). The repo path is shell-quoted, so the
+line is safe to paste. A page whose recorded path is unsafe
 makes export refuse the whole restore, so status names it under warnings and
 prints that refusal instead of a command. When the source rule refuses (for example, a `--repo`
 that no single active source owns, or one registered only to an archived

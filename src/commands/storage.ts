@@ -5,6 +5,7 @@ import type { StorageConfig, StorageTier } from '../core/storage-config.ts';
 import { walkBrainRepo, type DiskFileEntry } from '../core/disk-walk.ts';
 import { getDefaultSourcePath, isResolverUserError, resolveSourceForRepoPath } from '../core/source-resolver.ts';
 import { resolveRestoreTarget, restoreFilePath, RestoreTargetError } from '../core/restore-target.ts';
+import { shellQuote } from '../core/shell-quote.ts';
 
 /**
  * Distinct nominal types for the two tier-keyed numeric maps. Both shapes
@@ -308,7 +309,9 @@ export function formatStorageStatusHuman(result: StorageStatusResult): string {
       lines.push(`Cannot suggest a restore command: ${result.restoreRefusal}`);
     } else {
       const source = result.restoreSource ? ` --source ${result.restoreSource}` : '';
-      lines.push(`Use: gbrain export --restore-only${source} --repo "${result.repoPath}"`);
+      // Shell-quoted: the line is meant to be pasted, and a repo path may hold
+      // quotes, `$(...)` or backticks.
+      lines.push(`Use: gbrain export --restore-only${source} --repo ${shellQuote(result.repoPath ?? '')}`);
     }
   }
 

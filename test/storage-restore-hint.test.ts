@@ -96,9 +96,31 @@ async function storageStatus(args: string[]): Promise<{ missing: string[]; warni
 }
 
 /** Run the hint's command into `out`; the page slugs it restored. */
+/** Split a POSIX shell command line: bare words, '...' and backslash escapes. */
+function shellWords(line: string): string[] {
+  const words: string[] = [];
+  let word: string | null = null;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === ' ') {
+      if (word !== null) words.push(word);
+      word = null;
+    } else if (c === "'") {
+      const end = line.indexOf("'", i + 1);
+      word = (word ?? '') + line.slice(i + 1, end);
+      i = end;
+    } else if (c === '\\') {
+      word = (word ?? '') + line[++i];
+    } else {
+      word = (word ?? '') + c;
+    }
+  }
+  if (word !== null) words.push(word);
+  return words;
+}
+
 async function followHint(hint: string): Promise<string[]> {
-  const argv = hint.replace(/^Use: gbrain export /, '').match(/"[^"]*"|\S+/g)!
-    .map((token) => token.replace(/^"|"$/g, ''));
+  const argv = shellWords(hint.replace(/^Use: gbrain export /, ''));
   logged = [];
   await runExport(engine, [...argv, '--dir', out]);
   const files: string[] = [];
@@ -247,5 +269,19 @@ describe('storage status names a restore command that restores its list (#5532)'
       expect(logged.join('\n')).toContain(`Export failed: ${reason}`);
     });
   });
-});
 
+  test('a repo path with shell metacharacters round-trips through the quoted hint', async () => {
+    const oddRepo = join(dir, `b"r$(touch pwned)\`id\`'s repo`);
+    mkdirSync(oddRepo);
+    writeFileSync(join(oddRepo, 'gbrain.yml'), 'storage:\n  db_tracked: []\n  db_only:\n    - media/x/\n');
+    await engine.executeRaw("DELETE FROM sources WHERE id = 'connector-a'");
+    await engine.executeRaw("UPDATE sources SET local_path = $1 WHERE id = 'default'", [oddRepo]);
+    await dbOnlyPage('media/x/default-clip', 'default');
+
+    await withEnv({ GBRAIN_SOURCE: undefined }, async () => {
+      const status = await storageStatus(['--repo', oddRepo]);
+      expect(status.hint).toEndWith(`--repo '${oddRepo.replace(/'/g, "'\\''")}'`);
+      expect(await followHint(status.hint)).toEqual(['media/x/default-clip']);
+    });
+  });
+});
