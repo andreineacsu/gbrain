@@ -1,4 +1,4 @@
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -86,4 +86,35 @@ export async function withEnv<T>(
  */
 export function emptyHome(): string {
   return mkdtempSync(join(tmpdir(), 'gbrain-nokey-home-'));
+}
+
+/**
+ * Run a callback with HOME and GBRAIN_HOME pointed at two distinct fresh temp
+ * dirs (plus any `extraEnv` overrides), then remove both dirs via try/finally.
+ * Use it for "this path follows GBRAIN_HOME, not HOME" assertions.
+ *
+ * Why two distinct dirs: Bun fixes `os.homedir()` at process start, so HOME
+ * alone does not redirect gbrain state, and GBRAIN_HOME is a PARENT dir with
+ * `.gbrain` appended. A path still derived from HOME lands in `home`, one from
+ * `gbrainPath()` lands in `gbrainHome`, and the test can tell them apart. Run
+ * any post-call filesystem assertions inside `fn`: both dirs are removed
+ * before `withSplitHomes` resolves.
+ *
+ * Use:
+ *   await withSplitHomes(({ home, gbrainHome }) => {
+ *     expect(upgradeStatePath()).toBe(join(gbrainHome, '.gbrain', 'upgrade-state.json'));
+ *   }, { GBRAIN_AUDIT_DIR: undefined });
+ */
+export async function withSplitHomes<T>(
+  fn: (dirs: { home: string; gbrainHome: string }) => T | Promise<T>,
+  extraEnv: Record<string, string | undefined> = {},
+): Promise<T> {
+  const home = mkdtempSync(join(tmpdir(), 'gbrain-split-home-'));
+  const gbrainHome = mkdtempSync(join(tmpdir(), 'gbrain-split-gbhome-'));
+  try {
+    return await withEnv({ ...extraEnv, HOME: home, GBRAIN_HOME: gbrainHome }, () => fn({ home, gbrainHome }));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(gbrainHome, { recursive: true, force: true });
+  }
 }

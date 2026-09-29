@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MarkdownGreenfieldSource } from '../../src/core/ingestion/sources/markdown-greenfield.ts';
 import type { IngestionEvent, IngestionSourceContext } from '../../src/core/ingestion/types.ts';
-import { withEnv } from '../helpers/with-env.ts';
+import { withSplitHomes } from '../helpers/with-env.ts';
 
 interface FakeFs {
   files: Record<string, string>;
@@ -287,23 +287,16 @@ describe('default auditDir follows the shared audit resolver', () => {
 
   for (const c of cases) {
     test(c.name, async () => {
-      const gbrainHome = mkdtempSync(join(tmpdir(), 'greenfield-gbrain-home-'));
-      const osHome = mkdtempSync(join(tmpdir(), 'greenfield-os-home-'));
-      try {
-        const fs = makeFakeFs({
-          [`${REPO}/atoms/2026-05-24/bad.md`]: '---\ntype: atom\ntitle: [unclosed\n---\nbody',
-        });
-        await withEnv({ GBRAIN_HOME: gbrainHome, HOME: osHome, GBRAIN_AUDIT_DIR: c.auditOverride }, async () => {
-          const src = new MarkdownGreenfieldSource({ repoPath: REPO, ...fsOpts(fs) });
-          await src.start(makeCtx());
-        });
+      const fs = makeFakeFs({
+        [`${REPO}/atoms/2026-05-24/bad.md`]: '---\ntype: atom\ntitle: [unclosed\n---\nbody',
+      });
+      await withSplitHomes(async ({ gbrainHome }) => {
+        const src = new MarkdownGreenfieldSource({ repoPath: REPO, ...fsOpts(fs) });
+        await src.start(makeCtx());
         const auditPaths = Object.keys(fs.audit);
         expect(auditPaths).toHaveLength(1);
         expect(auditPaths[0]!.startsWith(c.expectedDir(gbrainHome) + '/')).toBe(true);
-      } finally {
-        rmSync(gbrainHome, { recursive: true, force: true });
-        rmSync(osHome, { recursive: true, force: true });
-      }
+      }, { GBRAIN_AUDIT_DIR: c.auditOverride });
     });
   }
 });

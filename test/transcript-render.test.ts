@@ -5,8 +5,7 @@
  * embed-skip-driven part splitting with overlap.
  */
 import { describe, test, expect } from 'bun:test';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { safeLoad } from 'js-yaml';
 
@@ -24,7 +23,7 @@ import { parseConversation } from '../src/core/conversation-parser/parse.ts';
 import { FACTS_FENCE_BEGIN, FACTS_FENCE_END, parseFactsFence, stripFactsFence } from '../src/core/facts-fence.ts';
 import { TAKES_FENCE_BEGIN, parseTakesFence } from '../src/core/takes-fence.ts';
 import type { ParsedSession } from '../src/core/transcripts/types.ts';
-import { withEnv } from './helpers/with-env.ts';
+import { withSplitHomes } from './helpers/with-env.ts';
 
 function session(messages: ParsedSession['messages'], meta: Partial<ParsedSession['meta']> = {}): ParsedSession {
   return {
@@ -449,18 +448,11 @@ describe('redactSession — the echo dictionary spans every field of the session
 
 describe('defaultUserPatternsPath -- follows GBRAIN_HOME', () => {
   test('returns the patterns file under GBRAIN_HOME when it exists there', async () => {
-    const gbrainHome = mkdtempSync(join(tmpdir(), 'render-gbrain-home-'));
-    const osHome = mkdtempSync(join(tmpdir(), 'render-os-home-'));
-    try {
+    await withSplitHomes(({ gbrainHome }) => {
       const expected = join(gbrainHome, '.gbrain', 'harvest-private-patterns.txt');
       mkdirSync(join(gbrainHome, '.gbrain'), { recursive: true });
       writeFileSync(expected, 'AcmeExample\n');
-      await withEnv({ GBRAIN_HOME: gbrainHome, HOME: osHome }, () => {
-        expect(defaultUserPatternsPath()).toBe(expected);
-      });
-    } finally {
-      rmSync(gbrainHome, { recursive: true, force: true });
-      rmSync(osHome, { recursive: true, force: true });
-    }
+      expect(defaultUserPatternsPath()).toBe(expected);
+    });
   });
 });

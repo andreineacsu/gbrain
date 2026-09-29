@@ -6,7 +6,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildRetrievalReflexCheck } from '../src/commands/doctor.ts';
-import { withEnv } from './helpers/with-env.ts';
+import { withEnv, withSplitHomes } from './helpers/with-env.ts';
 
 describe('buildRetrievalReflexCheck', () => {
   test('disabled via env → ok intentional-off, names the right check', async () => {
@@ -43,23 +43,16 @@ describe('buildRetrievalReflexCheck', () => {
   });
 
   test('reads the heartbeat under GBRAIN_HOME, not $HOME/.gbrain', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'rr-doctor-home-'));
-    const gbrainHome = mkdtempSync(join(tmpdir(), 'rr-doctor-gbhome-'));
-    // A ts no real heartbeat carries, so a reader pointed elsewhere cannot match it.
-    const ts = new Date(Date.now() - 1234).toISOString();
-    const hbDir = join(gbrainHome, '.gbrain', 'integrations', 'retrieval-reflex');
-    mkdirSync(hbDir, { recursive: true });
-    writeFileSync(join(hbDir, 'heartbeat.jsonl'), JSON.stringify({ ts, event: 'inject', pointers: 1 }) + '\n');
-    try {
-      await withEnv({ GBRAIN_RETRIEVAL_REFLEX: 'true', HOME: home, GBRAIN_HOME: gbrainHome }, async () => {
-        const c = buildRetrievalReflexCheck(null);
-        expect((c.details as any)?.last_fired).toBe(ts);
-        expect((c.details as any)?.fired_recently).toBe(true);
-      });
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-      rmSync(gbrainHome, { recursive: true, force: true });
-    }
+    await withSplitHomes(({ gbrainHome }) => {
+      // A ts no real heartbeat carries, so a reader pointed elsewhere cannot match it.
+      const ts = new Date(Date.now() - 1234).toISOString();
+      const hbDir = join(gbrainHome, '.gbrain', 'integrations', 'retrieval-reflex');
+      mkdirSync(hbDir, { recursive: true });
+      writeFileSync(join(hbDir, 'heartbeat.jsonl'), JSON.stringify({ ts, event: 'inject', pointers: 1 }) + '\n');
+      const c = buildRetrievalReflexCheck(null);
+      expect((c.details as any)?.last_fired).toBe(ts);
+      expect((c.details as any)?.fired_recently).toBe(true);
+    }, { GBRAIN_RETRIEVAL_REFLEX: 'true' });
   });
 
   // A host process running without GBRAIN_HOME (or old code until restart)
@@ -71,24 +64,17 @@ describe('buildRetrievalReflexCheck', () => {
     { label: 'both, legacy newer', legacyTs: newer, gbrainTs: older, expected: newer },
     { label: 'both, GBRAIN_HOME newer', legacyTs: older, gbrainTs: newer, expected: newer },
   ])('reads the legacy HOME/.gbrain heartbeat too: $label', async ({ legacyTs, gbrainTs, expected }) => {
-    const home = mkdtempSync(join(tmpdir(), 'rr-doctor-legacy-home-'));
-    const gbrainHome = mkdtempSync(join(tmpdir(), 'rr-doctor-legacy-gbhome-'));
     const writeHeartbeat = (root: string, ts: string) => {
       const dir = join(root, '.gbrain', 'integrations', 'retrieval-reflex');
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, 'heartbeat.jsonl'), JSON.stringify({ ts, event: 'inject', pointers: 1 }) + '\n');
     };
-    writeHeartbeat(home, legacyTs);
-    if (gbrainTs) writeHeartbeat(gbrainHome, gbrainTs);
-    try {
-      await withEnv({ GBRAIN_RETRIEVAL_REFLEX: 'true', HOME: home, GBRAIN_HOME: gbrainHome }, async () => {
-        const c = buildRetrievalReflexCheck(null);
-        expect((c.details as any)?.last_fired).toBe(expected);
-        expect((c.details as any)?.fired_recently).toBe(true);
-      });
-    } finally {
-      rmSync(home, { recursive: true, force: true });
-      rmSync(gbrainHome, { recursive: true, force: true });
-    }
+    await withSplitHomes(({ home, gbrainHome }) => {
+      writeHeartbeat(home, legacyTs);
+      if (gbrainTs) writeHeartbeat(gbrainHome, gbrainTs);
+      const c = buildRetrievalReflexCheck(null);
+      expect((c.details as any)?.last_fired).toBe(expected);
+      expect((c.details as any)?.fired_recently).toBe(true);
+    }, { GBRAIN_RETRIEVAL_REFLEX: 'true' });
   });
 });
