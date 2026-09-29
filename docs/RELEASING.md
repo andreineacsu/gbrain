@@ -232,7 +232,7 @@ Why: `gbrain upgrade` runs `gbrain post-upgrade` which runs `gbrain apply-migrat
 This chain has a known weak link — `upgrade.ts` catches post-upgrade failures as
 best-effort (so the binary still works). When that chain silently fails, users end
 up with half-upgraded brains. The self-repair block gives them a paste-ready
-recovery path; the v0.13+ `~/.gbrain/upgrade-errors.jsonl` trail + `gbrain doctor`
+recovery path; the v0.13+ `$GBRAIN_HOME/.gbrain/upgrade-errors.jsonl` (or `~/.gbrain/upgrade-errors.jsonl` when GBRAIN_HOME is unset) trail + `gbrain doctor`
 integration close the loop.
 
 Template (adapt the verify commands per release):
@@ -258,7 +258,7 @@ warns about a partial migration:
 4. **If any step fails or the numbers look wrong,** please file an issue:
    https://github.com/garrytan/gbrain/issues with:
    - output of `gbrain doctor`
-   - contents of `~/.gbrain/upgrade-errors.jsonl` if it exists
+   - contents of `$GBRAIN_HOME/.gbrain/upgrade-errors.jsonl` (or `~/.gbrain/upgrade-errors.jsonl` when GBRAIN_HOME is unset) if it exists
    - which step broke
 
    This feedback loop is how the gbrain maintainers find fragile upgrade paths. Thank you.
@@ -345,14 +345,14 @@ orchestrator should be doing that edit, not the user.
 data file the worker would exec is an RCE surface. Those get registered in
 the host's own repo via the plugin contract (`docs/guides/plugin-handlers.md`);
 the migration orchestrator emits a structured TODO to
-`~/.gbrain/migrations/pending-host-work.jsonl` + the host agent walks the
+`$GBRAIN_HOME/.gbrain/migrations/pending-host-work.jsonl` (or `~/.gbrain/migrations/pending-host-work.jsonl` when GBRAIN_HOME is unset) + the host agent walks the
 TODOs using `skills/migrations/v0.11.0.md` — stays host-agnostic, still
 canonical.
 
 
 ## Schema state tracking
 
-`~/.gbrain/upgrade-state.json` tracks which recommended schema directories the user
+`$GBRAIN_HOME/.gbrain/upgrade-state.json` (or `~/.gbrain/upgrade-state.json` when GBRAIN_HOME is unset) tracks which recommended schema directories the user
 adopted, declined, or added custom. The auto-update agent
 (`docs/guides/upgrades-auto-update.md`) reads this during upgrades to suggest new schema additions without re-suggesting
 things the user already declined. The setup skill writes the initial state during

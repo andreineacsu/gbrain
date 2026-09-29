@@ -135,7 +135,7 @@ full_upgrade():
       read_and_execute(migration)  // in order, don't skip
 
   // Step 5: Schema sync — suggest new, respect declined
-  state = read("~/.gbrain/upgrade-state.json")
+  state = read("${GBRAIN_HOME:-$HOME}/.gbrain/upgrade-state.json")
   for recommendation in new_schema_recommendations:
     if recommendation not in state.declined:
       suggest_to_user(recommendation)
@@ -170,9 +170,9 @@ Prompt: "Run gbrain check-update --json. If update_available is true,
 ### Frequency Preferences
 
 Default: daily. Store in agent memory as `gbrain_update_frequency: daily|weekly|off`.
-Also persist in `~/.gbrain/upgrade-state.json` so it survives agent context resets
-(the runtime's own bookkeeping lives beside it as `~/.gbrain/last-update-check`
-and `~/.gbrain/update-snoozed`).
+Also persist in `$GBRAIN_HOME/.gbrain/upgrade-state.json` (or `~/.gbrain/upgrade-state.json` when GBRAIN_HOME is unset) so it survives agent context resets
+(the runtime's own bookkeeping lives beside it as `last-update-check`
+and `update-snoozed`).
 
 ### Standalone Skillpack Users
 

@@ -546,7 +546,7 @@ the full recipe.
 ### 5. Migration ergonomics — read pending-host-work.jsonl
 
 After `gbrain apply-migrations --yes` runs the v0.22.4 audit, your agent
-should read `~/.gbrain/migrations/pending-host-work.jsonl` (filter to
+should read `$GBRAIN_HOME/.gbrain/migrations/pending-host-work.jsonl` (or `~/.gbrain/migrations/pending-host-work.jsonl` when GBRAIN_HOME is unset) (filter to
 `migration === "0.22.4"`) and walk each entry's `command` field. Each entry
 points to a per-source `gbrain frontmatter validate <source_path> --fix`
 command — surface counts to the user, get explicit consent, then run.

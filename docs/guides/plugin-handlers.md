@@ -108,7 +108,7 @@ fires while the previous invocation is still running.
 
 The migration orchestrator (run by `gbrain apply-migrations`)
 detects cron entries whose handler name is NOT in GBrain's builtin set
-and emits a structured TODO to `~/.gbrain/migrations/pending-host-work.jsonl`.
+and emits a structured TODO to `$GBRAIN_HOME/.gbrain/migrations/pending-host-work.jsonl` (or `~/.gbrain/migrations/pending-host-work.jsonl` when GBRAIN_HOME is unset).
 Each TODO has shape:
 
 ```json
@@ -125,7 +125,7 @@ Each TODO has shape:
 
 The host agent walks these entries using `skills/migrations/v0.11.0.md`:
 
-1. Read `~/.gbrain/migrations/pending-host-work.jsonl`.
+1. Read `$GBRAIN_HOME/.gbrain/migrations/pending-host-work.jsonl` (or `~/.gbrain/migrations/pending-host-work.jsonl` when GBRAIN_HOME is unset).
 2. For each `cron-handler-needs-host-registration` row, ship a handler
    registration in the host's worker bootstrap following the pattern
    above.
