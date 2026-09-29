@@ -30,8 +30,8 @@
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, statSync } from 'fs';
 import { join, resolve } from 'path';
-import { homedir } from 'os';
 import type { BrainEngine } from '../core/engine.ts';
+import { gbrainPath } from '../core/config.ts';
 
 const DEFAULT_TARGETS = { high: 20, medium: 20, low: 10 } as const;
 const DEFAULT_CORPUS_DIRS = ['meetings/', 'personal/', 'daily/'] as const;
@@ -66,12 +66,12 @@ interface MineOpts {
 
 /** Resolve the path where mining writes its candidates JSONL. */
 export function defaultMiningOutPath(): string {
-  return join(homedir(), '.gbrain', 'eval', 'notability-mining-candidates.jsonl');
+  return gbrainPath('eval', 'notability-mining-candidates.jsonl');
 }
 
 /** Resolve the path where review writes confirmed cases. */
 export function defaultReviewOutPath(): string {
-  return join(homedir(), '.gbrain', 'eval', 'notability-real.jsonl');
+  return gbrainPath('eval', 'notability-real.jsonl');
 }
 
 /**

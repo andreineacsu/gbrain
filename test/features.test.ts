@@ -1,4 +1,9 @@
-import { describe, it, expect } from 'bun:test';
+import { describe, it, expect, spyOn } from 'bun:test';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { BrainEngine } from '../src/core/engine.ts';
+import { withEnv } from './helpers/with-env.ts';
 
 // Test that features module exports correctly
 describe('features command', () => {
@@ -134,5 +139,33 @@ describe('CLI routing', () => {
   it('help text mentions features', async () => {
     const cliSource = await Bun.file('src/cli.ts').text();
     expect(cliSource).toContain('features [--json] [--auto-fix]');
+  });
+});
+
+// feature-offers.json persistence follows GBRAIN_HOME, not HOME (#5549).
+describe('feature-offers.json location', () => {
+  it('runFeatures --json writes offers under GBRAIN_HOME/.gbrain, nothing under HOME/.gbrain', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'gbrain-features-home-'));
+    const gbrainHome = mkdtempSync(join(tmpdir(), 'gbrain-features-gbhome-'));
+    // No sync configured, so scanFeatures always yields a pitchable recommendation.
+    const engine = {
+      getStats: async () => ({ page_count: 100, link_count: 50, timeline_entry_count: 20 }),
+      getHealth: async () => ({ missing_embeddings: 0, dead_links: 0, embed_coverage: 1, brain_score: 80 }),
+      getConfig: async () => null,
+      listAllSources: async () => [],
+    } as unknown as BrainEngine;
+    const log = spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      await withEnv({ HOME: home, GBRAIN_HOME: gbrainHome }, async () => {
+        const { runFeatures } = await import('../src/commands/features.ts');
+        await runFeatures(engine, ['--json']);
+      });
+      expect(existsSync(join(gbrainHome, '.gbrain', 'feature-offers.json'))).toBe(true);
+      expect(existsSync(join(home, '.gbrain'))).toBe(false);
+    } finally {
+      log.mockRestore();
+      rmSync(home, { recursive: true, force: true });
+      rmSync(gbrainHome, { recursive: true, force: true });
+    }
   });
 });

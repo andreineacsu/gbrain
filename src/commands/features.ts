@@ -6,8 +6,9 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
-import { join } from 'path';
+import { dirname } from 'path';
 import type { BrainEngine } from '../core/engine.ts';
+import { gbrainPath } from '../core/config.ts';
 import { heartbeatPath } from './integrations.ts';
 import { VERSION } from '../version.ts';
 
@@ -57,7 +58,7 @@ export const RECIPE_META = [
 // --- Persistence ---
 
 function offersPath(): string {
-  return join(process.env.HOME || '', '.gbrain', 'feature-offers.json');
+  return gbrainPath('feature-offers.json');
 }
 
 function loadOffers(): FeatureOffersFile {
@@ -71,9 +72,9 @@ function loadOffers(): FeatureOffersFile {
 
 function saveOffers(offers: FeatureOffersFile) {
   try {
-    const dir = join(process.env.HOME || '', '.gbrain');
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(offersPath(), JSON.stringify(offers, null, 2));
+    const path = offersPath();
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify(offers, null, 2));
   } catch { /* best-effort */ }
 }
 
