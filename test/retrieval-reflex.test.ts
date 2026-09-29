@@ -8,13 +8,16 @@
  * shape the serve IPC / host ctx.brainQuery supply).
  */
 import { describe, test, expect, beforeAll, afterAll, beforeEach } from 'bun:test';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { normalizeAlias } from '../src/core/search/alias-normalize.ts';
 import { resolveEntitiesToPointers } from '../src/core/context/retrieval-reflex.ts';
 import { extractCandidates } from '../src/core/context/entity-salience.ts';
 import { createGBrainContextEngine } from '../src/core/context-engine.ts';
-import { disposeReflex, lexicalArmsEnabled } from '../src/core/context/reflex.ts';
+import { disposeReflex, lexicalArmsEnabled, reflexHeartbeatPath } from '../src/core/context/reflex.ts';
 import { TAKES_FENCE_BEGIN, TAKES_FENCE_END } from '../src/core/takes-fence.ts';
 
 let engine: PGLiteEngine;
@@ -374,6 +377,33 @@ describe('context-engine assemble() — Retrieval Reflex integration', () => {
       });
       expect(res.systemPromptAddition).toContain('people/alice-example');
     });
+  });
+
+  test('heartbeat lands under GBRAIN_HOME, not $HOME/.gbrain', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'rr-hb-home-'));
+    const gbrainHome = mkdtempSync(join(tmpdir(), 'rr-hb-gbhome-'));
+    const rel = ['.gbrain', 'integrations', 'retrieval-reflex', 'heartbeat.jsonl'];
+    try {
+      await withEnv({ ...REFLEX_ON, HOME: home, GBRAIN_HOME: gbrainHome }, async () => {
+        expect(reflexHeartbeatPath()).toBe(join(gbrainHome, ...rel));
+        await seed('people/alice-example', 'Alice Example', 'Alice is a founder.');
+        const ce = createGBrainContextEngine({
+          workspaceDir: '/tmp/rr-test-ws-hb',
+          resolveEntities: (candidates, opts) =>
+            resolveEntitiesToPointers(engine, 'default', candidates, opts),
+        });
+        await ce.assemble({
+          sessionId: 's-hb',
+          messages: [{ role: 'user', content: 'what do you think about Alice Example?' }],
+        });
+      });
+      const lines = readFileSync(join(gbrainHome, ...rel), 'utf8').trim().split('\n');
+      expect(JSON.parse(lines[lines.length - 1]).event).toBe('inject');
+      expect(existsSync(join(home, ...rel))).toBe(false);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(gbrainHome, { recursive: true, force: true });
+    }
   });
 });
 
