@@ -205,15 +205,19 @@ export const v0_22_4: Migration = {
   version: '0.22.4',
   featurePitch: {
     headline: 'Frontmatter-guard ships — broken brain pages can\'t hide',
-    description:
-      'gbrain v0.22.4 adds end-to-end frontmatter validation: a `gbrain frontmatter` CLI ' +
-      '(validate / audit / install-hook), a `frontmatter_integrity` doctor subcheck, a ' +
-      'pre-commit hook helper, and a new frontmatter-guard skill. The migration is audit-only ' +
-      '(it never mutates your brain) — it scans every registered source, writes a per-source ' +
-      'report to ~/.gbrain/migrations/v0.22.4-audit.json, and queues a TODO with the exact fix ' +
-      'command for malformed frontmatter only. Missing frontmatter is treated as optional metadata ' +
-      'coverage for broad document sources. Run `gbrain frontmatter validate <source-path> --fix` ' +
-      'to repair (creates centralized backups under ~/.gbrain/backups/frontmatter). Ships frontmatter-guard.',
+    // Getter: paths follow GBRAIN_HOME at print time, not module load.
+    get description() {
+      return (
+        'gbrain v0.22.4 adds end-to-end frontmatter validation: a `gbrain frontmatter` CLI ' +
+        '(validate / audit / install-hook), a `frontmatter_integrity` doctor subcheck, a ' +
+        'pre-commit hook helper, and a new frontmatter-guard skill. The migration is audit-only ' +
+        '(it never mutates your brain) — it scans every registered source, writes a per-source ' +
+        `report to ${auditReportPath()}, and queues a TODO with the exact fix ` +
+        'command for malformed frontmatter only. Missing frontmatter is treated as optional metadata ' +
+        'coverage for broad document sources. Run `gbrain frontmatter validate <source-path> --fix` ' +
+        `to repair (creates centralized backups under ${gbrainPath('backups', 'frontmatter')}). Ships frontmatter-guard.`
+      );
+    },
   },
   orchestrator,
 };

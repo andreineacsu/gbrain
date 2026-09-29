@@ -390,7 +390,7 @@ export async function runNotabilityEval(args: RunNotabilityEvalArgs): Promise<vo
         '',
         'Subcommands:',
         '  mine   Walk the brain repo, sample paragraphs, write candidates.',
-        '  review Hand-confirm tiers in a TTY. Writes ~/.gbrain/eval/notability-real.jsonl.',
+        `  review Hand-confirm tiers in a TTY. Writes ${defaultReviewOutPath()}.`,
         '',
         'Flags:',
         '  --target-high N   Default 20',

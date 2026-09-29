@@ -487,7 +487,7 @@ export function checkSelfUpgradeHealth(): Check {
         message:
           `${failures.length} self-upgrade failure(s) in 7d (${parts.join('; ')}). ` +
           `Last: ${last.latest ?? '?'}${last.error ? ` — ${last.error}` : ''}. ` +
-          `Check ~/.gbrain/upgrade-errors.jsonl; apply manually with gbrain self-upgrade.`,
+          `Check ${gbrainPath('upgrade-errors.jsonl')}; apply manually with gbrain self-upgrade.`,
       };
     }
 

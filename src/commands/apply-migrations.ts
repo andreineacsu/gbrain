@@ -13,7 +13,7 @@
  */
 
 import { VERSION } from '../version.ts';
-import { loadConfig } from '../core/config.ts';
+import { loadConfig, gbrainPath } from '../core/config.ts';
 import { PgliteBusyError } from '../core/pglite-lock.ts';
 import { loadCompletedMigrations, appendCompletedMigration, type CompletedMigrationEntry } from '../core/preferences.ts';
 import { migrations, compareVersions, type Migration, type OrchestratorOpts } from './migrations/index.ts';
@@ -491,7 +491,7 @@ export async function runApplyMigrations(args: string[]): Promise<void> {
     for (const m of plan.wedged) {
       console.error(
         `\nMigration v${m.version} is WEDGED (${MAX_CONSECUTIVE_PARTIALS}+ consecutive partials with no completion). ` +
-        `Check ~/.gbrain/upgrade-errors.jsonl for the last failure reasons, fix the underlying issue, then run:\n` +
+        `Check ${gbrainPath('upgrade-errors.jsonl')} for the last failure reasons, fix the underlying issue, then run:\n` +
         `  gbrain apply-migrations --force-retry ${m.version}\n` +
         `Then re-run \`gbrain apply-migrations --yes\`.`,
       );
