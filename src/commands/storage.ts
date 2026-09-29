@@ -232,7 +232,10 @@ export async function getStorageStatus(
     ...(sourceId ? { sourceId } : {}),
   });
 
-  let unsafeRestorePath: string | null = null;
+  // Pages export would refuse the whole restore on, grouped per reason (with
+  // the lowest slug named) so a symlinked db_only dir yields one warning,
+  // not one line per page.
+  const refusedPages = new Map<string, { first: string; count: number }>();
   const scopePrefix = repoPath ? gitScopePrefix(repoPath) : '';
   for (const page of pages) {
     const tier = config ? getStorageTier(page.slug, config) : 'unspecified';
@@ -262,18 +265,29 @@ export async function getStorageStatus(
       // Export refuses the whole restore on this page (unsafe recorded path,
       // symlinked or ambiguous file target); report that refusal.
       if (!(e instanceof RestoreTargetError) && !(e instanceof OperationError)) throw e;
-      warnings.push(`${page.slug}: ${e.message}`);
-      unsafeRestorePath ??= e.message;
+      const group = refusedPages.get(e.message);
+      if (!group) refusedPages.set(e.message, { first: page.slug, count: 1 });
+      else {
+        group.count++;
+        if (page.slug < group.first) group.first = page.slug;
+      }
       continue;
     }
     if (!present) missingFiles.push({ slug: page.slug, expectedPath });
+  }
+
+  // Ordered by each group's lowest slug, so warnings and the printed refusal
+  // are the same run to run whatever order the pages were listed in.
+  const refusals = [...refusedPages].sort(([, a], [, b]) => (a.first < b.first ? -1 : a.first > b.first ? 1 : 0));
+  for (const [reason, { first, count }] of refusals) {
+    warnings.push(count === 1 ? `${first}: ${reason}` : `${first} and ${count - 1} more page(s): ${reason}`);
   }
 
   return {
     config,
     repoPath,
     restoreSource,
-    restoreRefusal: restore && 'refusal' in restore ? restore.refusal : unsafeRestorePath,
+    restoreRefusal: restore && 'refusal' in restore ? restore.refusal : (refusals[0]?.[0] ?? null),
     totalPages: pages.length,
     pagesByTier,
     missingFiles,
@@ -337,6 +351,11 @@ export function formatStorageStatusHuman(result: StorageStatusResult): string {
     if (result.diskUsageByTier.unspecified > 0) {
       lines.push(`Unspecified:    ${formatBytes(result.diskUsageByTier.unspecified)}`);
     }
+  }
+
+  if (result.missingFiles.length === 0 && result.restoreRefusal) {
+    lines.push('');
+    lines.push(`Cannot suggest a restore command: ${result.restoreRefusal}`);
   }
 
   if (result.missingFiles.length > 0) {

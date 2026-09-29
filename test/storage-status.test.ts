@@ -100,6 +100,12 @@ describe('formatStorageStatusHuman', () => {
     expect(out).not.toContain(lacks);
   });
 
+  test('prints a restore refusal even when no file is missing', () => {
+    const out = formatStorageStatusHuman({ ...baseResult, restoreRefusal: 'Pass --source <id>.', missingFiles: [] });
+    expect(out).toContain('Cannot suggest a restore command: Pass --source <id>.');
+    expect(out).not.toContain('Missing Files');
+  });
+
   test('shows configuration listing for both tiers', () => {
     const out = formatStorageStatusHuman(baseResult);
     expect(out).toContain('DB tracked directories:');

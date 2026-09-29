@@ -165,8 +165,9 @@ writes exactly the listed files, into `--dir` (default `./export` under the
 current directory, not into the repo). The repo path is shell-quoted, so the
 line is safe to paste. Export refuses the whole restore when a page's recorded
 path is unsafe or its file path runs through a symlink or has no unambiguous
-native identity; status then names that page under warnings and prints the
-refusal instead of a command. When the source rule refuses (for example, a `--repo`
+native identity; status then names those pages under warnings (one line per
+reason, with the first slug and a count) and prints the refusal instead of a
+command, also when no file is left missing. When the source rule refuses (for example, a `--repo`
 that no single active source owns, one registered only to an archived
 source, or one inside an archived source's tree), status prints `Cannot suggest a restore command:` with the reason. It
 then counts the pages of the active source that owns the repo path (its

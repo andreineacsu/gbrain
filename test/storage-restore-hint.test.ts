@@ -339,6 +339,41 @@ describe('storage status names a restore command that restores its list (#5532)'
     });
   });
 
+  test('a symlinked directory over every db_only page: one grouped warning and the refusal', async () => {
+    await engine.executeRaw("DELETE FROM sources WHERE id = 'connector-a'");
+    await engine.executeRaw("UPDATE sources SET local_path = $1 WHERE id = 'default'", [repo]);
+    mkdirSync(join(dir, 'external-media', 'x'), { recursive: true });
+    symlinkSync(join(dir, 'external-media'), join(repo, 'media'));
+    for (const name of ['a', 'b', 'c']) await dbOnlyPage(`media/x/${name}`, 'default');
+    const reason = 'The canonical file target has no unambiguous native identity.';
+
+    await withEnv({ GBRAIN_SOURCE: undefined }, async () => {
+      const status = await storageStatus(['--repo', repo]);
+      expect(status.missing).toEqual([]);
+      expect(status.warnings).toEqual([`media/x/a and 2 more page(s): ${reason}`]);
+      expect(status.hint).toBe(`Cannot suggest a restore command: ${reason}`);
+    });
+  });
+
+  test('two refusal reasons: warnings and the printed refusal follow the lowest slug, not listing order', async () => {
+    await engine.executeRaw("DELETE FROM sources WHERE id = 'connector-a'");
+    await engine.executeRaw("UPDATE sources SET local_path = $1 WHERE id = 'default'", [repo]);
+    writeFileSync(join(repo, 'gbrain.yml'), 'storage:\n  db_tracked: []\n  db_only:\n    - media/x/\n    - archive/\n');
+    mkdirSync(join(dir, 'external-archive'));
+    symlinkSync(join(dir, 'external-archive'), join(repo, 'archive'));
+    // Written first, so the newest-first page listing returns it last.
+    await dbOnlyPage('archive/a', 'default');
+    await recordedPage('media/x/z-escape', '../escape.md');
+    const symlinked = 'The canonical file target has no unambiguous native identity.';
+    const unsafe = 'The recorded restore file path is unsafe. Reconcile it before exporting.';
+
+    await withEnv({ GBRAIN_SOURCE: undefined }, async () => {
+      const status = await storageStatus(['--repo', repo]);
+      expect(status.warnings).toEqual([`archive/a: ${symlinked}`, `media/x/z-escape: ${unsafe}`]);
+      expect(status.hint).toBe(`Cannot suggest a restore command: ${symlinked}`);
+    });
+  });
+
   test('a repo path with shell metacharacters round-trips through the quoted hint', async () => {
     const oddRepo = join(dir, `b"r$(touch pwned)\`id\`'s repo`);
     mkdirSync(oddRepo);
