@@ -12,7 +12,7 @@
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { tmpdir } from 'node:os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -233,6 +233,19 @@ describe('storage status names a restore command that restores its list (#5532)'
       missing: ['media/x/moved'] as string[],
     },
     {
+      // The repo is a subdirectory of a git checkout: a recorded path that
+      // starts with the repo's path inside the checkout resolves without that
+      // prefix, so the same-named file one level deeper does not count.
+      name: 'a recorded path carrying the repo prefix inside its git checkout',
+      seed: async () => {
+        mkdirSync(join(dir, '.git'));
+        writeFileSync(join(repo, 'gbrain.yml'), 'storage:\n  db_tracked: []\n  db_only:\n    - repo/x/\n');
+        await recordedPage('repo/x/clip', 'repo/x/clip.md');
+        writeRepoFile('repo/x/clip.md');
+      },
+      missing: ['repo/x/clip'] as string[],
+    },
+    {
       name: 'a db_only directory nested in a db_tracked one',
       seed: async () => {
         writeFileSync(join(repo, 'gbrain.yml'), 'storage:\n  db_tracked:\n    - media/\n  db_only:\n    - media/x/\n');
@@ -252,17 +265,41 @@ describe('storage status names a restore command that restores its list (#5532)'
     });
   });
 
-  test('an unsafe recorded source_path prints the refusal export gives', async () => {
+  // Export refuses the whole restore on these; status must print that
+  // refusal (and name the page under warnings) instead of a command.
+  test.each([
+    {
+      name: 'an unsafe recorded source_path',
+      seed: async () => {
+        await recordedPage('media/x/escape', '../escape.md');
+      },
+      slug: 'media/x/escape',
+      reason: 'The recorded restore file path is unsafe. Reconcile it before exporting.',
+    },
+    {
+      name: 'a symlinked directory on the restore path',
+      seed: async () => {
+        mkdirSync(join(dir, 'external-media', 'x'), { recursive: true });
+        symlinkSync(join(dir, 'external-media'), join(repo, 'media'));
+        await dbOnlyPage('media/x/clip', 'default');
+      },
+      slug: 'media/x/clip',
+      reason: 'The canonical file target has no unambiguous native identity.',
+    },
+  ])('$name: status prints the refusal export gives', async ({ seed, slug, reason }) => {
     await engine.executeRaw("DELETE FROM sources WHERE id = 'connector-a'");
     await engine.executeRaw("UPDATE sources SET local_path = $1 WHERE id = 'default'", [repo]);
-    await recordedPage('media/x/escape', '../escape.md');
-    await dbOnlyPage('media/x/gone', 'default');
-    const reason = 'The recorded restore file path is unsafe. Reconcile it before exporting.';
+    // A second db_only dir holds a page that is plainly missing, so status
+    // has a missing list to print the refusal under.
+    writeFileSync(join(repo, 'gbrain.yml'), 'storage:\n  db_tracked: []\n  db_only:\n    - media/x/\n    - archive/\n');
+    await seed();
+    await dbOnlyPage('archive/gone', 'default');
 
     await withEnv({ GBRAIN_SOURCE: undefined }, async () => {
       const status = await storageStatus(['--repo', repo]);
+      expect(status.missing).toContain('archive/gone');
       expect(status.hint).toBe(`Cannot suggest a restore command: ${reason}`);
-      expect(status.warnings).toContain(`media/x/escape: ${reason}`);
+      expect(status.warnings).toContain(`${slug}: ${reason}`);
 
       logged = [];
       await expect(runExport(engine, ['--restore-only', '--repo', repo, '--dir', out])).rejects.toThrow('EXIT:1');

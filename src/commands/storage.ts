@@ -1,4 +1,5 @@
 import { existsSync } from 'fs';
+import { dirname, join, relative, resolve, sep } from 'path';
 import type { BrainEngine } from '../core/engine.ts';
 import { loadStorageConfig, validateStorageConfig, getStorageTier, isDbOnly } from '../core/storage-config.ts';
 import type { StorageConfig, StorageTier } from '../core/storage-config.ts';
@@ -6,6 +7,8 @@ import { walkBrainRepo, type DiskFileEntry } from '../core/disk-walk.ts';
 import { getDefaultSourcePath, isResolverUserError, resolveSourceForRepoPath } from '../core/source-resolver.ts';
 import { resolveRestoreTarget, restoreFilePath, RestoreTargetError } from '../core/restore-target.ts';
 import { shellQuote } from '../core/shell-quote.ts';
+import { nativeFileTarget } from '../core/persistence/native-file-target.ts';
+import { OperationError } from '../core/ops/contract.ts';
 
 /**
  * Distinct nominal types for the two tier-keyed numeric maps. Both shapes
@@ -137,6 +140,23 @@ export function __resetPGLiteWarn(): void {
 
 // ── Pure data ─────────────────────────────────────────────
 
+/**
+ * The repo's path inside its enclosing git checkout, as a `dir/` prefix
+ * (empty when the repo is the checkout root or in none). A recorded
+ * source_path starting with it is re-anchored by resolveSourceLocalFilePath,
+ * so the repo walk cannot answer for it.
+ */
+function gitScopePrefix(repoPath: string): string {
+  const repo = resolve(repoPath);
+  for (let cursor = repo; ; cursor = dirname(cursor)) {
+    if (existsSync(join(cursor, '.git'))) {
+      const scope = relative(cursor, repo).split(sep).filter(Boolean).join('/');
+      return scope ? scope + '/' : '';
+    }
+    if (dirname(cursor) === cursor) return '';
+  }
+}
+
 /** The restore-only source for the repo, or why it was refused. */
 export type StorageRestoreTarget = { source: string } | { refusal: string };
 
@@ -198,6 +218,7 @@ export async function getStorageStatus(
   });
 
   let unsafeRestorePath: string | null = null;
+  const scopePrefix = repoPath ? gitScopePrefix(repoPath) : '';
   for (const page of pages) {
     const tier = config ? getStorageTier(page.slug, config) : 'unspecified';
     pagesByTier[tier]++;
@@ -206,22 +227,31 @@ export async function getStorageStatus(
     if (entry) diskUsageByTier[tier] += entry.size;
     // Missing means what `export --restore-only` restores: any page under a
     // db_only dir (a db_tracked parent dir does not exempt it) whose recorded
-    // source_path, else <slug>.md, is absent. The walk answers the common
-    // <slug>.md case without a per-page syscall.
+    // source_path, else <slug>.md, is absent, checked the way export checks.
     if (!config || !isDbOnly(page.slug, config)) continue;
     const sourcePath = page.source_path ?? null;
-    if (!sourcePath && entry) continue;
+    // Fast path, no per-page syscall: the walk saw the exact file export
+    // checks as a regular file under real (non-symlink) directories, so
+    // export's check finds it too. A recorded path that export would
+    // re-anchor (it starts with the repo's path inside its git checkout)
+    // takes the full check.
+    const walkedKey = sourcePath === null ? page.slug
+      : sourcePath.endsWith('.md') && !(scopePrefix && sourcePath.startsWith(scopePrefix)) ? sourcePath.slice(0, -3) : null;
+    if (walkedKey !== null && fileMap.has(walkedKey)) continue;
     let expectedPath: string;
+    let present: boolean;
     try {
       expectedPath = restoreFilePath(repoPath, page.slug, sourcePath, sourcePath ? Buffer.byteLength(sourcePath) : 0);
+      present = existsSync(nativeFileTarget(repoPath, expectedPath));
     } catch (e) {
-      // Export refuses the whole restore on this page; report that refusal.
-      if (!(e instanceof RestoreTargetError)) throw e;
+      // Export refuses the whole restore on this page (unsafe recorded path,
+      // symlinked or ambiguous file target); report that refusal.
+      if (!(e instanceof RestoreTargetError) && !(e instanceof OperationError)) throw e;
       warnings.push(`${page.slug}: ${e.message}`);
       unsafeRestorePath ??= e.message;
       continue;
     }
-    if (!existsSync(expectedPath)) missingFiles.push({ slug: page.slug, expectedPath });
+    if (!present) missingFiles.push({ slug: page.slug, expectedPath });
   }
 
   return {

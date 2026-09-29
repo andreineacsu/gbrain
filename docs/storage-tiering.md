@@ -163,9 +163,10 @@ directory (even one nested in a `db_tracked` directory) and its recorded source
 file, else `<slug>.md`, is absent from the repo. The `Use:` command therefore
 writes exactly the listed files, into `--dir` (default `./export` under the
 current directory, not into the repo). The repo path is shell-quoted, so the
-line is safe to paste. A page whose recorded path is unsafe
-makes export refuse the whole restore, so status names it under warnings and
-prints that refusal instead of a command. When the source rule refuses (for example, a `--repo`
+line is safe to paste. Export refuses the whole restore when a page's recorded
+path is unsafe or its file path runs through a symlink or has no unambiguous
+native identity; status then names that page under warnings and prints the
+refusal instead of a command. When the source rule refuses (for example, a `--repo`
 that no single active source owns, or one registered only to an archived
 source), status prints `Cannot suggest a restore command:` with the reason. It
 then counts the pages of the active source that owns the repo path (its
