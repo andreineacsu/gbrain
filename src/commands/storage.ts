@@ -3,7 +3,7 @@ import type { BrainEngine } from '../core/engine.ts';
 import { loadStorageConfig, validateStorageConfig, getStorageTier } from '../core/storage-config.ts';
 import type { StorageConfig, StorageTier } from '../core/storage-config.ts';
 import { walkBrainRepo, type DiskFileEntry } from '../core/disk-walk.ts';
-import { getDefaultSourcePath, resolveSourceForRepoPath } from '../core/source-resolver.ts';
+import { getDefaultSourcePath, isResolverUserError, resolveSourceForRepoPath } from '../core/source-resolver.ts';
 import { resolveRestoreTarget, RestoreTargetError } from '../core/restore-target.ts';
 
 /**
@@ -140,6 +140,26 @@ export function __resetPGLiteWarn(): void {
 export type StorageRestoreTarget = { source: string } | { refusal: string };
 
 /**
+ * The source whose pages count when no restore source was resolved: the one
+ * owning repoPath (dotfile, then longest registered local_path), else none
+ * (every source counts). After a refused restore target, an owner the
+ * resolver rejects (an archived source) counts every source too: the refusal
+ * already tells the user why no restore command fits.
+ */
+async function repoOwner(
+  engine: BrainEngine,
+  repoPath: string,
+  restore: StorageRestoreTarget | undefined,
+): Promise<string | null> {
+  try {
+    return (await resolveSourceForRepoPath(engine, repoPath))?.source_id ?? null;
+  } catch (e) {
+    if (restore && 'refusal' in restore && isResolverUserError(e)) return null;
+    throw e;
+  }
+}
+
+/**
  * Compute the storage status against the given engine + brain repo path.
  *
  * Side-effect-free apart from the engine.listPages call and one recursive
@@ -170,8 +190,7 @@ export async function getStorageStatus(
   const fileMap: Map<string, DiskFileEntry> = repoPath ? walkBrainRepo(repoPath) : new Map();
 
   const restoreSource = restore && 'source' in restore ? restore.source : null;
-  const sourceId = restoreSource
-    ?? (repoPath ? (await resolveSourceForRepoPath(engine, repoPath))?.source_id : null);
+  const sourceId = restoreSource ?? (repoPath ? await repoOwner(engine, repoPath, restore) : null);
   const pages = await engine.listPages({
     limit: 1_000_000,
     ...(sourceId ? { sourceId } : {}),

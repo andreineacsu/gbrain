@@ -142,17 +142,39 @@ describe('storage status names a restore command that restores its list (#5532)'
     });
   });
 
-  test('a repo that identifies no single source prints the refusal, not a failing command', async () => {
-    await engine.setConfig('sync.repo_path', repo);
-    await dbOnlyPage('media/x/default-clip', 'default');
-    await dbOnlyPage('media/x/connector-clip', 'connector-a');
+  test.each([
+    {
+      name: 'a repo that identifies no single source',
+      seed: async () => {
+        await engine.setConfig('sync.repo_path', repo);
+        await dbOnlyPage('media/x/default-clip', 'default');
+        await dbOnlyPage('media/x/connector-clip', 'connector-a');
+      },
+      reason: 'The restore repo does not identify exactly one source. '
+        + 'Pass --source <id> and --repo <path> for that source.',
+    },
+    {
+      name: 'a repo registered only to an archived source',
+      seed: async () => {
+        await engine.executeRaw("DELETE FROM sources WHERE id = 'connector-a'");
+        await engine.executeRaw(
+          "INSERT INTO sources (id, name, local_path, archived) VALUES ('old', 'Old', $1, true)", [repo],
+        );
+        await dbOnlyPage('media/x/default-clip', 'default');
+      },
+      reason: 'The restore repo belongs to archived source "old". '
+        + 'Run gbrain sources restore old first. Or pass --source <id> and --repo <path> for an active source.',
+    },
+  ])('$name: status prints the refusal and export refuses it', async ({ seed, reason }) => {
+    await seed();
 
     await withEnv({ GBRAIN_SOURCE: undefined }, async () => {
       const status = await storageStatus(['--repo', repo]);
-      expect(status.hint).toBe(
-        'Cannot suggest a restore command: The restore repo does not identify exactly one source. '
-        + 'Pass --source <id> and --repo <path> for that source.',
-      );
+      expect(status.hint).toBe(`Cannot suggest a restore command: ${reason}`);
+
+      logged = [];
+      await expect(runExport(engine, ['--restore-only', '--repo', repo, '--dir', out])).rejects.toThrow('EXIT:1');
+      expect(logged.join('\n')).toContain(`Export failed: ${reason}`);
     });
   });
 });

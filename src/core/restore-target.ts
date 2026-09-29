@@ -13,7 +13,8 @@ export class RestoreTargetError extends Error {}
  *
  * `source` is an explicit --source already passed through resolveSourceId;
  * `repo` is an explicit --repo. A repo without a source selects the one
- * active source registered at that exact path, else the only active source.
+ * active source registered at that exact path; a repo registered only to an
+ * archived source refuses; otherwise the only active source is selected.
  * Neither selects the flagless resolver chain's source and its local_path
  * (the legacy sync.repo_path answers for `default` only).
  */
@@ -27,6 +28,10 @@ export async function resolveRestoreTarget(
     const matches = await engine.executeRaw<{ id: string }>('SELECT id FROM sources WHERE archived IS NOT TRUE AND local_path=$1 LIMIT 2', [resolve(repo)]);
     if (matches.length === 1) source = matches[0].id;
     else {
+      // A repo registered only to an archived source is that source's repo;
+      // restoring another source's pages from it would be wrong.
+      const [archived] = matches.length ? [] : await engine.executeRaw<{ id: string }>('SELECT id FROM sources WHERE archived IS TRUE AND local_path=$1 ORDER BY id LIMIT 1', [resolve(repo)]);
+      if (archived) throw new RestoreTargetError(`The restore repo belongs to archived source "${archived.id}". Run gbrain sources restore ${archived.id} first. Or pass --source <id> and --repo <path> for an active source.`);
       const owners = await engine.executeRaw<{ id: string }>('SELECT id FROM sources WHERE archived IS NOT TRUE ORDER BY id LIMIT 2');
       if (!matches.length && owners.length === 1) source = owners[0].id;
       else throw new RestoreTargetError('The restore repo does not identify exactly one source. Pass --source <id> and --repo <path> for that source.');

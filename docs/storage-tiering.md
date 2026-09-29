@@ -158,10 +158,13 @@ DB-only directories:
 
 Status picks the repo and source with the same rule as `gbrain export
 --restore-only`, and counts only that source's pages, so the `Use:` command
-restores the listed files (into `--dir`, default `./export`). When that rule
-refuses (for example, a `--repo` that no single active source owns), status
-prints `Cannot suggest a restore command:` with the reason, and counts the
-pages of the source that owns the repo path.
+restores the listed files (into `--dir`, default `./export` under the current
+directory, not into the repo). When that rule refuses (for example, a `--repo`
+that no single active source owns, or one registered only to an archived
+source), status prints `Cannot suggest a restore command:` with the reason. It
+then counts the pages of the active source that owns the repo path (its
+`.gbrain-source` or the longest registered `local_path` containing it), or
+every source's pages when no active source owns it.
 
 ## Validation
 
