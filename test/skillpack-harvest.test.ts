@@ -102,6 +102,7 @@ describe('runHarvest — happy path', () => {
       slug: 'my-fork-skill',
       hostRepoRoot: hostRoot,
       gbrainRoot,
+      privatePatternsPath: emptyPatternsFile(),
     });
 
     expect(result.status).toBe('harvested');
@@ -122,6 +123,7 @@ describe('runHarvest — happy path', () => {
       slug: 'my-fork-skill',
       hostRepoRoot: hostRoot,
       gbrainRoot,
+      privatePatternsPath: emptyPatternsFile(),
     });
 
     expect(result.pairedSources).toEqual(['src/commands/my-fork-skill.ts']);
@@ -201,6 +203,7 @@ describe('runHarvest — privacy linter integration (T7)', () => {
       slug: 'my-fork-skill',
       hostRepoRoot: hostRoot,
       gbrainRoot,
+      privatePatternsPath: emptyPatternsFile(),
     });
 
     expect(result.status).toBe('lint_failed');

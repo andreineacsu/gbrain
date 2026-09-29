@@ -45,6 +45,17 @@ function exportFile(name: string, title: string, grown: boolean): string {
   return path;
 }
 
+// An explicit (absent) user-patterns file keeps the operator's real
+// harvest-private-patterns.txt out of the redaction pass.
+function ingest(path: string) {
+  return runTranscriptsIngest(engine, {
+    paths: [path],
+    sourceId: 'default',
+    format: 'chatgpt',
+    userPatternsPath: join(dir, 'no-user-patterns.txt'),
+  });
+}
+
 async function livePages(): Promise<Array<{ slug: string; title: string; has_new: boolean }>> {
   return engine.executeRaw(`SELECT slug, title, compiled_truth LIKE '%FOLLOWUP-MARKER%' AS has_new
     FROM pages WHERE deleted_at IS NULL AND slug LIKE 'conversations/%' ORDER BY slug`);
@@ -52,11 +63,11 @@ async function livePages(): Promise<Array<{ slug: string; title: string; has_new
 
 describe('retitled conversation', () => {
   test('rename + new messages update the existing page in place', async () => {
-    await runTranscriptsIngest(engine, { paths: [exportFile('a.json', 'Original title', false)], sourceId: 'default', format: 'chatgpt' });
+    await ingest(exportFile('a.json', 'Original title', false));
     const [first] = await livePages();
     expect(first.slug).toContain('original-title');
 
-    const second = await runTranscriptsIngest(engine, { paths: [exportFile('b.json', 'Renamed by user', true)], sourceId: 'default', format: 'chatgpt' });
+    const second = await ingest(exportFile('b.json', 'Renamed by user', true));
 
     expect(second.pages.imported).toBe(1);
     expect(second.pages.skipped).toBe(0);
@@ -68,10 +79,10 @@ describe('retitled conversation', () => {
   });
 
   test('re-importing the renamed export after the update is a clean skip', async () => {
-    await runTranscriptsIngest(engine, { paths: [exportFile('a.json', 'Original title', false)], sourceId: 'default', format: 'chatgpt' });
+    await ingest(exportFile('a.json', 'Original title', false));
     const b = exportFile('b.json', 'Renamed by user', true);
-    await runTranscriptsIngest(engine, { paths: [b], sourceId: 'default', format: 'chatgpt' });
-    const again = await runTranscriptsIngest(engine, { paths: [b], sourceId: 'default', format: 'chatgpt' });
+    await ingest(b);
+    const again = await ingest(b);
     expect(again.pages).toMatchObject({ imported: 0, skipped: 1 });
     expect(await livePages()).toHaveLength(1);
   });

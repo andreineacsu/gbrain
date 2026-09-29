@@ -71,6 +71,7 @@ describe('cap threading to adapters (gbrain#4149)', () => {
       sourceId: 'default',
       maxBytes,
       adapters: [stubAdapter(seen)],
+      userPatternsPath: join(dir, 'no-user-patterns.txt'),
     });
   }
 

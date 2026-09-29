@@ -71,7 +71,7 @@ const ALLOWLIST: AllowEntry[] = [
   { file: 'src/core/config.ts', expr: "join(homedir(), '.gbrain')", reason: CANONICAL_FALLBACK },
   {
     file: 'src/core/skillpack/harvest-lint.ts',
-    expr: "join(homedir(), '.gbrain', PRIVATE_PATTERNS_FILENAME)",
+    expr: "join(process.env.HOME || homedir(), '.gbrain', PRIVATE_PATTERNS_FILENAME)",
     reason: LEGACY_REDACTION_FALLBACK,
   },
   { file: 'src/core/brain-registry.ts', expr: "join(homedir(), '.gbrain', 'mounts.json')", reason: MOUNTS_REGISTRY },

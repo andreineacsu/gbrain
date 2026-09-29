@@ -40,6 +40,7 @@ async function run(truncated: boolean) {
     paths: [f],
     sourceId: 'default',
     adapters: [stubAdapter(truncated)],
+    userPatternsPath: join(dir, 'no-user-patterns.txt'),
   });
 }
 

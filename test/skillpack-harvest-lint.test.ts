@@ -200,4 +200,22 @@ describe('defaultPrivatePatternsPath -- resolves under GBRAIN_HOME, legacy fallb
       });
     });
   }
+
+  // Bun caches os.homedir() at process start, so the default legacy location
+  // must follow a runtime HOME redirect; otherwise tests read the operator's
+  // real ~/.gbrain patterns file.
+  it('default legacy location follows the runtime HOME', async () => {
+    const gbrainHome = scratch();
+    const homeWithFile = scratch();
+    const legacyPath = join(homeWithFile, '.gbrain', 'harvest-private-patterns.txt');
+    mkdirSync(join(homeWithFile, '.gbrain'), { recursive: true });
+    writeFileSync(legacyPath, 'LegacyPattern\n');
+
+    await withEnv({ GBRAIN_HOME: gbrainHome, HOME: homeWithFile }, () => {
+      expect(defaultPrivatePatternsPath()).toBe(legacyPath);
+    });
+    await withEnv({ GBRAIN_HOME: gbrainHome, HOME: scratch() }, () => {
+      expect(defaultPrivatePatternsPath()).toBe(join(gbrainHome, '.gbrain', 'harvest-private-patterns.txt'));
+    });
+  });
 });

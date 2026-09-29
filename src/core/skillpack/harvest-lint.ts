@@ -55,13 +55,16 @@ const PRIVATE_PATTERNS_FILENAME = 'harvest-private-patterns.txt';
  * Default user-pattern file, resolved per call so GBRAIN_HOME is honored.
  * Shared by skillpack harvest and the transcripts import lane.
  *
- * Falls back to the legacy `homedir()/.gbrain` copy when only that one
+ * Falls back to the legacy `$HOME/.gbrain` copy when only that one
  * exists: these are redaction patterns, so a GBRAIN_HOME user whose file
  * predates GBRAIN_HOME support must not silently lose them (fail closed).
+ * The legacy location reads `process.env.HOME` (homedir() only when HOME is
+ * unset or empty) because Bun caches homedir() at process start: tests
+ * redirect HOME at runtime and must not read the operator's real file.
  * `legacyPath` is a test seam.
  */
 export function defaultPrivatePatternsPath(
-  legacyPath: string = join(homedir(), '.gbrain', PRIVATE_PATTERNS_FILENAME),
+  legacyPath: string = join(process.env.HOME || homedir(), '.gbrain', PRIVATE_PATTERNS_FILENAME),
 ): string {
   const current = gbrainPath(PRIVATE_PATTERNS_FILENAME);
   if (!existsSync(current) && existsSync(legacyPath)) return legacyPath;
