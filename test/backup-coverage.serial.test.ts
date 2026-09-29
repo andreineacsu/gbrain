@@ -11,11 +11,13 @@
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { BrainEngine } from '../src/core/engine.ts';
+import { PGLiteEngine } from '../src/core/pglite-engine.ts';
+import { runExport } from '../src/commands/export.ts';
 import {
   computeBackupCoverage,
   getBackupStatus,
@@ -319,8 +321,47 @@ describe('computeBackupCoverage — source repos', () => {
     expect(asset).toBeDefined();
     expect(asset?.id).toBe('tiered-src');
     expect(asset?.state).toBe('info');
-    expect(asset?.fix_argv).toEqual(['gbrain', 'export', '--dir', '<backup-dir>']);
+    expect(asset?.fix_argv).toEqual(['gbrain', 'export', '--source', 'tiered-src', '--dir', 'BACKUP_DIR/tiered-src']);
+    // Pasted as-is, the command must not redirect or substitute anything:
+    // `<backup-dir>/x` would read stdin from `backup-dir` and truncate `/x`.
+    expect(asset?.fix_argv?.join(' ')).not.toMatch(/[<>|;&$`]/);
   });
+
+  test('following each db_only fix dumps every source, even when two share a slug', async () => {
+    const engine = new PGLiteEngine();
+    await engine.connect({});
+    await engine.initSchema();
+    const original = { exit: process.exit, log: console.log, error: console.error };
+    try {
+      for (const id of ['src-a', 'src-b']) {
+        const repo = join(tmp, id);
+        mkdirSync(repo);
+        writeFileSync(join(repo, 'gbrain.yml'), 'storage:\n  db_only:\n    - private/\n');
+        await engine.executeRaw('INSERT INTO sources (id, name, local_path) VALUES ($1, $1, $2)', [id, repo]);
+        await engine.putPage('private/shared', { type: 'note', title: id, compiled_truth: `body-${id}`, timeline: '' }, { sourceId: id });
+      }
+      const s = await computeBackupCoverage(engine, { localGitProbes: false });
+      const fixes = s.assets.filter((a) => a.kind === 'db_only').map((a) => a.fix_argv ?? []);
+      expect(fixes).toHaveLength(2);
+
+      // Export publication refuses symlinked ancestors (macOS /var).
+      const backupDir = join(realpathSync(tmp), 'dumps');
+      process.exit = ((code: number) => { throw new Error(`EXIT:${code}`); }) as never;
+      console.log = console.error = () => {};
+      for (const argv of fixes) {
+        expect(argv.slice(0, 2)).toEqual(['gbrain', 'export']);
+        await runExport(engine, argv.slice(2).map((arg) => arg.replace(/^BACKUP_DIR\//, backupDir + '/')));
+      }
+      for (const id of ['src-a', 'src-b']) {
+        expect(readFileSync(join(backupDir, id, 'private/shared.md'), 'utf8')).toContain(`body-${id}`);
+      }
+    } finally {
+      process.exit = original.exit;
+      console.log = original.log;
+      console.error = original.error;
+      await engine.disconnect();
+    }
+  }, 60000);
 });
 
 // ── DB-only brain + empty brain ──────────────────────────────────────────────
