@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import type { BrainEngine } from '../core/engine.ts';
 import { resolveSourceLocalFilePath, serializeMarkdown } from '../core/markdown.ts';
 import { createProgress } from '../core/progress.ts';
@@ -8,6 +8,7 @@ import { loadStorageConfig, isDbOnly } from '../core/storage-config.ts';
 import { slugifyPath } from '../core/sync.ts';
 import { resolveSourceId } from '../core/source-resolver.ts';
 import { ALL_SOURCES, assertValidSourceId } from '../core/source-id.ts';
+import { resolveRestoreTarget } from '../core/restore-target.ts';
 import { ExportStage, EXPORT_PAYLOAD_LIMIT, EXPORT_SNAPSHOT_MS, exportPathKey } from '../core/export-stage.ts';
 import { publishExport } from '../core/export-publish.ts';
 import { nativeFileTarget } from '../core/persistence/native-file-target.ts';
@@ -62,25 +63,7 @@ a fresh directory. See docs/storage-tiering.md#safe-export.`);
       await tx.executeRaw('SET LOCAL statement_timeout = 60000');
       let source = requested ? await resolveSourceId(tx, requested) : undefined;
       let repo = explicitRepo;
-      if (restoreOnly) {
-        if (source === ALL_SOURCES) throw new Error('--restore-only requires one source; pass --source <id>.');
-        if (!source && repo) {
-          const matches = await tx.executeRaw<{ id: string }>('SELECT id FROM sources WHERE archived IS NOT TRUE AND local_path=$1 LIMIT 2', [resolve(repo)]);
-          if (matches.length === 1) source = matches[0].id;
-          else {
-            const owners = await tx.executeRaw<{ id: string }>('SELECT id FROM sources WHERE archived IS NOT TRUE ORDER BY id LIMIT 2');
-            if (!matches.length && owners.length === 1) source = owners[0].id;
-            else throw new Error('The restore repo does not identify exactly one source. Pass --source <id> and --repo <path> for that source.');
-          }
-        }
-        source ??= await resolveSourceId(tx, undefined);
-        if (source === ALL_SOURCES) throw new Error('--restore-only requires one source; pass --source <id>.');
-        if (!repo) {
-          const [owner] = await tx.executeRaw<{ local_path: string | null }>('SELECT local_path FROM sources WHERE id=$1', [source]);
-          repo = owner?.local_path ?? (source === 'default' ? await tx.getConfig('sync.repo_path') : undefined) ?? undefined;
-        }
-        if (!repo) throw new Error('--restore-only requires --repo <path> or a configured default source with a local_path.');
-      }
+      if (restoreOnly) ({ source, repo } = await resolveRestoreTarget(tx, source, repo));
       const storage = restoreOnly && repo ? loadStorageConfig(repo) : null;
       if (restoreOnly && !storage) throw new Error('--restore-only requires a storage tiering config (gbrain.yml with a storage section).');
       let cursor = '0';
