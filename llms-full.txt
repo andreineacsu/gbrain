@@ -8266,7 +8266,7 @@ ps aux | grep 'jobs work'
 gbrain jobs list
 
 # 5. Any host-specific TODOs still pending
-cat ~/.gbrain/migrations/pending-host-work.jsonl 2>/dev/null || echo "(none — all host work is done)"
+cat "${GBRAIN_HOME:-$HOME}/.gbrain/migrations/pending-host-work.jsonl" 2>/dev/null || echo "(none — all host work is done)"
 
 # 6. Doctor + skillpack-check should both be clean
 gbrain doctor
@@ -8286,7 +8286,7 @@ Each phase is idempotent. Re-running is safe. Common failure modes:
   explicitly.
 - **Pending host work never clears:** your host agent hasn't shipped
   handler registrations yet. Read
-  `~/.gbrain/migrations/pending-host-work.jsonl`, open
+  `$GBRAIN_HOME/.gbrain/migrations/pending-host-work.jsonl` (or `~/.gbrain/migrations/pending-host-work.jsonl` when GBRAIN_HOME is unset), open
   `skills/migrations/v0.11.0.md`, and follow the host-agent instruction
   manual.
 

@@ -302,7 +302,7 @@ gbrain apply-migrations --list
 # Apply pending migrations (idempotent; safe on healthy installs)
 gbrain apply-migrations --yes
 
-# If host-specific handlers are flagged in ~/.gbrain/migrations/pending-host-work.jsonl:
+# If host-specific handlers are flagged in ${GBRAIN_HOME:-$HOME}/.gbrain/migrations/pending-host-work.jsonl:
 # walk them per skills/migrations/v0.11.0.md + docs/guides/plugin-handlers.md,
 # ship handler registrations in the host repo, then re-run apply-migrations.
 ```
