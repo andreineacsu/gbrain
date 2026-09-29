@@ -18,6 +18,7 @@ import { resolveEntitiesToPointers } from '../src/core/context/retrieval-reflex.
 import { extractCandidates } from '../src/core/context/entity-salience.ts';
 import { createGBrainContextEngine } from '../src/core/context-engine.ts';
 import { disposeReflex, lexicalArmsEnabled, reflexHeartbeatPath } from '../src/core/context/reflex.ts';
+import { heartbeatPath } from '../src/commands/integrations.ts';
 import { TAKES_FENCE_BEGIN, TAKES_FENCE_END } from '../src/core/takes-fence.ts';
 
 let engine: PGLiteEngine;
@@ -386,6 +387,8 @@ describe('context-engine assemble() — Retrieval Reflex integration', () => {
     try {
       await withEnv({ ...REFLEX_ON, HOME: home, GBRAIN_HOME: gbrainHome }, async () => {
         expect(reflexHeartbeatPath()).toBe(join(gbrainHome, ...rel));
+        // The writer and the `gbrain integrations` reader must name one file.
+        expect(reflexHeartbeatPath()).toBe(heartbeatPath('retrieval-reflex'));
         await seed('people/alice-example', 'Alice Example', 'Alice is a founder.');
         const ce = createGBrainContextEngine({
           workspaceDir: '/tmp/rr-test-ws-hb',
