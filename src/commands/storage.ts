@@ -94,6 +94,21 @@ async function runStorageStatus(engine: BrainEngine, args: string[]): Promise<vo
   let restore: StorageRestoreTarget;
   try {
     const target = await resolveRestoreTarget(engine, undefined, explicitRepo);
+    // Export matches an archived owner on the exact path only; a repo inside
+    // an archived source's tree (dotfile or longest registered local_path)
+    // stays a refusal here, as status always refused it. An active source
+    // registered at the repo's exact path owns it outright: skip the check,
+    // whose prefix match does not prefer active sources over archived ones.
+    const [activeOwner] = await engine.executeRaw<{ id: string }>(
+      'SELECT id FROM sources WHERE archived IS NOT TRUE AND local_path = $1 LIMIT 1', [resolve(target.repo)]);
+    if (!activeOwner) {
+      try {
+        await resolveSourceForRepoPath(engine, target.repo);
+      } catch (e) {
+        if (!isResolverUserError(e)) throw e;
+        throw new RestoreTargetError((e as Error).message);
+      }
+    }
     repoPath = target.repo;
     restore = { source: target.source };
   } catch (e) {

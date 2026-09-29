@@ -211,6 +211,38 @@ describe('storage status names a restore command that restores its list (#5532)'
     });
   });
 
+  // Export's rule matches an archived owner on the exact path only, so for a
+  // subdirectory of an archived source's tree it falls back to the only
+  // active source. Status keeps refusing that repo, as master's status did.
+  test('a repo inside an archived source\'s tree prints a refusal', async () => {
+    await engine.executeRaw("DELETE FROM sources WHERE id = 'connector-a'");
+    await engine.executeRaw(
+      "INSERT INTO sources (id, name, local_path, archived) VALUES ('old', 'Old', $1, true)", [dir],
+    );
+    await dbOnlyPage('media/x/default-clip', 'default');
+
+    await withEnv({ GBRAIN_SOURCE: undefined }, async () => {
+      const status = await storageStatus(['--repo', repo]);
+      expect(status.hint).toStartWith('Cannot suggest a restore command: Source "old" not found or is archived.');
+    });
+  });
+
+  test('an active source re-added at an archived source\'s path is restored, not refused', async () => {
+    await engine.executeRaw("DELETE FROM sources WHERE id = 'connector-a'");
+    await engine.executeRaw(
+      "INSERT INTO sources (id, name, local_path, archived) VALUES ('old', 'Old', $1, true)", [repo],
+    );
+    await engine.executeRaw("INSERT INTO sources (id, name, local_path) VALUES ('fresh', 'Fresh', $1)", [repo]);
+    await dbOnlyPage('media/x/fresh-clip', 'fresh');
+
+    await withEnv({ GBRAIN_SOURCE: undefined }, async () => {
+      const status = await storageStatus(['--repo', repo]);
+      expect(status.missing).toEqual(['media/x/fresh-clip']);
+      expect(status.hint).toStartWith('Use: gbrain export --restore-only --source fresh ');
+      expect(await followHint(status.hint)).toEqual(['media/x/fresh-clip']);
+    });
+  });
+
   // Export decides "missing" by the page's recorded source_path when it has
   // one, else <slug>.md, for every page under a db_only directory. Status
   // must list exactly those pages.
