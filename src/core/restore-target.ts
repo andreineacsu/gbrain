@@ -1,5 +1,6 @@
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { BrainEngine } from './engine.ts';
+import { resolveSourceLocalFilePath } from './markdown.ts';
 import { resolveSourceId } from './source-resolver.ts';
 import { ALL_SOURCES } from './source-id.ts';
 
@@ -45,4 +46,17 @@ export async function resolveRestoreTarget(
   }
   if (!repo) throw new RestoreTargetError('--restore-only requires --repo <path> or a configured default source with a local_path.');
   return { source, repo };
+}
+
+/**
+ * The repo file whose absence makes `export --restore-only` restore a db_only
+ * page: its recorded source_path when it has one, else `<slug>.md`. Throws
+ * RestoreTargetError when the recorded path is too long or unsafe (export
+ * then refuses the whole restore).
+ */
+export function restoreFilePath(repo: string, slug: string, sourcePath: string | null, sourcePathBytes: number): string {
+  if (sourcePathBytes > 4096) throw new RestoreTargetError('The recorded restore path exceeds the safe path limit.');
+  const recorded = resolveSourceLocalFilePath(repo, sourcePath, slug);
+  if (sourcePath && !recorded) throw new RestoreTargetError('The recorded restore file path is unsafe. Reconcile it before exporting.');
+  return recorded ?? join(repo, slug + '.md');
 }

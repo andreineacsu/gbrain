@@ -1,14 +1,13 @@
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
 import type { BrainEngine } from '../core/engine.ts';
-import { resolveSourceLocalFilePath, serializeMarkdown } from '../core/markdown.ts';
+import { serializeMarkdown } from '../core/markdown.ts';
 import { createProgress } from '../core/progress.ts';
 import { getCliOptions, cliOptsToProgressOptions } from '../core/cli-options.ts';
 import { loadStorageConfig, isDbOnly } from '../core/storage-config.ts';
 import { slugifyPath } from '../core/sync.ts';
 import { resolveSourceId } from '../core/source-resolver.ts';
 import { ALL_SOURCES, assertValidSourceId } from '../core/source-id.ts';
-import { resolveRestoreTarget } from '../core/restore-target.ts';
+import { resolveRestoreTarget, restoreFilePath } from '../core/restore-target.ts';
 import { ExportStage, EXPORT_PAYLOAD_LIMIT, EXPORT_SNAPSHOT_MS, exportPathKey } from '../core/export-stage.ts';
 import { publishExport } from '../core/export-publish.ts';
 import { nativeFileTarget } from '../core/persistence/native-file-target.ts';
@@ -90,10 +89,7 @@ a fresh directory. See docs/storage-tiering.md#safe-export.`);
             exportPathKey(key.slug + '.md');
             if (restoreOnly && storage && repo) {
               if (!isDbOnly(key.slug, storage)) continue;
-              if (Number(key.source_path_bytes) > 4096) throw new Error('The recorded restore path exceeds the safe path limit.');
-              const recorded = resolveSourceLocalFilePath(repo, key.source_path, key.slug);
-              if (key.source_path && !recorded) throw new Error('The recorded restore file path is unsafe. Reconcile it before exporting.');
-              if (existsSync(nativeFileTarget(repo, recorded ?? join(repo, key.slug + '.md')))) continue;
+              if (existsSync(nativeFileTarget(repo, restoreFilePath(repo, key.slug, key.source_path, Number(key.source_path_bytes))))) continue;
             }
             if (Number(key.bytes) > EXPORT_PAYLOAD_LIMIT) throw new Error('Export page payload limit exceeded. No destination output was published.');
             const snapshot = await readExportPage(tx, key, withdrawals);

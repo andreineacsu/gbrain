@@ -157,9 +157,14 @@ DB-only directories:
 ```
 
 Status picks the repo and source with the same rule as `gbrain export
---restore-only`, and counts only that source's pages, so the `Use:` command
-restores the listed files (into `--dir`, default `./export` under the current
-directory, not into the repo). When that rule refuses (for example, a `--repo`
+--restore-only`, counts only that source's pages, and lists a page as missing
+exactly when that export would restore it: the page is under a `db_only`
+directory (even one nested in a `db_tracked` directory) and its recorded source
+file, else `<slug>.md`, is absent from the repo. The `Use:` command therefore
+writes exactly the listed files, into `--dir` (default `./export` under the
+current directory, not into the repo). A page whose recorded path is unsafe
+makes export refuse the whole restore, so status names it under warnings and
+prints that refusal instead of a command. When the source rule refuses (for example, a `--repo`
 that no single active source owns, or one registered only to an archived
 source), status prints `Cannot suggest a restore command:` with the reason. It
 then counts the pages of the active source that owns the repo path (its

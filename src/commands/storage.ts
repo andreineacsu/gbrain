@@ -1,10 +1,10 @@
-import { join } from 'path';
+import { existsSync } from 'fs';
 import type { BrainEngine } from '../core/engine.ts';
-import { loadStorageConfig, validateStorageConfig, getStorageTier } from '../core/storage-config.ts';
+import { loadStorageConfig, validateStorageConfig, getStorageTier, isDbOnly } from '../core/storage-config.ts';
 import type { StorageConfig, StorageTier } from '../core/storage-config.ts';
 import { walkBrainRepo, type DiskFileEntry } from '../core/disk-walk.ts';
 import { getDefaultSourcePath, isResolverUserError, resolveSourceForRepoPath } from '../core/source-resolver.ts';
-import { resolveRestoreTarget, RestoreTargetError } from '../core/restore-target.ts';
+import { resolveRestoreTarget, restoreFilePath, RestoreTargetError } from '../core/restore-target.ts';
 
 /**
  * Distinct nominal types for the two tier-keyed numeric maps. Both shapes
@@ -196,23 +196,38 @@ export async function getStorageStatus(
     ...(sourceId ? { sourceId } : {}),
   });
 
+  let unsafeRestorePath: string | null = null;
   for (const page of pages) {
     const tier = config ? getStorageTier(page.slug, config) : 'unspecified';
     pagesByTier[tier]++;
     if (!repoPath) continue;
     const entry = fileMap.get(page.slug);
-    if (entry) {
-      diskUsageByTier[tier] += entry.size;
-    } else if (config && tier === 'db_only') {
-      missingFiles.push({ slug: page.slug, expectedPath: join(repoPath, page.slug + '.md') });
+    if (entry) diskUsageByTier[tier] += entry.size;
+    // Missing means what `export --restore-only` restores: any page under a
+    // db_only dir (a db_tracked parent dir does not exempt it) whose recorded
+    // source_path, else <slug>.md, is absent. The walk answers the common
+    // <slug>.md case without a per-page syscall.
+    if (!config || !isDbOnly(page.slug, config)) continue;
+    const sourcePath = page.source_path ?? null;
+    if (!sourcePath && entry) continue;
+    let expectedPath: string;
+    try {
+      expectedPath = restoreFilePath(repoPath, page.slug, sourcePath, sourcePath ? Buffer.byteLength(sourcePath) : 0);
+    } catch (e) {
+      // Export refuses the whole restore on this page; report that refusal.
+      if (!(e instanceof RestoreTargetError)) throw e;
+      warnings.push(`${page.slug}: ${e.message}`);
+      unsafeRestorePath ??= e.message;
+      continue;
     }
+    if (!existsSync(expectedPath)) missingFiles.push({ slug: page.slug, expectedPath });
   }
 
   return {
     config,
     repoPath,
     restoreSource,
-    restoreRefusal: restore && 'refusal' in restore ? restore.refusal : null,
+    restoreRefusal: restore && 'refusal' in restore ? restore.refusal : unsafeRestorePath,
     totalPages: pages.length,
     pagesByTier,
     missingFiles,

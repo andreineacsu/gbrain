@@ -71,17 +71,28 @@ async function dbOnlyPage(slug: string, sourceId: string): Promise<void> {
   await engine.putPage(slug, { type: 'note', title: slug, compiled_truth: `body-${sourceId}`, timeline: '' }, { sourceId });
 }
 
-/** `storage status` output: the listed missing slugs and the printed hint. */
-async function storageStatus(args: string[]): Promise<{ missing: string[]; hint: string }> {
+/** A default-source db_only page whose recorded file path is `sourcePath`. */
+async function recordedPage(slug: string, sourcePath: string): Promise<void> {
+  await dbOnlyPage(slug, 'default');
+  await engine.executeRaw("UPDATE pages SET source_path = $1 WHERE source_id = 'default' AND slug = $2", [sourcePath, slug]);
+}
+
+function writeRepoFile(path: string): void {
+  mkdirSync(join(repo, path, '..'), { recursive: true });
+  writeFileSync(join(repo, path), 'file bytes\n');
+}
+
+/** `storage status` output: the listed missing slugs, the warnings and the printed hint. */
+async function storageStatus(args: string[]): Promise<{ missing: string[]; warnings: string[]; hint: string }> {
   logged = [];
   await runStorage(engine, ['status', ...args, '--json']);
-  const missing = (JSON.parse(logged.join('\n')) as { missingFiles: Array<{ slug: string }> })
-    .missingFiles.map((m) => m.slug).sort();
+  const json = JSON.parse(logged.join('\n')) as { missingFiles: Array<{ slug: string }>; warnings: string[] };
+  const missing = json.missingFiles.map((m) => m.slug).sort();
   logged = [];
   await runStorage(engine, ['status', ...args]);
   const hint = logged.join('\n').split('\n')
     .find((line) => line.startsWith('Use: ') || line.startsWith('Cannot suggest')) ?? '';
-  return { missing, hint };
+  return { missing, warnings: json.warnings, hint };
 }
 
 /** Run the hint's command into `out`; the page slugs it restored. */
@@ -177,4 +188,64 @@ describe('storage status names a restore command that restores its list (#5532)'
       expect(logged.join('\n')).toContain(`Export failed: ${reason}`);
     });
   });
+
+  // Export decides "missing" by the page's recorded source_path when it has
+  // one, else <slug>.md, for every page under a db_only directory. Status
+  // must list exactly those pages.
+  test.each([
+    {
+      name: 'a file present at its recorded source_path is not missing',
+      seed: async () => {
+        await recordedPage('media/x/my-clip', 'Media/X/My Clip.md');
+        writeRepoFile('Media/X/My Clip.md');
+        await dbOnlyPage('media/x/gone', 'default');
+      },
+      missing: ['media/x/gone'] as string[],
+    },
+    {
+      name: 'a <slug>.md file does not stand in for an absent recorded source_path',
+      seed: async () => {
+        await recordedPage('media/x/moved', 'archive/moved-clip.md');
+        writeRepoFile('media/x/moved.md');
+      },
+      missing: ['media/x/moved'] as string[],
+    },
+    {
+      name: 'a db_only directory nested in a db_tracked one',
+      seed: async () => {
+        writeFileSync(join(repo, 'gbrain.yml'), 'storage:\n  db_tracked:\n    - media/\n  db_only:\n    - media/x/\n');
+        await dbOnlyPage('media/x/nested', 'default');
+      },
+      missing: ['media/x/nested'] as string[],
+    },
+  ])('$name', async ({ seed, missing }) => {
+    await engine.executeRaw("DELETE FROM sources WHERE id = 'connector-a'");
+    await engine.executeRaw("UPDATE sources SET local_path = $1 WHERE id = 'default'", [repo]);
+    await seed();
+
+    await withEnv({ GBRAIN_SOURCE: undefined }, async () => {
+      const status = await storageStatus(['--repo', repo]);
+      expect(status.missing).toEqual(missing);
+      expect(await followHint(status.hint)).toEqual(missing);
+    });
+  });
+
+  test('an unsafe recorded source_path prints the refusal export gives', async () => {
+    await engine.executeRaw("DELETE FROM sources WHERE id = 'connector-a'");
+    await engine.executeRaw("UPDATE sources SET local_path = $1 WHERE id = 'default'", [repo]);
+    await recordedPage('media/x/escape', '../escape.md');
+    await dbOnlyPage('media/x/gone', 'default');
+    const reason = 'The recorded restore file path is unsafe. Reconcile it before exporting.';
+
+    await withEnv({ GBRAIN_SOURCE: undefined }, async () => {
+      const status = await storageStatus(['--repo', repo]);
+      expect(status.hint).toBe(`Cannot suggest a restore command: ${reason}`);
+      expect(status.warnings).toContain(`media/x/escape: ${reason}`);
+
+      logged = [];
+      await expect(runExport(engine, ['--restore-only', '--repo', repo, '--dir', out])).rejects.toThrow('EXIT:1');
+      expect(logged.join('\n')).toContain(`Export failed: ${reason}`);
+    });
+  });
 });
+
