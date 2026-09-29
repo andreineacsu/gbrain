@@ -405,7 +405,7 @@ export async function copyMigrationConfig(
 export async function copyPageLinksToTarget(
   source: BrainEngine,
   target: BrainEngine,
-  page: Page,
+  page: MigratePageRef,
   failedKeys: ReadonlySet<string> = new Set(),
 ): Promise<number> {
   const links = await source.getLinks(page.slug, { sourceId: page.source_id });
@@ -549,6 +549,9 @@ export async function copyPageToTarget(
     raw_data: rawData.length,
   };
 }
+
+/** A page's identity: what the copy lists before it reads each page body. */
+export type MigratePageRef = Pick<Page, 'slug' | 'source_id'>;
 
 /** A page that failed to copy during migrate — tracked so the run's final
  * summary reports it honestly instead of letting the "N copied" counter
@@ -944,9 +947,11 @@ export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]
   // (`autopilotEngineIdentity`) and exits cleanly for supervisor relaunch on
   // the new config — that check, not reconnect(), is what converges it.
   let sourceStats!: Awaited<ReturnType<BrainEngine['getStats']>>;
-  let pagesToMigrate: Page[] = [];
+  let pagesToMigrate: MigratePageRef[] = [];
   let migrated = 0;
   const failures: MigratePageFailure[] = [];
+  // Pages soft-deleted on the source after the listing: not copied, not failures.
+  const vanished: MigratePageRef[] = [];
   // Per-table copy counts for the end-of-run summary (#4350): every table
   // the migration touches reports what actually landed, so an omitted table
   // is visible instead of silent.
@@ -960,9 +965,10 @@ export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]
   try {
     sourcesCopied = await copyMigrationSources(sourceEngine, targetEngine);
 
-    // Get all source pages
+    // Every live page's (source_id, slug) from one uncapped query; each body
+    // is read in the copy loop, so memory holds refs, not the whole brain.
     sourceStats = await sourceEngine.getStats();
-    const allPages = await sourceEngine.listPages({ limit: 100000 });
+    const allPages = await sourceEngine.listAllPageRefs();
     pagesToMigrate = allPages.filter(p => !completedSet.has(makeManifestKey(p.source_id, p.slug)));
 
     console.log(`Migrating ${pagesToMigrate.length} pages (${allPages.length} total, ${completedSet.size} already done)...`);
@@ -975,8 +981,14 @@ export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]
     // all silently defaulted to source_id='default', so non-default-source
     // tags / timeline / raw / links were either dropped or attached to the
     // wrong row.
-    for (const page of pagesToMigrate) {
+    for (const ref of pagesToMigrate) {
       try {
+        const page = await sourceEngine.getPage(ref.slug, { sourceId: ref.source_id });
+        if (!page) {
+          vanished.push(ref);
+          progress.tick(1, ref.slug);
+          continue;
+        }
         const counts = await copyPageToTarget(sourceEngine, targetEngine, page);
         rowCounts.chunks += counts.chunks;
         rowCounts.tags += counts.tags;
@@ -993,14 +1005,18 @@ export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]
         // whole page copy is safe) and surface it in the final summary below
         // instead of letting "N pages copied" imply everything landed.
         failures.push({
-          source_id: page.source_id,
-          slug: page.slug,
+          source_id: ref.source_id,
+          slug: ref.slug,
           reason: e instanceof Error ? e.message : String(e),
         });
       }
-      progress.tick(1, page.slug);
+      progress.tick(1, ref.slug);
     }
     progress.finish();
+
+    if (vanished.length > 0) {
+      console.log(`${vanished.length} page(s) were deleted on the source during the copy and were not migrated.`);
+    }
 
     if (failures.length > 0) {
       console.error(`\n${failures.length} of ${pagesToMigrate.length} page(s) FAILED to copy and were NOT migrated:`);
@@ -1022,7 +1038,8 @@ export async function runMigrateEngine(sourceEngine: BrainEngine, args: string[]
     // whole phase (the exact "addLink failed: page ... not found" crash from
     // the original report). Skip links on either end of a known-failed page —
     // a retry that successfully copies the page also re-copies its links.
-    const failedKeys = new Set(failures.map(f => makeManifestKey(f.source_id, f.slug)));
+    // A page deleted mid-copy is absent on the target the same way.
+    const failedKeys = new Set([...failures, ...vanished].map(f => makeManifestKey(f.source_id, f.slug)));
     console.log('Copying links...');
     progress.start('migrate.copy_links', allPages.length);
     for (const page of allPages) {
