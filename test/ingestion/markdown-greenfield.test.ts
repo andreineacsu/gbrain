@@ -5,7 +5,7 @@
 // per-row validation failure → JSONL audit, dry-run mode, limit honored.
 
 import { describe, test, expect, beforeEach } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MarkdownGreenfieldSource } from '../../src/core/ingestion/sources/markdown-greenfield.ts';
@@ -82,6 +82,7 @@ function makeCtx(): IngestionSourceContext & { emitted: IngestionEvent[]; warnin
 }
 
 const REPO = '/fake/brain';
+const SOURCE_MODULE = join(import.meta.dir, '../../src/core/ingestion/sources/markdown-greenfield.ts');
 
 describe('v0.41 T7: MarkdownGreenfieldSource basic contract', () => {
   test('declares mode: migration (bypasses 24h dedup window)', () => {
@@ -238,6 +239,44 @@ describe('v0.41 T7: validation failure → JSONL audit', () => {
     // Empty file with no frontmatter → no type → skipped_no_type (not audited)
     expect(src.stats.skipped_no_type).toBe(1);
   });
+
+  // The week label must match the shared UTC audit-week helper used by the
+  // neighbouring audit files, whatever the host timezone. Each case runs in a
+  // child launched with TZ set: once TZ is deleted, Bun keeps the last zone for
+  // the rest of the process, so an in-process withEnv({ TZ }) would leak it.
+  const weekCases: Array<{ name: string; tz: string; now: string; week: string }> = [
+    { name: 'Sunday UTC, already Monday in UTC+14', tz: 'Pacific/Kiritimati', now: '2026-05-31T12:00:00Z', week: '2026-W22' },
+    { name: 'Monday UTC, still Sunday in UTC-11', tz: 'Pacific/Pago_Pago', now: '2026-06-01T05:00:00Z', week: '2026-W23' },
+  ];
+  for (const c of weekCases) {
+    test(`audit week label is computed in UTC: ${c.name}`, () => {
+      const repo = mkdtempSync(join(tmpdir(), 'greenfield-week-'));
+      try {
+        mkdirSync(join(repo, 'atoms', '2026-05-24'), { recursive: true });
+        writeFileSync(join(repo, 'atoms', '2026-05-24', 'bad.md'), '---\ntype: atom\ntitle: [unclosed\n---\nbody');
+        const script = `
+          const { MarkdownGreenfieldSource } = await import(${JSON.stringify(SOURCE_MODULE)});
+          const written = [];
+          const src = new MarkdownGreenfieldSource({
+            repoPath: ${JSON.stringify(repo)},
+            auditDir: '/fake/audit',
+            _now: () => new Date(${JSON.stringify(c.now)}),
+            _appendFileSync: (path) => { written.push(path); },
+          });
+          const logger = { info() {}, warn() {}, error() {} };
+          await src.start({ emit() {}, logger, engine: {}, abortSignal: new AbortController().signal, config: {} });
+          console.log(JSON.stringify(written));
+        `;
+        const child = Bun.spawnSync(['bun', '-e', script], { env: { ...process.env, TZ: c.tz }, stderr: 'pipe' });
+        if (child.exitCode !== 0) throw new Error(`child exited ${child.exitCode}: ${child.stderr.toString()}`);
+        expect(JSON.parse(child.stdout.toString().trim())).toEqual([
+          `/fake/audit/markdown-greenfield-failures-${c.week}.jsonl`,
+        ]);
+      } finally {
+        rmSync(repo, { recursive: true, force: true });
+      }
+    });
+  }
 });
 
 describe('default auditDir follows the shared audit resolver', () => {

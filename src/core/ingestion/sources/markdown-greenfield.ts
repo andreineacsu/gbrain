@@ -48,7 +48,7 @@ import { join, relative, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { dataFrontmatter as matter } from '../../data-frontmatter.ts';
 import { computeContentHash } from '../types.ts';
-import { resolveAuditDir } from '../../audit-week-file.ts';
+import { isoWeekFilename, resolveAuditDir } from '../../audit-week-file.ts';
 import type {
   IngestionSource,
   IngestionSourceContext,
@@ -76,6 +76,8 @@ export interface MarkdownGreenfieldOpts {
   _statSync?: (path: string) => { isDirectory(): boolean; isFile(): boolean };
   /** Test seam: alternative appendFileSync for audit logs. */
   _appendFileSync?: (path: string, content: string) => void;
+  /** Test seam: clock for audit timestamps and the ISO-week file name. */
+  _now?: () => Date;
 }
 
 interface WalkResult {
@@ -127,6 +129,7 @@ export class MarkdownGreenfieldSource implements IngestionSource {
         }
         appendFileSync(p, c);
       }),
+      _now: opts._now ?? (() => new Date()),
     };
   }
 
@@ -302,10 +305,10 @@ export class MarkdownGreenfieldSource implements IngestionSource {
   }
 
   private appendFailureAudit(path: string, errMsg: string): void {
-    const week = this.isoWeekString(new Date());
-    const auditPath = join(this.opts.auditDir, `markdown-greenfield-failures-${week}.jsonl`);
+    const now = this.opts._now();
+    const auditPath = join(this.opts.auditDir, isoWeekFilename('markdown-greenfield-failures', now));
     const line = JSON.stringify({
-      ts: new Date().toISOString(),
+      ts: now.toISOString(),
       path,
       error: errMsg,
       importer: 'markdown-greenfield',
@@ -320,15 +323,5 @@ export class MarkdownGreenfieldSource implements IngestionSource {
         );
       }
     }
-  }
-
-  private isoWeekString(d: Date): string {
-    // Returns YYYY-Www where ww is ISO 8601 week number.
-    const target = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
-    const dayNum = target.getUTCDay() || 7;
-    target.setUTCDate(target.getUTCDate() + 4 - dayNum);
-    const yearStart = new Date(Date.UTC(target.getUTCFullYear(), 0, 1));
-    const weekNo = Math.ceil(((+target - +yearStart) / 86400000 + 1) / 7);
-    return `${target.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
   }
 }
