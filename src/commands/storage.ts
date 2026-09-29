@@ -4,6 +4,7 @@ import { loadStorageConfig, validateStorageConfig, getStorageTier } from '../cor
 import type { StorageConfig, StorageTier } from '../core/storage-config.ts';
 import { walkBrainRepo, type DiskFileEntry } from '../core/disk-walk.ts';
 import { getDefaultSourcePath, resolveSourceForRepoPath } from '../core/source-resolver.ts';
+import { resolveRestoreTarget, RestoreTargetError } from '../core/restore-target.ts';
 
 /**
  * Distinct nominal types for the two tier-keyed numeric maps. Both shapes
@@ -24,6 +25,13 @@ export type DiskUsageByTier = Record<StorageTier, number> & { __brand?: 'disk-by
 export interface StorageStatusResult {
   config: StorageConfig | null;
   repoPath: string | null;
+  /**
+   * The source `gbrain export --restore-only` restores for this repo; the
+   * counts cover only its pages. Null when no restore target was resolved.
+   */
+  restoreSource: string | null;
+  /** Why the restore target was refused; null when it was not. */
+  restoreRefusal: string | null;
   totalPages: number;
   pagesByTier: PageCountsByTier;
   missingFiles: Array<{ slug: string; expectedPath: string }>;
@@ -73,16 +81,24 @@ async function runStorageStatus(engine: BrainEngine, args: string[]): Promise<vo
   warnIfPGLite(engine);
 
   // Resolution chain (D5, Issue #3): explicit --repo → typed accessor → null.
-  // No cwd fallback. The original silent footgun is dead.
-  let repoPath: string | null = null;
+  // No cwd fallback. The original silent footgun is dead. The repo and source
+  // come from export's restore-only rule, so the printed restore command
+  // restores the files listed as missing; a refused rule keeps the chain.
   const repoIdx = args.indexOf('--repo');
-  if (repoIdx !== -1 && args[repoIdx + 1]) {
-    repoPath = args[repoIdx + 1];
-  } else {
-    repoPath = await getDefaultSourcePath(engine);
+  const explicitRepo = repoIdx !== -1 && args[repoIdx + 1] ? args[repoIdx + 1] : undefined;
+  let repoPath: string | null;
+  let restore: StorageRestoreTarget;
+  try {
+    const target = await resolveRestoreTarget(engine, undefined, explicitRepo);
+    repoPath = target.repo;
+    restore = { source: target.source };
+  } catch (e) {
+    if (!(e instanceof RestoreTargetError)) throw e;
+    repoPath = explicitRepo ?? (await getDefaultSourcePath(engine));
+    restore = { refusal: e.message };
   }
 
-  const result = await getStorageStatus(engine, repoPath);
+  const result = await getStorageStatus(engine, repoPath, restore);
 
   if (args.includes('--json')) {
     console.log(formatStorageStatusJson(result));
@@ -120,6 +136,9 @@ export function __resetPGLiteWarn(): void {
 
 // ── Pure data ─────────────────────────────────────────────
 
+/** The restore-only source for the repo, or why it was refused. */
+export type StorageRestoreTarget = { source: string } | { refusal: string };
+
 /**
  * Compute the storage status against the given engine + brain repo path.
  *
@@ -129,10 +148,14 @@ export function __resetPGLiteWarn(): void {
  * Returns null `config` when no gbrain.yml is present at repoPath. In that
  * case pagesByTier is all zeros for db_tracked/db_only and totals roll up
  * into unspecified.
+ *
+ * `restore` with a source counts only that source's pages; without one, the
+ * pages of the source that owns repoPath are counted.
  */
 export async function getStorageStatus(
   engine: BrainEngine,
   repoPath: string | null,
+  restore?: StorageRestoreTarget,
 ): Promise<StorageStatusResult> {
   const config = repoPath ? loadStorageConfig(repoPath) : null;
   const warnings = config ? validateStorageConfig(config) : [];
@@ -146,10 +169,12 @@ export async function getStorageStatus(
   // per directory + one stat per .md file, plus O(1) lookups below.
   const fileMap: Map<string, DiskFileEntry> = repoPath ? walkBrainRepo(repoPath) : new Map();
 
-  const source = repoPath ? await resolveSourceForRepoPath(engine, repoPath) : null;
+  const restoreSource = restore && 'source' in restore ? restore.source : null;
+  const sourceId = restoreSource
+    ?? (repoPath ? (await resolveSourceForRepoPath(engine, repoPath))?.source_id : null);
   const pages = await engine.listPages({
     limit: 1_000_000,
-    ...(source ? { sourceId: source.source_id } : {}),
+    ...(sourceId ? { sourceId } : {}),
   });
 
   for (const page of pages) {
@@ -167,6 +192,8 @@ export async function getStorageStatus(
   return {
     config,
     repoPath,
+    restoreSource,
+    restoreRefusal: restore && 'refusal' in restore ? restore.refusal : null,
     totalPages: pages.length,
     pagesByTier,
     missingFiles,
@@ -243,7 +270,12 @@ export function formatStorageStatusHuman(result: StorageStatusResult): string {
       lines.push(`  ... and ${result.missingFiles.length - 10} more`);
     }
     lines.push('');
-    lines.push(`Use: gbrain export --restore-only --repo "${result.repoPath}"`);
+    if (result.restoreRefusal) {
+      lines.push(`Cannot suggest a restore command: ${result.restoreRefusal}`);
+    } else {
+      const source = result.restoreSource ? ` --source ${result.restoreSource}` : '';
+      lines.push(`Use: gbrain export --restore-only${source} --repo "${result.repoPath}"`);
+    }
   }
 
   if (result.warnings.length > 0) {

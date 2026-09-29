@@ -111,6 +111,7 @@ Output includes:
 - Total page counts by storage tier.
 - Disk usage breakdown by tier.
 - Missing files that need restoration (top 10 shown; full list in `--json`).
+- The `gbrain export --restore-only` command that restores them.
 - Configuration validation warnings.
 - Current tier directory listing.
 
@@ -140,7 +141,7 @@ Missing Files (need restore):
   media/x/tweet-0987654321
   ... and 47 more
 
-Use: gbrain export --restore-only --repo "/data/brain"
+Use: gbrain export --restore-only --source default --repo "/data/brain"
 
 Configuration:
 --------------
@@ -154,6 +155,13 @@ DB-only directories:
   - media/articles/
   - meetings/transcripts/
 ```
+
+Status picks the repo and source with the same rule as `gbrain export
+--restore-only`, and counts only that source's pages, so the `Use:` command
+restores the listed files (into `--dir`, default `./export`). When that rule
+refuses (for example, a `--repo` that no single active source owns), status
+prints `Cannot suggest a restore command:` with the reason, and counts the
+pages of the source that owns the repo path.
 
 ## Validation
 
