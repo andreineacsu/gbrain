@@ -201,6 +201,7 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
     "test/e2e/persistence-phase-liveness.test.ts",
     "test/e2e/persistence-idle-pool.test.ts",
     "test/e2e/persistence-publication-parity.test.ts",
+    "test/e2e/persistence-git-batch-postgres.test.ts",
     "test/e2e/persistence-sync-origin-parity.test.ts",
     "test/e2e/persistence-sync-options-parity.test.ts",
     "test/e2e/persistence-sync-company-parity.test.ts",

@@ -24,21 +24,24 @@ import { persistenceFileHash, transientDatabaseFailure } from './coordinator.ts'
 import { sha256 } from './digest.ts';
 import { prepareFileTarget } from './page-prepare.ts';
 import { isSourceDbOnlySlug } from './source-storage.ts';
-import { advanceEffectCursor, claimPersistenceEffect, completeEffect, failEffect, parkEffect, renewPersistenceEffectClaim, requeueEffect, retryEffect } from './effect-journal.ts';
+import { advanceEffectCursor, claimGitEffectBatch, claimPersistenceEffect, completeEffect, failEffect, parkEffect, renewPersistenceEffectClaim, requeueEffect, retryEffect,
+  singleFileGitEffect } from './effect-journal.ts';
 import { guardEffectSource, recoverEffectPublication, reserveEffectRecovery } from './effect-recovery.ts';
-import { publishGitEffect } from './effect-git.ts';
+import { commitGitEffects, GIT_BATCH_PATHS, pushGitEffects, type GitPathResult } from './effect-git.ts';
 import { dispatchFactsBackstopEffect } from './effect-facts.ts';
 import { PARK_AFTER_FAILURES, type EffectRecovery, type PersistenceEffect } from './effect-model.ts';
 import { recoveryStagingFile } from './staging.ts';
 import { selectEffectRecoveries } from './effect-recovery-scan.ts';
 import { nativeFileTarget } from './native-file-target.ts';
+import { acquireNativeLock } from './native-lock.ts';
 
 export interface EffectWorkerOptions {
   hostId: string;
   limit?: number;
   signal?: AbortSignal;
   /** Failure boundary injection; production never supplies this. */
-  boundary?: (name: 'before_mirror_file' | 'after_mirror_file' | 'before_mirror_commit') => Promise<void>;
+  boundary?: (name: 'before_mirror_file' | 'after_mirror_file' | 'before_mirror_commit'
+    | 'before_git_commit' | 'after_git_commit' | 'after_git_push') => Promise<void>;
   embedding?: { signature: string; model: string; embed: typeof embedBatch };
 }
 
@@ -112,39 +115,142 @@ async function mirrorPage(engine: BrainEngine, effect: PersistenceEffect, bindin
   await recoverEffectPublication(engine, effect, opts.hostId, opts);
 }
 
+/** Withdrawal walks and source scans publish page by page; single-file effects go through `publishGitBatch`. */
 async function gitPage(engine: BrainEngine, effect: PersistenceEffect, binding: WorktreeBinding | null, opts: EffectWorkerOptions, attempt: EffectAttempt): Promise<void> {
   if (!binding?.local_path) { await completeEffect(engine, effect, { git: 'skipped', reason: 'no_repo_configured' }); return; }
   const snapshot = await selectedEffectPage(engine, effect);
-  let path: string;
-  if (targetedWithdrawalEffect(effect) || effect.data.source_scan) {
-    if (!snapshot) { await completeEffect(engine, effect); return; }
-    attempt.target = snapshot.page.slug;
-    const file = await prepareFileTarget(engine, { ...effect, slug: snapshot.page.slug }, snapshot,
-      snapshot.page.deleted_at ? null : serializePageToMarkdown(snapshot.page, snapshot.tags), opts.hostId, { allowMissing: true });
-    if (!file) throw new OperationError('source_changed', 'The Git binding changed.');
-    path = file.path;
-    if (!existsSync(path)) { await materializeAndAdvance(engine, effect, snapshot, opts.hostId); return; }
-    if (snapshot.page.deleted_at && existsSync(path)) { await finishPage(engine, effect, snapshot, { reason: 'deleted_page_file_present' }); return; }
-  } else {
-    if (!effect.data.relative_path) throw new OperationError('storage_error', 'The Git effect lost its target.');
-    attempt.target = effect.data.slug ?? effect.data.relative_path;
-    path = join(binding.local_path, effect.data.relative_path);
-    if (!isWriteTargetContained(path, join(binding.local_path, binding.relative_path))) throw new OperationError('source_changed', 'The Git target escaped its registered source.');
-    path = nativeFileTarget(binding.local_path, path, 'git_target_unsafe');
-    if (persistenceFileHash(path) !== effect.data.expected_hash) { await completeEffect(engine, effect, { git: 'superseded' }); return; }
-  }
+  if (!targetedWithdrawalEffect(effect) && !effect.data.source_scan) throw new OperationError('storage_error', 'The Git effect lost its target.');
+  if (!snapshot) { await completeEffect(engine, effect); return; }
+  attempt.target = snapshot.page.slug;
+  const file = await prepareFileTarget(engine, { ...effect, slug: snapshot.page.slug }, snapshot,
+    snapshot.page.deleted_at ? null : serializePageToMarkdown(snapshot.page, snapshot.tags), opts.hostId, { allowMissing: true });
+  if (!file) throw new OperationError('source_changed', 'The Git binding changed.');
+  const path = file.path;
+  if (!existsSync(path)) { await materializeAndAdvance(engine, effect, snapshot, opts.hostId); return; }
+  if (snapshot.page.deleted_at && existsSync(path)) { await finishPage(engine, effect, snapshot, { reason: 'deleted_page_file_present' }); return; }
   if (!isWriteTargetContained(path, join(binding.local_path, binding.relative_path))) throw new OperationError('source_changed', 'The Git target escaped its registered source.');
   // Declared db_only content stays out of Git. Its gitignored local cache file
   // is invisible to `git status`, so publishing it would be refused as unsafe.
   // An invalid gbrain.yml (logged by the loader) publishes as before.
-  const slug = snapshot?.page.slug ?? effect.data.slug;
-  if (slug && isSourceDbOnlySlug(join(binding.local_path, binding.relative_path), slug, 'not_db_only')) {
+  if (isSourceDbOnlySlug(join(binding.local_path, binding.relative_path), snapshot.page.slug, 'not_db_only')) {
     await finishPage(engine, effect, snapshot, { git: 'skipped', reason: 'db_only' });
     return;
   }
-  const result = await publishGitEffect(binding.local_path, relative(binding.local_path, path).split(sep).join('/'), opts.signal);
+  const result = await publishWalkPage(binding, binding.local_path, relative(binding.local_path, path).split(sep).join('/'), opts.signal);
   if (result.reason === 'durability_not_enabled') await completeEffect(engine, effect, result);
   else await finishPage(engine, effect, snapshot, result);
+}
+
+/** Settles a single-file Git effect without Git, or names its native worktree-relative path. */
+function gitFileTarget(effect: PersistenceEffect, binding: WorktreeBinding, root: string): { path: string } | { outcome: Record<string, unknown> } {
+  const source = join(root, binding.relative_path);
+  let path = join(root, effect.data.relative_path!);
+  if (!isWriteTargetContained(path, source)) throw new OperationError('source_changed', 'The Git target escaped its registered source.');
+  path = nativeFileTarget(root, path, 'git_target_unsafe');
+  if (persistenceFileHash(path) !== effect.data.expected_hash) return { outcome: { git: 'superseded' } };
+  if (!isWriteTargetContained(path, source)) throw new OperationError('source_changed', 'The Git target escaped its registered source.');
+  // Declared db_only content stays out of Git. Its gitignored local cache file
+  // is invisible to `git status`, so publishing it would be refused as unsafe.
+  // An invalid gbrain.yml (logged by the loader) publishes as before.
+  if (effect.data.slug && isSourceDbOnlySlug(source, effect.data.slug, 'not_db_only')) return { outcome: { git: 'skipped', reason: 'db_only' } };
+  return { path: relative(root, path).split(sep).join('/') };
+}
+
+/**
+ * Pushes of one worktree never overlap across processes; publications never
+ * take this lock. A walk takes it inside the worktree lock and a batch push
+ * holds it alone, so the lock order never inverts.
+ */
+const PUSH_LOCK_WAIT_MS = 5_000;
+async function pushWorktree(binding: WorktreeBinding, root: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+  const lock = await acquireNativeLock(`${binding.coordination_path}.push`, { timeoutMs: PUSH_LOCK_WAIT_MS, signal });
+  if (!lock) throw new OperationError('writer_busy', 'Another push of this canonical worktree is still running.');
+  try { return await pushGitEffects(root, signal); }
+  finally { await lock.release(); }
+}
+
+/**
+ * One walk page under the worktree lock the caller holds; its push also takes
+ * the push lock. `hardened` is the caller's durability probe of `root`, when it took one.
+ */
+async function publishWalkPage(binding: WorktreeBinding, root: string, relativePath: string, signal?: AbortSignal,
+  hardened?: boolean): Promise<Record<string, unknown>> {
+  const [result] = await commitGitEffects(root, [relativePath], signal, hardened);
+  if ('error' in result) throw result.error;
+  return result.outcome.push ? result.outcome : { ...result.outcome, ...await pushWorktree(binding, root, signal) };
+}
+
+interface GitBatchEntry { effect: PersistenceEffect; target?: string; path?: string; outcome?: Record<string, unknown>; push?: boolean; failed?: { error: unknown } }
+
+/**
+ * Under the worktree lock `first` holds: claims the other ready single-file
+ * Git effects of the worktree and commits them together. Each effect keeps its
+ * own outcome, and one refusal never fails its siblings. Returns the push and
+ * completion step, which the caller runs after releasing the worktree lock.
+ * `hardened` is the caller's durability probe of `root`, when it took one; an
+ * unhardened root runs no Git command, so it needs no worktree lock.
+ */
+async function publishGitBatch(engine: BrainEngine, first: PersistenceEffect, binding: WorktreeBinding, root: string, opts: EffectWorkerOptions,
+  hardened?: boolean): Promise<() => Promise<void>> {
+  const siblings = await claimGitEffectBatch(engine, first, opts.hostId, GIT_BATCH_PATHS - 1);
+  const entries: GitBatchEntry[] = [first, ...siblings].map(effect => ({ effect, target: effect.data.slug ?? effect.data.relative_path }));
+  for (const entry of entries) {
+    try { Object.assign(entry, gitFileTarget(entry.effect, binding, root)); }
+    catch (error) { entry.failed = { error }; }
+  }
+  const publishing = entries.filter(entry => entry.path !== undefined);
+  if (publishing.length) {
+    try {
+      await opts.boundary?.('before_git_commit');
+      const results: GitPathResult[] = await commitGitEffects(root, publishing.map(entry => entry.path!), opts.signal, hardened);
+      publishing.forEach((entry, index) => {
+        const result = results[index];
+        if ('error' in result) entry.failed = { error: result.error };
+        else Object.assign(entry, { outcome: result.outcome, push: result.outcome.push === undefined });
+      });
+      await opts.boundary?.('after_git_commit');
+    } catch (error) { for (const entry of publishing) entry.failed ??= { error }; }
+  }
+  const settle = async (entry: GitBatchEntry) => {
+    if (!entry.failed) {
+      try { await completeEffect(engine, entry.effect, entry.outcome); return; }
+      catch (error) { entry.failed = { error }; }
+    }
+    await recordFailure(engine, entry.effect, entry.failed.error, opts.signal, entry.target);
+  };
+  // One entry whose settle fails must not leave its siblings running until
+  // their leases expire; its error is rethrown once every entry had its turn.
+  // A database outage or a stopping worker ends settling at once instead: the
+  // unsettled entries keep their claims and lease expiry recovers them.
+  const settleErrors: unknown[] = [];
+  let outage = false;
+  const halted = () => outage || opts.signal?.aborted === true;
+  const settleAll = async (settling: GitBatchEntry[]) => {
+    for (const entry of settling) {
+      if (halted()) return;
+      try { await settle(entry); }
+      catch (error) { settleErrors.push(error); outage = transientDatabaseFailure(error); }
+    }
+  };
+  return async () => {
+    const pushing = entries.filter(entry => entry.push && !entry.failed);
+    await settleAll(entries.filter(entry => !pushing.includes(entry)));
+    // A push whose outcome cannot be recorded waits for the lease recovery.
+    if (pushing.length && !halted()) {
+      try {
+        const pushed = await pushWorktree(binding, root, opts.signal);
+        for (const entry of pushing) entry.outcome = { ...entry.outcome, ...pushed };
+        await opts.boundary?.('after_git_push');
+      } catch (error) { for (const entry of pushing) entry.failed = { error }; }
+      await settleAll(pushing);
+    }
+    if (settleErrors.length === 1) throw settleErrors[0];
+    // The worker reports an error by its `code`, so the aggregate keeps the first one's.
+    if (settleErrors.length) {
+      throw Object.assign(new AggregateError(settleErrors, `${settleErrors.length} Git batch effects could not record their outcome.`),
+        { code: (settleErrors[0] as { code?: unknown } | null)?.code });
+    }
+  };
 }
 
 export async function readEmbeddingEffectProjection(engine: BrainEngine, effect: PersistenceEffect, snapshot: PageSnapshot,
@@ -343,6 +449,7 @@ export async function runPersistenceEffects(engine: BrainEngine, config: GBrainC
     let effect = claimed;
     const attempt: EffectAttempt = {};
     let lock: Awaited<ReturnType<typeof acquireWorktree>> = null;
+    let pushAndComplete: (() => Promise<void>) | undefined;
     try {
       const binding = effect.worktree_id ? await getWorktreeBinding(engine, effect.source_id, opts.hostId) : null;
       if (effect.worktree_id && !['embedding', 'facts-backstop'].includes(effect.kind)) {
@@ -359,10 +466,13 @@ export async function runPersistenceEffects(engine: BrainEngine, config: GBrainC
       });
       effect = await upgradeWithdrawalEffect(engine, effect, opts.hostId);
       if (effect.kind === 'withdrawal-mirror') await mirrorPage(engine, effect, binding, opts, attempt);
+      else if (binding?.local_path && singleFileGitEffect(effect)) pushAndComplete = await publishGitBatch(engine, effect, binding, binding.local_path, opts);
       else if (effect.kind === 'git') await gitPage(engine, effect, binding, opts, attempt);
       else if (effect.kind === 'facts-backstop') await dispatchFactsBackstopEffect(engine, effect, opts.hostId);
       else await embedPage(engine, config, effect, opts);
     } catch (error) { await recordFailure(engine, effect, error, opts.signal, attempt.target); }
     finally { await lock?.release(); }
+    // The next publication on this worktree never waits for the network.
+    await pushAndComplete?.();
   }
 }

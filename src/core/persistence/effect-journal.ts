@@ -38,25 +38,55 @@ export async function queuePublicationEffects(tx: BrainEngine, row: EffectReques
   }
 }
 
+/** A ready effect whose worktree has no pending recovery and whose withdrawal mirror, if any, has committed. */
+const READY_EFFECT = `(e.state='queued' OR e.state='running' AND e.claim_expires_at<now()) AND e.next_attempt_at<=now()
+      AND e.recovery IS NULL AND NOT EXISTS (SELECT 1 FROM persistence_effects blocked
+        WHERE blocked.worktree_id=e.worktree_id AND blocked.recovery IS NOT NULL)
+      AND NOT EXISTS (SELECT 1 FROM persistence_requests blocked
+        WHERE blocked.worktree_id=e.worktree_id AND blocked.recovery IS NOT NULL)
+      AND (e.kind='withdrawal-mirror' OR NOT EXISTS (SELECT 1 FROM persistence_effects mirror
+        WHERE mirror.request_id=e.request_id AND mirror.kind='withdrawal-mirror' AND mirror.state<>'committed'))`;
+
 /** Claims release their database connection before waiting for a filesystem lock/provider. */
 export async function claimPersistenceEffect(engine: BrainEngine, hostId: string): Promise<PersistenceEffect | null> {
   return engine.transactionDirect(async tx => {
     await declarePersistenceProtocol(tx);
     const [candidate] = await tx.executeRaw<PersistenceEffect>(`SELECT e.* FROM persistence_effects e
       LEFT JOIN persistence_worktrees w ON w.id=e.worktree_id
-      WHERE (e.state='queued' OR e.state='running' AND e.claim_expires_at<now()) AND e.next_attempt_at<=now()
+      WHERE ${READY_EFFECT}
       AND (e.worktree_id IS NULL OR w.owner_host_id=$1::uuid)
-      AND e.recovery IS NULL AND NOT EXISTS (SELECT 1 FROM persistence_effects blocked
-        WHERE blocked.worktree_id=e.worktree_id AND blocked.recovery IS NOT NULL)
-      AND NOT EXISTS (SELECT 1 FROM persistence_requests blocked
-        WHERE blocked.worktree_id=e.worktree_id AND blocked.recovery IS NOT NULL)
-      AND (e.kind='withdrawal-mirror' OR NOT EXISTS (SELECT 1 FROM persistence_effects mirror
-        WHERE mirror.request_id=e.request_id AND mirror.kind='withdrawal-mirror' AND mirror.state<>'committed'))
       ORDER BY e.next_attempt_at,e.id LIMIT 1 FOR UPDATE OF e SKIP LOCKED`, [hostId]);
     if (!candidate) return null;
     const [claimed] = await tx.executeRaw<PersistenceEffect>(`UPDATE persistence_effects SET state='running',execution_token=$2::uuid,
       claim_expires_at=now()+interval '2 minutes',attempts=attempts+1,updated_at=now() WHERE id=$1 RETURNING *`, [candidate.id, randomUUID()]);
     return claimed;
+  });
+}
+
+/** A Git effect naming one file. Withdrawal walks and source scans publish page by page. */
+export function singleFileGitEffect(effect: PersistenceEffect): boolean {
+  return effect.kind === 'git' && effect.data.version === undefined && effect.data.source_scan === undefined
+    && typeof effect.data.relative_path === 'string' && effect.data.relative_path !== '';
+}
+const SINGLE_FILE_GIT = `e.kind='git' AND e.data->'version' IS NULL AND e.data->'source_scan' IS NULL
+      AND jsonb_typeof(e.data->'relative_path')='string' AND e.data->>'relative_path'<>''`;
+
+/**
+ * Under the worktree lock `first` holds, claims up to `limit` other ready
+ * single-file Git effects of its worktree and source, each with its own claim.
+ */
+export async function claimGitEffectBatch(engine: BrainEngine, first: PersistenceEffect, hostId: string, limit: number): Promise<PersistenceEffect[]> {
+  if (limit < 1 || !first.worktree_id) return [];
+  return engine.transactionDirect(async tx => {
+    await declarePersistenceProtocol(tx);
+    return tx.executeRaw<PersistenceEffect>(`WITH batch AS (SELECT e.id FROM persistence_effects e
+      JOIN persistence_worktrees w ON w.id=e.worktree_id AND w.owner_host_id=$1::uuid
+      WHERE e.worktree_id=$2::uuid AND e.source_id=$3 AND e.source_incarnation=$4::uuid AND e.id<>$5
+      AND ${SINGLE_FILE_GIT} AND ${READY_EFFECT}
+      ORDER BY e.next_attempt_at,e.id LIMIT $6 FOR UPDATE OF e SKIP LOCKED),
+    claimed AS (UPDATE persistence_effects e SET state='running',execution_token=gen_random_uuid(),
+      claim_expires_at=now()+interval '2 minutes',attempts=e.attempts+1,updated_at=now() FROM batch WHERE e.id=batch.id RETURNING e.*)
+    SELECT * FROM claimed ORDER BY next_attempt_at,id`, [hostId, first.worktree_id, first.source_id, first.source_incarnation, first.id, limit]);
   });
 }
 

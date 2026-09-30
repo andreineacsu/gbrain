@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from 'bun:test';
-import { existsSync, linkSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { publishGitEffect } from '../src/core/persistence/effect-git.ts';
+import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
+import { commitGitEffects, GIT_BATCH_PATHS, publishGitEffect, pushGitEffects } from '../src/core/persistence/effect-git.ts';
 import { git, gitFixture } from './helpers/git-publication.ts';
 import { withEnv } from './helpers/with-env.ts';
 
@@ -180,3 +180,131 @@ test('symlinked root works while escaping descendants and directory targets refu
   expect(readFileSync(join(outside, 'page.md'), 'utf8')).toBe('Outside\n');
   expect(existsSync(join(f.root, 'escape', 'page.md'))).toBe(true);
 });
+
+const commitCount = (f: ReturnType<typeof fixture>) => Number(git(f.root, 'rev-list', '--count', 'HEAD').trim());
+const headPaths = (f: ReturnType<typeof fixture>) => git(f.root, 'show', '--name-only', '--pretty=format:', '-z', 'HEAD').split('\0').filter(Boolean).sort();
+
+test('a batch commits its present changed paths once with literal pathspecs and leaves unrelated staging', async () => {
+  const f = fixture();
+  const names = ['a[1].md', 'Notes/new.md', ...(process.platform === 'win32' ? [] : [':(glob)*.md'])];
+  for (const name of ['a[1].md', 'a1.md', 'unrelated.md']) writeFileSync(join(f.root, name), `Before ${name}\n`);
+  git(f.root, 'add', '.'); git(f.root, '-c', 'core.hooksPath=', 'commit', '-m', 'Tracked files');
+  for (const name of [...names, 'a1.md', 'unrelated.md']) writeFileSync(join(f.root, name), `After ${name}\n`);
+  git(f.root, 'add', '--', 'unrelated.md');
+  const before = commitCount(f);
+  const batch = [...names, 'a[1].md'];
+  expect(await commitGitEffects(f.root, batch)).toEqual(batch.map(() => ({ outcome: { git: 'committed' } })));
+  expect(commitCount(f)).toBe(before + 1);
+  expect(headPaths(f)).toEqual([...names].sort());
+  expect(git(f.root, 'diff', '--cached', '--name-only', '-z')).toBe('unrelated.md\0');
+  expect(git(f.root, 'diff', '--name-only', '-z')).toBe('a1.md\0');
+  expect(await pushGitEffects(f.root)).toEqual({ push: 'committed' });
+  for (const name of names) published(f, name, `After ${name}\n`);
+  published(f, 'a1.md', 'Before a1.md\n');
+  const head = git(f.root, 'rev-parse', 'HEAD');
+  expect(await commitGitEffects(f.root, batch)).toEqual(batch.map(() => ({ outcome: { git: 'unchanged' } })));
+  expect(git(f.root, 'rev-parse', 'HEAD')).toBe(head);
+});
+
+test('batch paths outside the common case keep their single-path outcomes beside committed siblings', async () => {
+  const f = fixture();
+  writeFileSync(join(f.root, '.gitignore'), 'ignored/\n');
+  writeFileSync(join(f.root, 'Notes', 'tracked.md'), 'Tracked\n');
+  git(f.root, 'add', '.'); git(f.root, '-c', 'core.hooksPath=', 'commit', '-m', 'Tracked files');
+  mkdirSync(join(f.root, 'ignored')); writeFileSync(join(f.root, 'ignored', 'page.md'), 'Ignored\n');
+  const outside = join(f.home, 'outside'); mkdirSync(outside); writeFileSync(join(outside, 'page.md'), 'Outside\n');
+  symlinkSync(outside, join(f.root, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
+  writeFileSync(join(f.root, 'page.md'), 'Published\n');
+  writeFileSync(join(f.root, 'Notes', 'other.md'), 'Published too\n');
+  rmSync(join(f.root, 'Notes', 'tracked.md'));
+  const before = commitCount(f);
+  const results = await commitGitEffects(f.root, ['page.md', 'gone/missing.md', 'ignored/page.md', 'Notes/tracked.md', 'escape/page.md', 'Notes/other.md']);
+  expect(results.map(result => 'outcome' in result ? result.outcome : { error: (result.error as { code?: string }).code })).toEqual([
+    { git: 'committed' }, { git: 'skipped', reason: 'target_absent', push: 'skipped' }, { error: 'git_target_unsafe' },
+    { git: 'committed' }, { error: 'git_target_unsafe' }, { git: 'committed' }]);
+  // The present paths share one commit; the tracked deletion takes the single-path commit.
+  expect(commitCount(f)).toBe(before + 2);
+  expect(git(f.root, 'ls-tree', '-r', '--name-only', '-z', 'HEAD').split('\0').filter(Boolean).sort())
+    .toEqual(['.gitignore', 'Notes/other.md', 'initial.md', 'page.md']);
+  expect(readFileSync(join(outside, 'page.md'), 'utf8')).toBe('Outside\n');
+});
+
+test('a full batch of long paths reaches Git through pathspec files and commits once', async () => {
+  const f = fixture();
+  const names = Array.from({ length: GIT_BATCH_PATHS }, (_, i) => `Notes/${String(i).padStart(3, '0')}-${'long-name-'.repeat(20)}.md`);
+  for (const name of names) writeFileSync(join(f.root, name), `Body ${name}\n`);
+  const before = commitCount(f);
+  expect(await commitGitEffects(f.root, names)).toEqual(names.map(() => ({ outcome: { git: 'committed' } })));
+  expect(commitCount(f)).toBe(before + 1);
+  expect(headPaths(f)).toEqual([...names].sort());
+  await expect(commitGitEffects(f.root, [...names, 'Notes/one-more.md'])).rejects.toBeInstanceOf(RangeError);
+});
+
+test('an unhardened root skips the batch and a branch without upstream skips the push', async () => {
+  const f = fixture();
+  writeFileSync(join(f.root, 'page.md'), 'Unpublished\n');
+  const head = git(f.root, 'rev-parse', 'HEAD');
+  expect(await commitGitEffects(f.root, ['page.md', 'other.md'], undefined, false)).toEqual(['page.md', 'other.md'].map(() =>
+    ({ outcome: { git: 'skipped', reason: 'durability_not_enabled', push: 'skipped' } })));
+  expect(git(f.root, 'rev-parse', 'HEAD')).toBe(head);
+  git(f.root, 'branch', '--unset-upstream');
+  expect(await pushGitEffects(f.root)).toEqual({ push: 'skipped', reason: 'no_tracking_remote' });
+});
+
+test('a batch rooted below the Git toplevel commits its modified tracked and new paths', async () => {
+  const f = fixture();
+  const root = join(f.root, 'Notes');
+  for (const name of ['tracked.md', 'same.md']) writeFileSync(join(root, name), `Before ${name}\n`);
+  git(f.root, 'add', '.'); git(f.root, '-c', 'core.hooksPath=', 'commit', '-m', 'Tracked files');
+  writeFileSync(join(root, 'tracked.md'), 'After tracked.md\n');
+  writeFileSync(join(root, 'new.md'), 'New\n');
+  const before = commitCount(f);
+  expect(await commitGitEffects(root, ['tracked.md', 'same.md', 'new.md'], undefined, true)).toEqual([
+    { outcome: { git: 'committed' } }, { outcome: { git: 'unchanged' } }, { outcome: { git: 'committed' } }]);
+  expect(commitCount(f)).toBe(before + 1);
+  expect(headPaths(f)).toEqual(['Notes/new.md', 'Notes/tracked.md']);
+  expect(git(f.root, 'status', '--porcelain')).toBe('');
+});
+
+test.skipIf(process.platform === 'win32' || process.getuid?.() === 0)('a path Git cannot stage fails alone while its batch siblings commit', async () => {
+  const f = fixture();
+  for (const name of ['a.md', 'locked.md', 'b.md']) writeFileSync(join(f.root, name), `Body ${name}\n`);
+  chmodSync(join(f.root, 'locked.md'), 0o000);
+  const results = await commitGitEffects(f.root, ['a.md', 'locked.md', 'b.md']);
+  expect(results.map(result => 'outcome' in result ? result.outcome : { error: (result.error as { code?: string }).code }))
+    .toEqual([{ git: 'committed' }, { error: 'git_unavailable' }, { git: 'committed' }]);
+  expect(git(f.root, 'ls-tree', '-r', '--name-only', '-z', 'HEAD').split('\0').filter(Boolean).sort()).toEqual(['a.md', 'b.md', 'initial.md']);
+  expect(git(f.root, 'status', '--porcelain', '-z')).toBe('?? locked.md\0');
+});
+
+// The whole-tree listings in the order the batch runs them.
+const LISTINGS = ['rev-parse --show-prefix', 'ls-files -z', 'status --porcelain -z --untracked-files=all --no-renames'];
+for (const [failing, why, action, cause] of [
+  // Killed by a signal, Git leaves no exit code: the run reads as one that could not finish.
+  [0, 'a listing that cannot finish', 'kill -KILL $$', 'Git execution did not finish within its bounded attempt.'],
+  // Git before 2.18 rejects `status --no-renames`; a path-scoped status still runs.
+  [2, 'an old Git', 'exit 129', 'exit 129'],
+] as const) {
+  test.skipIf(process.platform === 'win32')(`a failed whole-tree listing (${why}) leaves the batch to the path-scoped single-path route`, async () => {
+    const f = fixture();
+    const bin = join(f.home, 'bin'), log = join(f.home, 'git.log');
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\necho "$*" >> '${log}'\ncase "$*" in *' ${LISTINGS[failing]}') ${action};; esac\n`
+      + `exec '${Bun.which('git')}' "$@"\n`);
+    chmodSync(join(bin, 'git'), 0o755);
+    for (const name of ['a.md', 'b.md']) writeFileSync(join(f.root, name), `Body ${name}\n`);
+    const before = commitCount(f);
+    const warns: string[] = [], origWarn = console.warn;
+    console.warn = (line: unknown) => { warns.push(String(line)); };
+    let results;
+    try { results = await withEnv({ PATH: `${bin}${delimiter}${process.env.PATH}` }, () => commitGitEffects(f.root, ['a.md', 'b.md'])); }
+    finally { console.warn = origWarn; }
+    const calls = readFileSync(log, 'utf8').split('\n');
+    // The first failed listing ends the batch route: no later listing runs.
+    expect(LISTINGS.map(listing => calls.some(call => call.endsWith(` ${listing}`)))).toEqual(LISTINGS.map((_, i) => i <= failing));
+    expect(warns).toEqual([expect.stringContaining(`\`${LISTINGS[failing]}\` failed (${cause}); 2 paths`)]);
+    expect(results).toEqual([{ outcome: { git: 'committed' } }, { outcome: { git: 'committed' } }]);
+    expect(commitCount(f)).toBe(before + 2);
+    expect(git(f.root, 'ls-tree', '-r', '--name-only', '-z', 'HEAD').split('\0').filter(Boolean).sort()).toEqual(['a.md', 'b.md', 'initial.md']);
+  });
+}
