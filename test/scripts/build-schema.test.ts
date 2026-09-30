@@ -25,7 +25,7 @@ import {
   renderPgliteTemplateSql,
   renderSchemaSql,
 } from '../../scripts/build-schema.ts';
-import { PERSISTENCE_DATABASE_PENDING_INDEX_SQL } from '../../src/core/persistence/schema.ts';
+import { PERSISTENCE_DATABASE_PENDING_INDEX_SQL, PERSISTENCE_SYNC_RUN_INDEX_SQL } from '../../src/core/persistence/schema.ts';
 
 const REPO = resolve(import.meta.dir, '..', '..');
 // test-reads-source-ok[structural]: generated-file freshness contract.
@@ -63,8 +63,11 @@ describe('fragment regions', () => {
     }
   });
 
-  test('Postgres omits the CONCURRENTLY-built persistence index; PGLite creates it inline', () => {
-    const idx = PERSISTENCE_DATABASE_PENDING_INDEX_SQL.trim();
+  test.each([
+    ['persistence_requests_database_pending (v165)', PERSISTENCE_DATABASE_PENDING_INDEX_SQL],
+    ['persistence_requests_sync_run (v179)', PERSISTENCE_SYNC_RUN_INDEX_SQL],
+  ])('Postgres omits the CONCURRENTLY-built %s; PGLite creates it inline', (_name, sql) => {
+    const idx = sql.trim();
     expect(schemaSql).not.toContain(idx);
     expect(renderPgliteTemplateSql(schemaSql)).toContain(idx);
   });

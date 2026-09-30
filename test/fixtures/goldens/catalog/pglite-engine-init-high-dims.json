@@ -812,6 +812,7 @@
       "persistence_requests_principal_kind_principal_id_request_id_key": "CREATE UNIQUE INDEX persistence_requests_principal_kind_principal_id_request_id_key ON public.persistence_requests USING btree (principal_kind, principal_id, request_id)",
       "persistence_requests_recovery": "CREATE INDEX persistence_requests_recovery ON public.persistence_requests USING btree (worktree_id, sequence) WHERE (recovery IS NOT NULL)",
       "persistence_requests_sequence_key": "CREATE UNIQUE INDEX persistence_requests_sequence_key ON public.persistence_requests USING btree (sequence)",
+      "persistence_requests_sync_run": "CREATE INDEX persistence_requests_sync_run ON public.persistence_requests USING btree (((intent ->> 'runId'::text)), ((intent ->> 'index'::text))) WHERE ((intent ->> 'runId'::text) IS NOT NULL)",
       "persistence_source_bindings_pkey": "CREATE UNIQUE INDEX persistence_source_bindings_pkey ON public.persistence_source_bindings USING btree (source_id)",
       "persistence_topology_changes_pkey": "CREATE UNIQUE INDEX persistence_topology_changes_pkey ON public.persistence_topology_changes USING btree (id)",
       "persistence_topology_changes_principal_id_request_id_key": "CREATE UNIQUE INDEX persistence_topology_changes_principal_id_request_id_key ON public.persistence_topology_changes USING btree (principal_id, request_id)",

@@ -4,6 +4,9 @@ export const PERSISTENCE_REQUEST_RECOVERY_INDEX_SQL = `CREATE INDEX IF NOT EXIST
   ON persistence_requests(worktree_id,sequence) WHERE recovery IS NOT NULL`;
 export const PERSISTENCE_DATABASE_PENDING_INDEX_SQL = `CREATE INDEX IF NOT EXISTS persistence_requests_database_pending
   ON persistence_requests(source_incarnation,sequence) WHERE worktree_id IS NULL AND state IN ('queued','running','recovering')`;
+/** The sync checkpoint gate finds its run's receipts under the publication statement timeout; only sync intents carry a runId. */
+export const PERSISTENCE_SYNC_RUN_INDEX_SQL = `CREATE INDEX IF NOT EXISTS persistence_requests_sync_run
+  ON persistence_requests((intent->>'runId'),(intent->>'index')) WHERE (intent->>'runId') IS NOT NULL`;
 /** Durable infrastructure: never reconstruct or discard these rows during page reindexing. */
 export const PERSISTENCE_SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS persistence_brain (
@@ -91,6 +94,7 @@ export const PERSISTENCE_SCHEMA_STATEMENTS = [
     WHERE state IN ('queued','running','recovering')`,
   PERSISTENCE_REQUEST_RECOVERY_INDEX_SQL,
   PERSISTENCE_DATABASE_PENDING_INDEX_SQL,
+  PERSISTENCE_SYNC_RUN_INDEX_SQL,
   `CREATE INDEX IF NOT EXISTS persistence_requests_principal ON persistence_requests(principal_kind,principal_id,sequence DESC)`,
   `CREATE TABLE IF NOT EXISTS persistence_effects (
     id bigserial PRIMARY KEY,

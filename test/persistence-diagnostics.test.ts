@@ -71,15 +71,21 @@ for (const reason of ['writer_busy', 'database_contention']) test.each([0, 18000
   else expect(blocker.next_action).toBe(WRITER_NEXT_ACTIONS[reason]);
 });
 
-test('fresh and upgraded engines agree on the database-only pending index', async () => {
+test('fresh and upgraded engines agree on the concurrently built request indexes', async () => {
+  const indexes = [
+    { name: 'persistence_requests_database_pending', parts: ['source_incarnation, sequence', 'worktree_id IS NULL'] },
+    { name: 'persistence_requests_sync_run', parts: ["(intent ->> 'runId'::text)", "(intent ->> 'index'::text)", "WHERE ((intent ->> 'runId'::text) IS NOT NULL)"] },
+  ];
   for (const engine of engines) {
-    const [fresh] = await engine.executeRaw<{ indexdef: string }>(
-      "SELECT indexdef FROM pg_indexes WHERE indexname='persistence_requests_database_pending'");
-    expect(fresh.indexdef).toContain('source_incarnation, sequence');
-    expect(fresh.indexdef).toContain('worktree_id IS NULL');
-    await engine.executeRaw('DROP INDEX persistence_requests_database_pending');
+    const fresh = new Map<string, string>();
+    for (const index of indexes) {
+      const [row] = await engine.executeRaw<{ indexdef: string }>('SELECT indexdef FROM pg_indexes WHERE indexname=$1', [index.name]);
+      for (const part of index.parts) expect(row.indexdef).toContain(part);
+      fresh.set(index.name, row.indexdef);
+      await engine.executeRaw(`DROP INDEX ${index.name}`);
+    }
     await engine.executeRaw('DROP INDEX persistence_effects_parked');
-    if (engine.kind === 'postgres') {
+    if (engine.kind === 'postgres') for (const index of indexes) {
       const held = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
       const holding = engine.transaction(async tx => {
         await tx.executeRaw('LOCK TABLE persistence_requests IN ROW EXCLUSIVE MODE');
@@ -87,26 +93,30 @@ test('fresh and upgraded engines agree on the database-only pending index', asyn
       });
       await held.promise;
       const abort = new AbortController();
-      const interrupted = engine.executeRawDirect(fresh.indexdef.replace('CREATE INDEX ', 'CREATE INDEX CONCURRENTLY '), [], { signal: abort.signal })
+      const interrupted = engine.executeRawDirect(fresh.get(index.name)!.replace('CREATE INDEX ', 'CREATE INDEX CONCURRENTLY '), [], { signal: abort.signal })
         .then(() => false, () => true);
       try {
         await waitFor(async () => (await engine.executeRaw<{ indisvalid: boolean }>(
-          "SELECT indisvalid FROM pg_index WHERE indexrelid=to_regclass('persistence_requests_database_pending')"))[0]?.indisvalid === false);
+          'SELECT indisvalid FROM pg_index WHERE indexrelid=to_regclass($1)', [index.name]))[0]?.indisvalid === false);
         abort.abort();
         expect(await interrupted).toBe(true);
       } finally { abort.abort(); release.resolve(); await holding; await interrupted; }
     }
     await engine.setConfig('version', '164');
-    expect(LATEST_VERSION).toBe(178);
-    expect(await runMigrations(engine)).toEqual({ applied: 14, current: 178 });
-    const [upgraded] = await engine.executeRaw<{ indexdef: string }>(
-      "SELECT indexdef FROM pg_indexes WHERE indexname='persistence_requests_database_pending'");
-    expect(upgraded.indexdef).toBe(fresh.indexdef);
+    expect(LATEST_VERSION).toBe(179);
+    expect(await runMigrations(engine)).toEqual({ applied: 15, current: 179 });
+    for (const index of indexes) {
+      const [upgraded] = await engine.executeRaw<{ indexdef: string }>('SELECT indexdef FROM pg_indexes WHERE indexname=$1', [index.name]);
+      expect(upgraded.indexdef).toBe(fresh.get(index.name)!);
+      // pg_indexes lists an invalid leftover too; only indisvalid proves the rebuild.
+      const [state] = await engine.executeRaw<{ indisvalid: boolean }>('SELECT indisvalid FROM pg_index WHERE indexrelid=to_regclass($1)', [index.name]);
+      expect(state.indisvalid).toBe(true);
+    }
     const [parked] = await engine.executeRaw<{ indexdef: string }>("SELECT indexdef FROM pg_indexes WHERE indexname='persistence_effects_parked'");
     expect(parked.indexdef).toContain('parked');
-    expect(await engine.getConfig('version')).toBe('178');
+    expect(await engine.getConfig('version')).toBe('179');
   }
-}, 15000);
+}, 30000);
 
 test('admin diagnostics account for queued work and configured limits without exposing intent', async () => {
   for (const engine of engines) {

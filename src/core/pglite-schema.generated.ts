@@ -1156,6 +1156,8 @@ CREATE INDEX IF NOT EXISTS persistence_requests_recovery
   ON persistence_requests(worktree_id,sequence) WHERE recovery IS NOT NULL;
 CREATE INDEX IF NOT EXISTS persistence_requests_database_pending
   ON persistence_requests(source_incarnation,sequence) WHERE worktree_id IS NULL AND state IN ('queued','running','recovering');
+CREATE INDEX IF NOT EXISTS persistence_requests_sync_run
+  ON persistence_requests((intent->>'runId'),(intent->>'index')) WHERE (intent->>'runId') IS NOT NULL;
 CREATE INDEX IF NOT EXISTS persistence_requests_principal ON persistence_requests(principal_kind,principal_id,sequence DESC);
 CREATE TABLE IF NOT EXISTS persistence_effects (
     id bigserial PRIMARY KEY,
