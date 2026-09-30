@@ -125,7 +125,9 @@ jobs:
             test/persistence-migration-preservation.test.ts \
             test/persistence-recovery-capacity.test.ts \
             test/audit/pool-recovery-audit.test.ts \
-            test/persistence-recovery-fairness.test.ts
+            test/persistence-recovery-fairness.test.ts \
+            test/persistence-diagnostics.test.ts \
+            test/persistence-sync-checkpoint-index.test.ts
       - name: Require data-safety on PostgreSQL
         timeout-minutes: 10
         env:
