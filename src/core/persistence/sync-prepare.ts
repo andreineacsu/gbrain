@@ -40,6 +40,11 @@ export interface SyncIntent extends Record<string, unknown> {
   syncAuthority: SyncAuthority; cursorKey: string; runId: string; index: number;
   from: string | null; target: string; total: number; slugMode: 'git-root' | 'source-root';
 }
+/** Checkpoint gate ($1 worktree, $2 run id): any retained recovery, or a page receipt of the run that did not commit. */
+export const MANAGED_SYNC_INCOMPLETE_RECEIPT_SQL = `SELECT r.id FROM persistence_requests r WHERE r.worktree_id=$1::uuid AND
+      (r.recovery IS NOT NULL OR (r.intent->>'runId'=$2 AND r.intent->>'kind' IN ('managed_sync_import','managed_sync_delete') AND r.state<>'committed'
+        AND (r.state IN ('queued','running','recovering') OR NOT EXISTS (SELECT 1 FROM persistence_requests committed
+          WHERE committed.source_id=r.source_id AND committed.intent->>'runId'=$2 AND committed.intent->>'index'=r.intent->>'index' AND committed.state='committed')))) LIMIT 1`;
 export async function prepareManagedSyncMutation(engine: BrainEngine, row: WriteRequest, _config: GBrainConfig): Promise<PreparedMutation> {
   const p = row.intent as SyncIntent | null;
   if (!p || !['managed_sync_import', 'managed_sync_delete', 'managed_sync_checkpoint'].includes(p.kind)) throw new OperationError('invalid_params', 'Unsupported internal sync intent.');
@@ -127,11 +132,7 @@ export async function prepareManagedSyncMutation(engine: BrainEngine, row: Write
     }
     const [manifest] = await tx.executeRaw<{ count: number }>("SELECT jsonb_array_length(completed_keys) AS count FROM op_checkpoints WHERE op='managed-sync-manifest' AND fingerprint=$1", [p.runId]);
     if (!manifest || Number(manifest.count) !== p.total) throw new OperationError('storage_error', 'The immutable sync manifest is incomplete.');
-    const [incomplete] = await tx.executeRaw(`SELECT r.id FROM persistence_requests r WHERE r.worktree_id=$1::uuid AND
-      (r.recovery IS NOT NULL OR (r.intent->>'runId'=$2 AND r.intent->>'kind' IN ('managed_sync_import','managed_sync_delete') AND r.state<>'committed'
-        AND (r.state IN ('queued','running','recovering') OR NOT EXISTS (SELECT 1 FROM persistence_requests committed
-          WHERE committed.source_id=r.source_id AND committed.intent->>'runId'=$2 AND committed.intent->>'index'=r.intent->>'index' AND committed.state='committed')))) LIMIT 1`,
-      [row.worktree_id, p.runId]);
+    const [incomplete] = await tx.executeRaw(MANAGED_SYNC_INCOMPLETE_RECEIPT_SQL, [row.worktree_id, p.runId]);
     if (incomplete) throw new OperationError('recovery_required', 'An incomplete page receipt still blocks the sync checkpoint.');
     const changed = await tx.executeRaw(`UPDATE sources SET last_commit=$3,last_sync_at=now(),config=jsonb_set(${SOURCE_CONFIG_OBJECT_SQL},'{slug_root_mode}',to_jsonb($5::text)),
       newest_content_at=(SELECT MAX(updated_at) FROM pages WHERE source_id=$1 AND deleted_at IS NULL)
