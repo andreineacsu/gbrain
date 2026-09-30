@@ -39,6 +39,16 @@ export interface EffectWorkerOptions {
   hostId: string;
   limit?: number;
   signal?: AbortSignal;
+  /**
+   * Coalescing window in milliseconds for fresh single-file Git effects (the
+   * consumer passes one); absent or 0 claims them at once, as direct callers expect.
+   */
+  gitCoalesceMs?: number;
+  /**
+   * Claims only single-file Git effects and skips effect recoveries: the
+   * stopping consumer's last pass publishes what the host's windows were holding.
+   */
+  singleFileGitOnly?: boolean;
   /** Failure boundary injection; production never supplies this. */
   boundary?: (name: 'before_mirror_file' | 'after_mirror_file' | 'before_mirror_commit'
     | 'before_git_commit' | 'after_git_commit' | 'after_git_push') => Promise<void>;
@@ -425,7 +435,7 @@ async function parkEffectTarget(engine: BrainEngine, effect: PersistenceEffect, 
 /** Bounded, idempotent work. Recovery obtains kernel exclusion before a DB claim. */
 export async function runPersistenceEffects(engine: BrainEngine, config: GBrainConfig, opts: EffectWorkerOptions): Promise<void> {
   const limit = Math.max(1, Math.min(opts.limit ?? 2, 20));
-  const recoveries = await selectEffectRecoveries(engine, opts.hostId, limit);
+  const recoveries = opts.singleFileGitOnly ? [] : await selectEffectRecoveries(engine, opts.hostId, limit);
   let attempted = 0;
   for (const recovery of recoveries) {
     if (opts.signal?.aborted) return;
@@ -444,7 +454,7 @@ export async function runPersistenceEffects(engine: BrainEngine, config: GBrainC
     finally { await lock.release(); }
   }
   while (attempted++ < limit && !opts.signal?.aborted) {
-    const claimed = await claimPersistenceEffect(engine, opts.hostId);
+    const claimed = await claimPersistenceEffect(engine, opts.hostId, opts.gitCoalesceMs, opts.singleFileGitOnly);
     if (!claimed) return;
     let effect = claimed;
     const attempt: EffectAttempt = {};

@@ -9,6 +9,7 @@ import type { SqlEngine } from './model.ts';
 import { isFactsExtractionEnabled } from '../facts/extract.ts';
 import { resolveDefaultVisibility } from '../facts/visibility.ts';
 import { declarePersistenceProtocol, PERSISTENCE_PROTOCOL_PREDICATE } from './protocol.ts';
+import { GIT_BATCH_PATHS } from './effect-git.ts';
 
 export async function queuePublicationEffects(tx: BrainEngine, row: EffectRequest, revision: string | undefined,
   outcome: Record<string, unknown>, prepared?: PreparedMutation): Promise<void> {
@@ -39,7 +40,7 @@ export async function queuePublicationEffects(tx: BrainEngine, row: EffectReques
 }
 
 /** A ready effect whose worktree has no pending recovery and whose withdrawal mirror, if any, has committed. */
-const READY_EFFECT = `(e.state='queued' OR e.state='running' AND e.claim_expires_at<now()) AND e.next_attempt_at<=now()
+export const READY_EFFECT = `(e.state='queued' OR e.state='running' AND e.claim_expires_at<now()) AND e.next_attempt_at<=now()
       AND e.recovery IS NULL AND NOT EXISTS (SELECT 1 FROM persistence_effects blocked
         WHERE blocked.worktree_id=e.worktree_id AND blocked.recovery IS NOT NULL)
       AND NOT EXISTS (SELECT 1 FROM persistence_requests blocked
@@ -47,15 +48,21 @@ const READY_EFFECT = `(e.state='queued' OR e.state='running' AND e.claim_expires
       AND (e.kind='withdrawal-mirror' OR NOT EXISTS (SELECT 1 FROM persistence_effects mirror
         WHERE mirror.request_id=e.request_id AND mirror.kind='withdrawal-mirror' AND mirror.state<>'committed'))`;
 
-/** Claims release their database connection before waiting for a filesystem lock/provider. */
-export async function claimPersistenceEffect(engine: BrainEngine, hostId: string): Promise<PersistenceEffect | null> {
+/**
+ * Claims release their database connection before waiting for a filesystem lock/provider.
+ * `gitCoalesceMs` holds fresh single-file Git effects for that window (see `heldGitEffect`);
+ * `singleFileGitOnly` claims nothing else.
+ */
+export async function claimPersistenceEffect(engine: BrainEngine, hostId: string, gitCoalesceMs = 0,
+  singleFileGitOnly = false): Promise<PersistenceEffect | null> {
   return engine.transactionDirect(async tx => {
     await declarePersistenceProtocol(tx);
     const [candidate] = await tx.executeRaw<PersistenceEffect>(`SELECT e.* FROM persistence_effects e
       LEFT JOIN persistence_worktrees w ON w.id=e.worktree_id
       WHERE ${READY_EFFECT}
-      AND (e.worktree_id IS NULL OR w.owner_host_id=$1::uuid)
-      ORDER BY e.next_attempt_at,e.id LIMIT 1 FOR UPDATE OF e SKIP LOCKED`, [hostId]);
+      AND (e.worktree_id IS NULL OR w.owner_host_id=$1::uuid) AND NOT ${heldGitEffect('$2', '$3')}
+      AND (NOT $4::boolean OR ${SINGLE_FILE_GIT})
+      ORDER BY e.next_attempt_at,e.id LIMIT 1 FOR UPDATE OF e SKIP LOCKED`, [hostId, gitCoalesceMs, GIT_BATCH_PATHS, singleFileGitOnly]);
     if (!candidate) return null;
     const [claimed] = await tx.executeRaw<PersistenceEffect>(`UPDATE persistence_effects SET state='running',execution_token=$2::uuid,
       claim_expires_at=now()+interval '2 minutes',attempts=attempts+1,updated_at=now() WHERE id=$1 RETURNING *`, [candidate.id, randomUUID()]);
@@ -68,8 +75,27 @@ export function singleFileGitEffect(effect: PersistenceEffect): boolean {
   return effect.kind === 'git' && effect.data.version === undefined && effect.data.source_scan === undefined
     && typeof effect.data.relative_path === 'string' && effect.data.relative_path !== '';
 }
-const SINGLE_FILE_GIT = `e.kind='git' AND e.data->'version' IS NULL AND e.data->'source_scan' IS NULL
-      AND jsonb_typeof(e.data->'relative_path')='string' AND e.data->>'relative_path'<>''`;
+const singleFileGit = (e: string) => `${e}.kind='git' AND ${e}.data->'version' IS NULL AND ${e}.data->'source_scan' IS NULL
+      AND jsonb_typeof(${e}.data->'relative_path')='string' AND ${e}.data->>'relative_path'<>''`;
+const SINGLE_FILE_GIT = singleFileGit('e');
+
+/**
+ * A never-attempted single-file Git effect still inside the coalescing window
+ * (`windowMs`, milliseconds; 0 holds nothing) while its worktree and source
+ * hold fewer than `batchPaths` such effects ready. Leaving it queued lets a
+ * sequential writer's files publish as one batch; the batch claim takes held
+ * siblings once another effect of the worktree is claimed. Age is `updated_at`,
+ * which no path changes before a row's first claim. Retried effects, walks and
+ * scans are never held. Both placeholders are bound parameters.
+ */
+export function heldGitEffect(windowMs: string, batchPaths: string): string {
+  return `((${SINGLE_FILE_GIT} AND e.attempts=0 AND e.state='queued' AND ${windowMs}::double precision>0
+      AND e.updated_at>now()-(${windowMs}::double precision*interval '1 millisecond')
+      AND (SELECT count(*) FROM (SELECT 1 FROM persistence_effects peer WHERE peer.worktree_id=e.worktree_id
+        AND peer.source_id=e.source_id AND peer.source_incarnation=e.source_incarnation AND peer.state='queued'
+        AND peer.next_attempt_at<=now() AND peer.recovery IS NULL AND ${singleFileGit('peer')}
+        LIMIT ${batchPaths}::int) ready_peers)<${batchPaths}::int) IS TRUE)`;
+}
 
 /**
  * Under the worktree lock `first` holds, claims up to `limit` other ready

@@ -297,11 +297,43 @@ is reserved before touching a file; insufficient capacity leaves the withdrawal
 effective and its physical mirror queued.
 
 Git work runs only for repositories already opted into durability hardening.
-It commits the affected file without invoking legacy hooks, then attempts a
-plain push to the configured tracking remote. It never pulls or rebases source
-files. An unconfigured remote is reported as a skipped push. Embeddings wait
-for an enabled, configured provider and install only if the page revision and
-its text projection still match.
+The persistence consumer lets the Git work of one worktree gather for up to
+one second after a write, or until 100 files are waiting, then commits those
+files together without invoking legacy hooks. It attempts one plain push to
+the configured tracking remote after releasing the worktree lock, so the next
+write does not wait for the network. It never pulls or rebases source files.
+An unconfigured remote is reported as a skipped push. Git publication can
+therefore trail a committed write by about the one-second window plus one
+batch and one idle-probe interval; receipts show `git_state: queued`
+meanwhile, and `gbrain sources writer status --json` shows the queued Git
+backlog in its `effects` rows (`kind`, `state`, `count` and `oldest_at`).
+Embeddings wait for an enabled, configured provider and install only if the
+page revision and its text projection still match.
+
+A consumer that stops ends with one last pass, without the window, over the
+ready single-file Git work of its whole host. Every gbrain process under the
+same `GBRAIN_HOME` shares that host identity, so the pass can also publish
+work another process's window was still holding. The pass makes at most two
+claims and stops after three seconds. Work it does not reach stays pending for
+a later consumer: held work that spans more than two worktrees or batches, a
+worktree another writer holds, and anything left during a database outage. A
+batch whose commit or push outlasts the three seconds keeps its effects
+claimed, and a later consumer publishes them once the claim expires, two
+minutes after it was taken. A one-shot command that runs its own consumer,
+such as a CLI `put` or `remember` with no resident owner holding the brain,
+therefore commits and pushes its file before it exits. While a resident PGLite
+owner holds the brain, the CLI hands the write to that owner instead, and the
+owner's window publishes the file after the command has exited.
+
+Batching needs the resident owner on the host to be one that applies the
+window. An older resident owner, such as a long-running `gbrain serve` left
+up across an upgrade, publishes each Git effect as soon as it is queued, so a
+large rewrite during the upgrade (for example a grandfathering migration on a
+managed brain) still commits and pushes page by page. Stop the resident owner
+before upgrading a large managed brain, then restart it on the new version.
+
+**Say to your agent:** *"Stop the running brain server, upgrade gbrain, then
+start the server again on the new version."*
 
 ### Withdrawal recovery
 

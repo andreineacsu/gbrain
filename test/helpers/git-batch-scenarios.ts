@@ -22,21 +22,26 @@ import { acquireNativeLock } from '../../src/core/persistence/native-lock.ts';
 import { managedBrain } from './managed-brain.ts';
 import { git } from './git-publication.ts';
 
-type GitEffect = { id: number; request_id: string; slug: string; state: string; error_code: string | null;
+export type GitEffect = { id: number; request_id: string; slug: string; state: string; error_code: string | null;
   data: Record<string, unknown>; outcome: Record<string, unknown> | null };
 
-/** Remote-side files: a push log with one `start`/`end` pair per receive-pack, a gate that holds pushes, a flag that rejects them. */
-interface Remote { log: string; gate: string; reject: string }
-const remoteFiles = (root: string): Remote => ({ log: join(dirname(root), 'pushes.log'), gate: join(dirname(root), 'push.gate'), reject: join(dirname(root), 'push.reject') });
+/**
+ * Remote-side files: a push log with one `start`/`end` pair per receive-pack, a gate that holds pushes, a flag that rejects them,
+ * and a flag that slows each push by one second.
+ */
+interface Remote { log: string; gate: string; reject: string; slow: string }
+export const remoteFiles = (root: string): Remote => ({ log: join(dirname(root), 'pushes.log'), gate: join(dirname(root), 'push.gate'),
+  reject: join(dirname(root), 'push.reject'), slow: join(dirname(root), 'push.slow') });
 
 /**
  * An unhardened repo with a tracking remote whose receive-pack logs, waits
- * while the gate exists and fails while the reject flag exists. Effects that
- * run before `harden` complete as durability_not_enabled and commit nothing.
+ * while the gate exists, sleeps one second while the slow flag exists and
+ * fails while the reject flag exists. Effects that run before `harden`
+ * complete as durability_not_enabled and commit nothing.
  */
-function remoteRepo(root: string, files: Record<string, string> = {}): void {
+export function remoteRepo(root: string, files: Record<string, string> = {}): void {
   const remote = join(dirname(root), 'remote.git');
-  const { log, gate, reject } = remoteFiles(root);
+  const { log, gate, reject, slow } = remoteFiles(root);
   git(root, 'init', '-q', '-b', 'main');
   git(root, 'config', 'user.name', 'Example Writer');
   git(root, 'config', 'user.email', 'writer@example.invalid');
@@ -45,29 +50,29 @@ function remoteRepo(root: string, files: Record<string, string> = {}): void {
   git(dirname(root), 'init', '-q', '--bare', remote);
   git(root, 'remote', 'add', 'origin', remote); git(root, 'push', '-q', '-u', 'origin', 'main');
   const wrapper = join(dirname(root), 'receive-pack.sh');
-  writeFileSync(wrapper, `#!/bin/sh\necho start >> '${log}'\nwhile [ -e '${gate}' ]; do sleep 0.02; done\n`
+  writeFileSync(wrapper, `#!/bin/sh\necho start >> '${log}'\nwhile [ -e '${gate}' ]; do sleep 0.02; done\nif [ -e '${slow}' ]; then sleep 1; fi\n`
     + `if [ -e '${reject}' ]; then echo end >> '${log}'; exit 1; fi\ngit receive-pack "$@"\ncode=$?\necho end >> '${log}'\nexit $code\n`);
   chmodSync(wrapper, 0o755);
   git(root, 'config', 'remote.origin.receivepack', wrapper);
 }
-function harden(root: string): void {
+export function harden(root: string): void {
   const hook = join(root, '.git', 'hooks', 'post-commit');
   writeFileSync(hook, '#!/bin/sh\n# gbrain brain-durability post-commit hook (v0.42.44+)\nexit 99\n');
   chmodSync(hook, 0o755);
 }
 const pushLog = (root: string) => existsSync(remoteFiles(root).log) ? readFileSync(remoteFiles(root).log, 'utf8').split('\n').filter(Boolean) : [];
-const pushes = (root: string) => pushLog(root).filter(line => line === 'start').length;
-const commits = (root: string) => Number(git(root, 'rev-list', '--count', 'HEAD').trim());
+export const pushes = (root: string) => pushLog(root).filter(line => line === 'start').length;
+export const commits = (root: string) => Number(git(root, 'rev-list', '--count', 'HEAD').trim());
 const headPaths = (root: string) => git(root, 'show', '--name-only', '--pretty=format:', 'HEAD').split('\n').filter(Boolean).sort();
 const remoteHead = (root: string) => git(join(dirname(root), 'remote.git'), 'rev-parse', 'refs/heads/main');
 const remotePaths = (root: string) => git(join(dirname(root), 'remote.git'), 'ls-tree', '-r', '--name-only', 'refs/heads/main').split('\n').filter(Boolean);
 
-async function put(ctx: OperationContext, slug: string, body: string) {
+export async function put(ctx: OperationContext, slug: string, body: string) {
   const current = await ctx.engine.readPageSnapshot(slug, { sourceId: 'default' });
   return submitPageMutation(ctx, { operation: 'put_page', params: { slug, request_id: randomUUID(),
     content: `---\ntype: note\ntitle: ${slug}\n---\n\n${body}\n`, ...(current ? { expected_revision: current.revision } : {}) } });
 }
-async function gitEffects(engine: BrainEngine, slugs: string[]): Promise<GitEffect[]> {
+export async function gitEffects(engine: BrainEngine, slugs: string[]): Promise<GitEffect[]> {
   return engine.executeRaw<GitEffect>(`SELECT e.id,e.request_id::text AS request_id,r.slug,e.state,e.error_code,e.data,e.outcome
     FROM persistence_effects e JOIN persistence_requests r ON r.id=e.request_id
     WHERE e.kind='git' AND r.slug=ANY($1::text[]) ORDER BY e.id`, [slugs]);
@@ -83,14 +88,14 @@ async function due(engine: BrainEngine, effects: GitEffect[], fresh = false): Pr
   });
 }
 /** Writes pages (and any further mutations) while the repo is not hardened, then hardens it: their Git effects committed nothing. */
-async function writeUnpublished(engine: BrainEngine, ctx: OperationContext, root: string, pages: Array<[slug: string, body: string]>,
+export async function writeUnpublished(engine: BrainEngine, ctx: OperationContext, root: string, pages: Array<[slug: string, body: string]>,
   more?: () => Promise<unknown>): Promise<void> {
   for (const [slug, body] of pages) await put(ctx, slug, body);
   await more?.();
   await disposePersistenceConsumer(engine);
   harden(root);
 }
-const pass = (engine: BrainEngine, ctx: OperationContext, opts: Partial<EffectWorkerOptions> = {}) =>
+export const pass = (engine: BrainEngine, ctx: OperationContext, opts: Partial<EffectWorkerOptions> = {}) =>
   runPersistenceEffects(engine, ctx.config, { hostId: localHostId(), limit: 1, ...opts });
 async function until(condition: () => boolean | Promise<boolean>, what: string): Promise<void> {
   const deadline = Date.now() + 15_000;

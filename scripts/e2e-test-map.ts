@@ -202,6 +202,7 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
     "test/e2e/persistence-idle-pool.test.ts",
     "test/e2e/persistence-publication-parity.test.ts",
     "test/e2e/persistence-git-batch-postgres.test.ts",
+    "test/e2e/persistence-git-coalescing-postgres.test.ts",
     "test/e2e/persistence-sync-origin-parity.test.ts",
     "test/e2e/persistence-sync-options-parity.test.ts",
     "test/e2e/persistence-sync-company-parity.test.ts",
@@ -247,7 +248,7 @@ export const E2E_TEST_MAP: Record<string, string[]> = {
   "src/core/cycle/extract-atoms.ts": ["test/e2e/extract-atoms-page-state.test.ts", "test/e2e/cycle.test.ts", "test/e2e/dream.test.ts", "test/e2e/multi-source-bug-class.test.ts", "test/e2e/managed-extract-atoms.test.ts", "test/e2e/managed-atom-regressions.test.ts", "test/e2e/managed-atom-compaction.test.ts"],
   "src/core/cycle/synthesize*.ts": ["test/e2e/managed-maintenance.test.ts", "test/e2e/managed-synthesis-postprocess.test.ts"],
   "src/core/cycle/extract-atoms-page-state.ts": ["test/e2e/extract-atoms-page-state.test.ts", "test/e2e/reconcile-crash.test.ts", "test/e2e/reconcile-crash-unactivated.test.ts", "test/e2e/reconcile-pgbouncer.test.ts"],
-  "src/commands/migrations/v0_13_1.ts": ["test/e2e/grandfather-projection-postgres.test.ts"],
+  "src/commands/migrations/v0_13_1.ts": ["test/e2e/grandfather-projection-postgres.test.ts", "test/e2e/persistence-git-coalescing-postgres.test.ts"],
   "src/core/pool-budget.ts": ["test/e2e/persistence-runtime-matrix.test.ts"],
   "src/core/connection-manager.ts": ["test/e2e/persistence-runtime-matrix.test.ts", "test/e2e/pgbouncer-teardown.test.ts"],
   "src/core/postgres-engine.ts": [

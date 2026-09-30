@@ -8,9 +8,22 @@ import { refreshManagedFilesystemRoots } from './filesystem-guard.ts';
 import { rebuildPendingPageProjections } from '../page-state/projections.ts';
 import { publicationConcurrency } from './pool-capacity.ts';
 import { runPersistenceEffects } from './effects.ts';
+import { heldGitEffect, READY_EFFECT } from './effect-journal.ts';
+import { GIT_BATCH_PATHS } from './effect-git.ts';
 import { PERSISTENCE_PROTOCOL_PREDICATE } from './protocol.ts';
 import { isWriteErrorCode } from './types.ts';
 
+/**
+ * How long the consumer leaves a fresh single-file Git effect unclaimed, so a
+ * sequential writer keeps the worktree lock free and its files publish as one batch.
+ */
+const GIT_COALESCE_MS = 1000;
+/**
+ * Time budget of the stop pass over held Git effects. Callers bound the whole
+ * shutdown at 5 s (serve cleanup, PGLite close), so the pass ends well before;
+ * a batch it aborts keeps its claims for lease recovery.
+ */
+export const STOP_PASS_BUDGET_MS = 3000;
 export type PrepareMutation = (engine: BrainEngine, row: WriteRequest, config: GBrainConfig, signal?: AbortSignal) => Promise<PreparedMutation>;
 export class PersistenceConsumer {
   private stopping = false;
@@ -30,6 +43,8 @@ export class PersistenceConsumer {
   private rootRetryAfter = new Map<string, number>();
   private projectionWorker: Promise<unknown> | undefined;
   private effectsWorker: Promise<void> | undefined;
+  private effectsStarted = false;
+  private gitFlush: Promise<void> | undefined;
   private topologyWorker: Promise<unknown> | undefined;
   private maintenanceWorker: Promise<unknown> | undefined;
   private nextMaintenance = 0;
@@ -96,12 +111,8 @@ export class PersistenceConsumer {
         AND r.publication_started=false AND r.claim_expires_at<now()
         AND (r.worktree_id IS NULL OR EXISTS (SELECT 1 FROM persistence_worktrees w WHERE w.id=r.worktree_id AND w.owner_host_id=$1::uuid)))
       OR EXISTS (SELECT 1 FROM persistence_effects e LEFT JOIN persistence_worktrees w ON w.id=e.worktree_id
-        WHERE (e.state='queued' OR e.state='running' AND e.claim_expires_at<now()) AND e.next_attempt_at<=now()
-        AND (e.worktree_id IS NULL OR w.owner_host_id=$1::uuid) AND e.recovery IS NULL
-        AND NOT EXISTS (SELECT 1 FROM persistence_effects blocked WHERE blocked.worktree_id=e.worktree_id AND blocked.recovery IS NOT NULL)
-        AND NOT EXISTS (SELECT 1 FROM persistence_requests blocked WHERE blocked.worktree_id=e.worktree_id AND blocked.recovery IS NOT NULL)
-        AND (e.kind='withdrawal-mirror' OR NOT EXISTS (SELECT 1 FROM persistence_effects mirror
-          WHERE mirror.request_id=e.request_id AND mirror.kind='withdrawal-mirror' AND mirror.state<>'committed')))
+        WHERE ${READY_EFFECT}
+        AND (e.worktree_id IS NULL OR w.owner_host_id=$1::uuid) AND NOT ${heldGitEffect('$5', '$6')})
       OR EXISTS (SELECT 1 FROM persistence_effects e JOIN persistence_worktrees w ON w.id=e.worktree_id
         WHERE e.recovery IS NOT NULL AND w.owner_host_id=$1::uuid AND e.next_attempt_at<=now())
       OR EXISTS (SELECT 1 FROM page_projection_jobs j JOIN sources s ON s.incarnation=j.source_incarnation
@@ -111,7 +122,7 @@ export class PersistenceConsumer {
       OR EXISTS (SELECT 1 FROM persistence_topology_changes c
         JOIN persistence_worktrees w ON w.id=(c.recovery->>'worktreeId')::uuid
         WHERE c.recovery IS NOT NULL AND w.owner_host_id=$1::uuid AND NOT (c.id::text=ANY($4::text[])))
-    ) AS work`, [this.hostId, excluded, publicationConcurrency(this.engine) > 0, retryingTopologies], signal));
+    ) AS work`, [this.hostId, excluded, publicationConcurrency(this.engine) > 0, retryingTopologies, GIT_COALESCE_MS, GIT_BATCH_PATHS], signal));
     return row?.work === true;
   }
   /**
@@ -215,8 +226,9 @@ export class PersistenceConsumer {
       .then(({ recoverSourceTopologies }) => recoverSourceTopologies(this.engine, { hostId: this.hostId, limit: 2,
         onAttempt: (id, recovered) => { if (recovered) this.topologyRetryAfter.delete(id); else this.topologyRetryAfter.set(id, Date.now() + 30_000); } }))
       .catch(error => this.report(error)).finally(() => { this.topologyWorker = undefined; });
+    this.effectsStarted = true;
     if (!this.effectsWorker) this.effectsWorker = runPersistenceEffects(this.engine, this.config,
-      { hostId: this.hostId, limit: 2, signal: this.abort.signal }).catch(error => this.report(error))
+      { hostId: this.hostId, limit: 2, signal: this.abort.signal, gitCoalesceMs: GIT_COALESCE_MS }).catch(error => this.report(error))
       .finally(() => { this.effectsWorker = undefined; });
     if (!this.maintenanceWorker && Date.now() >= this.nextMaintenance) {
       this.nextMaintenance = Date.now() + 60_000;
@@ -399,5 +411,23 @@ export class PersistenceConsumer {
     await this.effectsWorker;
     await this.topologyWorker;
     await this.maintenanceWorker;
+    // The window may still hold the last Git effects of a one-shot writer that
+    // stops well inside it: publish them now, with no window, instead of leaving
+    // them to the next consumer. The pass claims ready single-file Git effects
+    // of the whole host (every process under this GBRAIN_HOME), so it can also
+    // publish what another process's window is holding. Its time budget or a
+    // database outage halts it like any batch; whatever it leaves stays claimable.
+    if (!this.effectsStarted) return;
+    if (!this.gitFlush) {
+      // A plain timer: under Bun, AbortSignal.timeout never aborts the push-lock
+      // wait, whose poll delay listens on the same signal.
+      const budget = new AbortController();
+      const timer = setTimeout(() => budget.abort(), STOP_PASS_BUDGET_MS);
+      timer.unref?.();
+      this.gitFlush = runPersistenceEffects(this.engine, this.config,
+        { hostId: this.hostId, limit: 2, singleFileGitOnly: true, signal: budget.signal })
+        .catch(error => this.report(error)).finally(() => { clearTimeout(timer); this.gitFlush = undefined; });
+    }
+    await this.gitFlush;
   }
 }
