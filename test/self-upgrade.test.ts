@@ -20,6 +20,7 @@ import {
   writeSnooze,
   writeUpdateCache,
   type DecideSelfUpgradeInputs,
+  type SelfUpgradeState,
 } from '../src/core/self-upgrade.ts';
 
 function baseInputs(over: Partial<DecideSelfUpgradeInputs> = {}): DecideSelfUpgradeInputs {
@@ -262,6 +263,44 @@ describe('reconcileBreadcrumb', () => {
     const r = reconcileBreadcrumb({ attempting_version: '0.43.0', failed_versions: ['0.43.0', '0.41.0'] }, '0.42.0');
     expect(r.state.failed_versions?.filter((v) => v === '0.43.0').length).toBe(1);
   });
+  test('unparseable running version → failed (no ordering to trust)', () => {
+    const r = reconcileBreadcrumb({ attempting_version: '0.43.0' }, 'dev');
+    expect(r.transition).toBe('failed');
+    expect(r.state.failed_versions).toEqual(['0.43.0']);
+  });
+  // #5813: the swap installs whatever is current at swap time (git pull, bun
+  // update, releases/latest), so the relaunched binary can be NEWER than the
+  // version the breadcrumb recorded from the update cache.
+  const appliedCases: Array<{ name: string; su: SelfUpgradeState; running: string; failed: string[] | undefined }> = [
+    { name: 'running newer than attempted', su: { attempting_version: '0.60.22.0' }, running: '0.60.25.0', failed: undefined },
+    {
+      name: 'prunes known-bad entries at or below the running version',
+      su: { attempting_version: '0.60.22.0', failed_versions: ['0.59.2.0', '0.60.25.0', '0.60.30.0'] },
+      running: '0.60.25.0',
+      failed: ['0.60.30.0'],
+    },
+    {
+      name: 'exact match prunes too and keeps unparseable entries',
+      su: { attempting_version: '0.43.0', failed_versions: ['0.41.0', 'not-a-version'] },
+      running: '0.43.0',
+      failed: ['not-a-version'],
+    },
+    {
+      name: 'pruning every entry drops the key',
+      su: { attempting_version: '0.60.22.0', failed_versions: ['0.59.2.0', '0.60.8.0'] },
+      running: '0.60.25.0',
+      failed: undefined,
+    },
+  ];
+  for (const c of appliedCases) {
+    test(`applied: ${c.name}`, () => {
+      const r = reconcileBreadcrumb(c.su, c.running);
+      expect(r.transition).toBe('applied');
+      expect(r.state.attempting_version).toBeUndefined();
+      expect(r.state.last_applied_version).toBe(c.running);
+      expect(r.state.failed_versions).toEqual(c.failed);
+    });
+  }
 });
 
 describe('resolveSelfUpgradeMode', () => {

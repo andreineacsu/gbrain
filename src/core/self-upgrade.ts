@@ -451,12 +451,18 @@ export type BreadcrumbTransition = 'applied' | 'failed' | null;
  * via attribution). Called by the relaunched binary:
  *
  *   - No breadcrumb → nothing to do.
- *   - breadcrumb === currentVersion → the swap+relaunch worked. Clear it and
- *     record `last_applied_version`. (`applied`)
- *   - breadcrumb !== currentVersion → we're NOT the attempted version (the new
- *     binary crashed on launch and the supervisor relaunched the old one, or a
- *     stale breadcrumb). Record the attempted version in `failed_versions` so
- *     `decideSelfUpgrade` never retries it, and clear the breadcrumb. (`failed`)
+ *   - currentVersion >= breadcrumb → the swap+relaunch worked. The swap
+ *     installs whatever is current at swap time (`git pull`, `bun update`,
+ *     `releases/latest`), so a release published after the update check lands
+ *     a NEWER version than the breadcrumb names (#5813). Clear it, record
+ *     `last_applied_version`, and drop `failed_versions` entries at or below
+ *     the running version: `decideSelfUpgrade` only acts on a strictly newer
+ *     release, so they can never be targeted again. (`applied`)
+ *   - otherwise → we're NOT at the attempted version (the new binary crashed
+ *     on launch and the supervisor relaunched the old one, or a stale
+ *     breadcrumb, or an unparseable version). Record the attempted version in
+ *     `failed_versions` so `decideSelfUpgrade` never retries it, and clear the
+ *     breadcrumb. (`failed`)
  *
  * Pure: returns the next state + the transition; the caller persists + audits.
  */
@@ -468,9 +474,20 @@ export function reconcileBreadcrumb(
   const attempting = state.attempting_version;
   if (!attempting) return { state, transition: null };
 
-  if (attempting === currentVersion) {
+  const running = parseSemver(currentVersion);
+  const attempted = parseSemver(attempting);
+  if (attempting === currentVersion || (running && attempted && semverLte(attempted, running))) {
     delete state.attempting_version;
     state.last_applied_version = currentVersion;
+    if (state.failed_versions) {
+      // Unparseable entries stay: there is no ordering to prove them superseded.
+      const stillBad = state.failed_versions.filter((v) => {
+        const t = parseSemver(v);
+        return !t || !running || semverGt(t, running);
+      });
+      if (stillBad.length > 0) state.failed_versions = stillBad;
+      else delete state.failed_versions;
+    }
     return { state, transition: 'applied' };
   }
 
