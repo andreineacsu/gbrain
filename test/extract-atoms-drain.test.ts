@@ -165,6 +165,39 @@ describe('runExtractAtomsDrain (issue #1678)', () => {
     expect(result.stopped).toBe('max_batches');
     expect(batches).toBe(4);
   });
+
+  // #5809: the window is checked only between batches and one batch can run
+  // for hours, so the job's abort signal (timeout / cancel) is what stops the
+  // drain. It must throw out of withLock, which releases the cycle lock.
+  it.each([
+    { abortAt: 'before the first batch', abortDuringBatch: 0, expectedBatches: 0, extracted: 1 },
+    { abortAt: 'during the first batch', abortDuringBatch: 1, expectedBatches: 1, extracted: 1 },
+    // An aborted batch usually returns no progress, so the loop leaves through
+    // no_progress and only the check after the loop sees the abort.
+    { abortAt: 'during a batch that then reports no progress', abortDuringBatch: 1, expectedBatches: 1, extracted: 0 },
+  ])('stops and throws the abort reason when the job aborts $abortAt', async ({ abortDuringBatch, expectedBatches, extracted }) => {
+    const controller = new AbortController();
+    if (abortDuringBatch === 0) controller.abort(new Error('timeout'));
+    let batches = 0;
+    let lockSettled = false;
+    await expect(
+      runExtractAtomsDrain(
+        {
+          withLock: async (work) => { try { return await work(); } finally { lockSettled = true; } },
+          countRemaining: async () => 999, // never drains
+          runBatch: async () => {
+            batches++;
+            if (batches === abortDuringBatch) controller.abort(new Error('timeout'));
+            return { extracted, skipped: 0 };
+          },
+          now: () => 0, // window never elapses
+        },
+        { windowMs: 1_000_000, signal: controller.signal },
+      ),
+    ).rejects.toThrow('timeout');
+    expect(batches).toBe(expectedBatches);
+    expect(lockSettled).toBe(true);
+  });
 });
 
 // #1685 GAP D (CODEX #1) — the auto-drain Minion job burns Haiku, so it must be

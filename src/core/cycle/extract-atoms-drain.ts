@@ -109,6 +109,13 @@ export interface ExtractAtomsDrainOpts {
   windowMs: number;
   /** Hard cap on batches (belt-and-suspenders against a 0-progress loop). Default 1000. */
   maxBatches?: number;
+  /**
+   * #5809: the job's timeout/cancel signal. The window is checked only between
+   * batches and one batch can run for hours, so this is what bounds a drain
+   * job. Checked before every batch and after the loop; an abort throws its
+   * reason out of `withLock`, which releases the cycle lock.
+   */
+  signal?: AbortSignal;
 }
 
 export interface ExtractAtomsDrainResult {
@@ -192,6 +199,7 @@ export async function runExtractAtomsDrain(
     let lastError: string | null = null;
 
     while (deps.now() < deadline) {
+      opts.signal?.throwIfAborted();
       if (batches >= maxBatches) { stopped = 'max_batches'; break; }
 
       const before = await deps.countRemaining();
@@ -267,6 +275,7 @@ export async function runExtractAtomsDrain(
       }
     }
 
+    opts.signal?.throwIfAborted();
     const remaining = await deps.countRemaining();
     // issue #3218 (codex P2): don't let a final remaining===0 recount
     // overwrite 'provider_failure' back to 'drained' — that would report the
@@ -326,6 +335,8 @@ export interface DrainForSourceOpts {
   maxBatches?: number;
   /** Optional per-batch progress sink (stderr line in dream; job progress in the handler). */
   onBatch?: ExtractAtomsDrainDeps['onBatch'];
+  /** #5809: the Minion job's signal; stops the drain mid-batch (see ExtractAtomsDrainOpts.signal). */
+  signal?: AbortSignal;
 }
 
 export async function runExtractAtomsDrainForSource(
@@ -347,6 +358,7 @@ export async function runExtractAtomsDrainForSource(
           sourceId: extractionSourceId,
           dryRun: false,
           brainDir: opts.brainDir,
+          signal: opts.signal,
         });
         const d = (r.details ?? {}) as Record<string, unknown>;
         // issue #3218: `r.status` collapses to 'warn' whether ONE item failed
@@ -386,6 +398,6 @@ export async function runExtractAtomsDrainForSource(
       now: Date.now,
       onBatch: opts.onBatch,
     },
-    { windowMs: opts.windowSeconds * 1000, maxBatches: opts.maxBatches },
+    { windowMs: opts.windowSeconds * 1000, maxBatches: opts.maxBatches, signal: opts.signal },
   );
 }

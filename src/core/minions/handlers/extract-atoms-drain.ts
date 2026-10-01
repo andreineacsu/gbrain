@@ -34,6 +34,7 @@ export function makeExtractAtomsDrainHandler(engine: BrainEngine): MinionHandler
         sourceId,
         windowSeconds,
         brainDir: repoPath,
+        signal: job.signal,
       });
       // issue #3218: every item the drain attempted failed (0 succeeded, >=1
       // provider error) — completing this job normally would mark the
@@ -50,6 +51,13 @@ export function makeExtractAtomsDrainHandler(engine: BrainEngine): MinionHandler
     } catch (e) {
       if (e instanceof LockUnavailableError) {
         return { phase: 'extract_atoms', status: 'skipped', deferred: true, reason: 'cycle_already_running' };
+      }
+      // #5809: past the job's deadline the drain stopped for its timeout, which
+      // the timeout sweeper dead-letters anyway. A retry would hold the cycle
+      // lock for another full timeout, so end it here instead.
+      if (job.deadlineAtMs != null && Date.now() >= job.deadlineAtMs) {
+        const { UnrecoverableError } = await import('../errors.ts');
+        throw new UnrecoverableError(e instanceof Error ? e.message : String(e));
       }
       throw e;
     }

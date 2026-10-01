@@ -283,6 +283,44 @@ describe('runPhaseExtractAtoms — global-error halt (#3044)', () => {
     expect(result.details.aborted_global_error).toBeUndefined();
     expect((result.details.failures as unknown[])).toHaveLength(3);
   });
+
+  // #5809: a drain job's timeout/cancel reaches the in-flight model call. The
+  // interrupted page says nothing about its content, so it takes no strike;
+  // the run stops instead of starting the next page, whether the aborted call
+  // threw or still answered, and the rollup books it as a deadline stop.
+  // The paced row would sit out a 60 s pause if the abort did not end it.
+  test.each([
+    { callOutcome: 'throws', pagesProcessed: 0, pacingMs: null },
+    { callOutcome: 'still answers', pagesProcessed: 1, pacingMs: null },
+    { callOutcome: 'still answers under per-item pacing', pagesProcessed: 1, pacingMs: '60000' },
+  ])('an aborted run whose model call $callOutcome stops before the next page, with no strike', async ({ callOutcome, pagesProcessed, pacingMs }) => {
+    if (pacingMs) await engine.setConfig('cycle.extract_atoms.pacing_ms', pacingMs);
+    await seedPage('note/ab1');
+    await seedPage('note/ab2');
+    const controller = new AbortController();
+    const callSignals: Array<AbortSignal | undefined> = [];
+    const result = await runPhaseExtractAtoms(engine, {
+      sourceId: 'default',
+      _transcripts: [],
+      _pages: mkPages(['note/ab1', 'note/ab2']),
+      signal: controller.signal,
+      _chat: async (o: ChatOpts) => {
+        callSignals.push(o.abortSignal);
+        controller.abort(new Error('timeout'));
+        if (callOutcome === 'throws') throw new Error('claude-cli adapter aborted');
+        return okChatResult('[]');
+      },
+    }).finally(() => engine.unsetConfig('cycle.extract_atoms.pacing_ms'));
+    expect(callSignals).toEqual([controller.signal]); // page 2 never called the LLM
+    expect(result.details.failures).toEqual([]);
+    expect(result.details.pages_processed).toBe(pagesProcessed);
+    expect((await stateOf('note/ab1'))?.fail_count ?? 0).toBe(0);
+    expect(await stateOf('note/ab2')).toBeUndefined();
+    const [rollup] = await engine.executeRaw<{ round_completed_count: number; expected_limit_count: number }>(
+      `SELECT round_completed_count, expected_limit_count FROM extract_rollup_7d WHERE kind = 'atoms' AND source_id = 'default'`,
+    );
+    expect(rollup).toMatchObject({ round_completed_count: 0, expected_limit_count: 1 });
+  });
 });
 
 // Doctor's extract_health check reads extract_rollup_7d's halt_count /

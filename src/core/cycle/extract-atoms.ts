@@ -71,7 +71,8 @@ import { truncateUtf8 } from '../text-safe.ts';
 import { BudgetExhausted, BudgetTracker, loadPricingOverrides } from '../budget/budget-tracker.ts';
 import { resolveExtractAtomsCostGate, resolveEmbedModelForCostGate } from './extract-atoms-cost-gate.ts';
 import { writeReceipt } from '../extract/receipt-writer.ts';
-import { upsertExtractRollup } from '../extract/rollup-writer.ts';
+import { classifyRunStop, upsertExtractRollup } from '../extract/rollup-writer.ts';
+import { abortableSleep, RetryAbortError } from '../retry.ts';
 import { createHash } from 'crypto';
 import { slugifySegment } from '../sync.ts';
 import { resolveTierDefault } from '../model-config.ts';
@@ -214,6 +215,13 @@ export interface ExtractAtomsOpts {
    * `heartbeat()` on the passed reporter.
    */
   progress?: ProgressReporter;
+  /**
+   * Caller's cancellation signal (the drain passes its Minion job's, #5809).
+   * Passed to the extraction chat call and checked before each item; once
+   * aborted the loop stops, the interrupted item takes no failure strike, and
+   * the rollup books the run as a deadline stop rather than a completed round.
+   */
+  signal?: AbortSignal;
 }
 
 interface ExtractedAtom {
@@ -1075,6 +1083,7 @@ export async function runPhaseExtractAtoms(
 
   await withBudgetTracker(budgetTracker, async () => {
   for (const item of work) {
+    if (opts.signal?.aborted) break;
     await maybeYield();
     if (budgetExhausted || budgetTracker.totalSpent >= budgetCap) {
       if (item.kind === 'transcript') transcriptsSkipped++;
@@ -1107,6 +1116,7 @@ export async function runPhaseExtractAtoms(
           },
         ],
         maxTokens: maxOutputTokens, responseSchema: ATOMS_RESPONSE_SCHEMA,
+        abortSignal: opts.signal,
       });
       // Post-await yield: closes the "long LLM call past TTL" hazard
       // codex flagged. The 30s throttle inside maybeYield bounds the
@@ -1114,8 +1124,9 @@ export async function runPhaseExtractAtoms(
       await maybeYield();
       llmHalt.reset();
       // #4540: optional per-item pacing between successful LLM calls.
-      // setTimeout (not setImmediate) so the lock-refresh interval fires.
-      if (pacingMs > 0) await new Promise<void>((r) => setTimeout(r, pacingMs));
+      // setTimeout (not setImmediate) so the lock-refresh interval fires. An
+      // abort ends the pause early: this item still persists, the loop then stops.
+      if (pacingMs > 0) await abortableSleep(pacingMs, opts.signal).catch((e) => { if (!(e instanceof RetryAbortError)) throw e; });
 
       estimatedSpendUsd = budgetTracker.totalSpent;
 
@@ -1339,6 +1350,10 @@ export async function runPhaseExtractAtoms(
     } catch (err) {
       if (err instanceof OperationError && err.writeRequest) writeRequests.push(err.writeRequest);
       if (acceptedPendingReceipt(err)) { writesPending++; continue; }
+      if (opts.signal?.aborted) {
+        console.error(`[extract_atoms] ${originLabel}: stopped by abort (${err instanceof Error ? err.message : String(err)})`);
+        break;
+      }
       if (err instanceof BudgetExhausted) {
         budgetExhausted = true;
         if (item.kind === 'transcript') transcriptsSkipped++;
@@ -1413,8 +1428,7 @@ export async function runPhaseExtractAtoms(
       kind: 'atoms',
       source_id: sourceId,
       cost_delta: estimatedSpendUsd,
-      round_completed_delta: hardFailureCount === 0 ? 1 : 0,
-      halt_delta: hardFailureCount > 0 ? 1 : 0,
+      ...classifyRunStop({ deadline_hit: opts.signal?.aborted === true, error: hardFailureCount > 0 }),
     });
   }
 

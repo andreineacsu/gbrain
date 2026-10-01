@@ -34,8 +34,8 @@ src/core/config.ts	loadConfigWithEngine	360	seed: W5 baseline, refactor wave 1 (
 src/core/context-engine.ts	createGBrainContextEngine	519	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
 src/core/context/retrieval-reflex.ts	resolveEntitiesToPointers	355	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
 src/core/cycle.ts	runCycle	1229	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
-src/core/cycle/extract-atoms.ts	runPhaseExtractAtoms	810	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
-src/core/cycle/extract-atoms.ts	runPhaseExtractAtoms>withBudgetTracker(#1)	305	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
+src/core/cycle/extract-atoms.ts	runPhaseExtractAtoms	816	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1); +6 #5809: abort signal checked per item, passed to the chat call, logged on stop, ends the pacing pause
+src/core/cycle/extract-atoms.ts	runPhaseExtractAtoms>withBudgetTracker(#1)	312	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1); +7 #5809: abort signal checked per item, passed to the chat call, logged on stop, ends the pacing pause
 src/core/cycle/extract-facts.ts	runExtractFacts	505	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
 src/core/cycle/grade-takes.ts	GradeTakesPhase.process	402	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
 src/core/cycle/patterns.ts	runPhasePatterns	303	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
