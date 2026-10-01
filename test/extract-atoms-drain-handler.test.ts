@@ -13,6 +13,7 @@ import { __setChatTransportForTests } from '../src/core/ai/gateway.ts';
 import { UnrecoverableError } from '../src/core/minions/errors.ts';
 import {
   formatDrainProviderFailure,
+  runExtractAtomsDrainForSource,
   type ExtractAtomsDrainResult,
 } from '../src/core/cycle/extract-atoms-drain.ts';
 
@@ -121,7 +122,31 @@ describe('extract-atoms-drain handler', () => {
     } finally {
       __setChatTransportForTests(null);
     }
-    expect(callSignals).toEqual([controller.signal]);
+    // The call's signal combines the job's with the cycle lock's (#5832).
+    expect(callSignals).toHaveLength(1);
+    expect(callSignals[0]?.reason).toBe(controller.signal.reason);
     expect(await engine.executeRaw('SELECT page_id FROM extract_atoms_page_state')).toEqual([]);
+  });
+
+  // #5832: withRefreshingLock aborts the signal it hands its work when the
+  // cycle lock's lease is lost. Without it a batch keeps writing atoms while
+  // another cycle holds the lock, including for a caller that passes no signal
+  // of its own (gbrain dream --drain).
+  test('the cycle lock signal reaches the model call when the caller passes none', async () => {
+    await engine.putPage('notes/lock-probe', {
+      type: 'note', title: 'lock probe', compiled_truth: 'A durable decision recorded in prose. '.repeat(20),
+    } as never, { sourceId: 'default' });
+    const callSignals: Array<AbortSignal | undefined> = [];
+    __setChatTransportForTests(async (o) => {
+      callSignals.push(o.abortSignal);
+      throw new Error('provider unavailable');
+    });
+    try {
+      await runExtractAtomsDrainForSource(engine, { sourceId: 'default', windowSeconds: 120 });
+    } finally {
+      __setChatTransportForTests(null);
+    }
+    expect(callSignals.length).toBeGreaterThan(0);
+    for (const signal of callSignals) expect(signal).toBeInstanceOf(AbortSignal);
   });
 });

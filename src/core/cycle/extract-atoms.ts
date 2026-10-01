@@ -216,8 +216,8 @@ export interface ExtractAtomsOpts {
    */
   progress?: ProgressReporter;
   /**
-   * Caller's cancellation signal (the drain passes its Minion job's, #5809).
-   * Passed to the extraction chat call and checked before each item; once
+   * Caller's cancellation signal (the drain passes its Minion job's, #5809,
+   * combined with its cycle lock's, #5832). Passed to the extraction chat call and checked before each item; once
    * aborted the loop stops, the interrupted item takes no failure strike, and
    * the rollup books the run as a deadline stop rather than a completed round.
    */

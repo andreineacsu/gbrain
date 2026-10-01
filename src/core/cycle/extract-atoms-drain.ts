@@ -70,9 +70,11 @@ export interface ExtractAtomsDrainDeps {
    * via `withRefreshingLock`. MUST throw when the lock is held by another
    * process (e.g. `LockUnavailableError`) — the drain lets that propagate so
    * the caller can report `cycle_already_running` and exit, matching the
-   * routine cycle's skip contract.
+   * routine cycle's skip contract. #5832: `work` receives the lock's signal,
+   * which aborts when the lease is lost; the drain stops on it like on the
+   * job's signal.
    */
-  withLock: <T>(work: () => Promise<T>) => Promise<T>;
+  withLock: <T>(work: (signal: AbortSignal) => Promise<T>) => Promise<T>;
   /**
    * Process one bounded batch (rediscovers eligibility). Returns counts, plus
    * `providerFailure` (issue #3218) when EVERY item the batch attempted threw
@@ -87,8 +89,11 @@ export interface ExtractAtomsDrainDeps {
    * reconcilable from `--json` — pre-#4730 everything but ONE representative
    * error was dropped and the operator had to re-run the work to see the
    * other reasons.
+   *
+   * `signal` combines the job's signal with the cycle lock's (#5832); the
+   * batch passes it to `runPhaseExtractAtoms`, which stops at its next item.
    */
-  runBatch: () => Promise<{
+  runBatch: (signal: AbortSignal) => Promise<{
     extracted: number;
     skipped: number;
     providerFailure?: boolean;
@@ -112,7 +117,8 @@ export interface ExtractAtomsDrainOpts {
   /**
    * #5809: the job's timeout/cancel signal. The window is checked only between
    * batches and one batch can run for hours, so this is what bounds a drain
-   * job. Checked before every batch and after the loop; an abort throws its
+   * job. Combined with the lock's signal (#5832), it is checked before every
+   * batch and after the loop and passed to each batch; an abort throws its
    * reason out of `withLock`, which releases the cycle lock.
    */
   signal?: AbortSignal;
@@ -182,7 +188,8 @@ export async function runExtractAtomsDrain(
   opts: ExtractAtomsDrainOpts,
 ): Promise<ExtractAtomsDrainResult> {
   const maxBatches = opts.maxBatches ?? 1000;
-  return deps.withLock(async () => {
+  return deps.withLock(async (lockSignal) => {
+    const signal = opts.signal ? AbortSignal.any([opts.signal, lockSignal]) : lockSignal;
     const deadline = deps.now() + opts.windowMs;
     let extracted = 0;
     let skipped = 0;
@@ -199,13 +206,13 @@ export async function runExtractAtomsDrain(
     let lastError: string | null = null;
 
     while (deps.now() < deadline) {
-      opts.signal?.throwIfAborted();
+      signal.throwIfAborted();
       if (batches >= maxBatches) { stopped = 'max_batches'; break; }
 
       const before = await deps.countRemaining();
       if (before === 0) { stopped = 'drained'; break; }
 
-      const r = await deps.runBatch();
+      const r = await deps.runBatch(signal);
       extracted += r.extracted;
       skipped += r.skipped;
       batches++;
@@ -275,7 +282,7 @@ export async function runExtractAtomsDrain(
       }
     }
 
-    opts.signal?.throwIfAborted();
+    signal.throwIfAborted();
     const remaining = await deps.countRemaining();
     // issue #3218 (codex P2): don't let a final remaining===0 recount
     // overwrite 'provider_failure' back to 'drained' — that would report the
@@ -353,12 +360,12 @@ export async function runExtractAtomsDrainForSource(
   return runExtractAtomsDrain(
     {
       withLock: (work) => withRefreshingLock(engine, lockId, work, { ttlMinutes: 5 }),
-      runBatch: async () => {
+      runBatch: async (signal) => {
         const r = await runPhaseExtractAtoms(engine, {
           sourceId: extractionSourceId,
           dryRun: false,
           brainDir: opts.brainDir,
-          signal: opts.signal,
+          signal,
         });
         const d = (r.details ?? {}) as Record<string, unknown>;
         // issue #3218: `r.status` collapses to 'warn' whether ONE item failed

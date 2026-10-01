@@ -23,7 +23,7 @@ function seq(values: Array<number | null>): () => Promise<number | null> {
   return async () => values[Math.min(i++, values.length - 1)];
 }
 
-const passThroughLock: ExtractAtomsDrainDeps['withLock'] = (work) => work();
+const passThroughLock: ExtractAtomsDrainDeps['withLock'] = (work) => work(new AbortController().signal);
 
 describe('runExtractAtomsDrain (issue #1678)', () => {
   it('drains to empty and reports stopped=drained', async () => {
@@ -166,36 +166,47 @@ describe('runExtractAtomsDrain (issue #1678)', () => {
     expect(batches).toBe(4);
   });
 
-  // #5809: the window is checked only between batches and one batch can run
-  // for hours, so the job's abort signal (timeout / cancel) is what stops the
-  // drain. It must throw out of withLock, which releases the cycle lock.
+  // #5809 / #5832: the window is checked only between batches and one batch
+  // can run for hours, so two signals stop the drain: the job's (timeout,
+  // cancel) and the cycle lock's (lease lost). Either one reaches the running
+  // batch and throws its reason out of withLock, which releases the cycle lock.
   it.each([
-    { abortAt: 'before the first batch', abortDuringBatch: 0, expectedBatches: 0, extracted: 1 },
-    { abortAt: 'during the first batch', abortDuringBatch: 1, expectedBatches: 1, extracted: 1 },
+    { aborts: 'job', abortAt: 'before the first batch', abortDuringBatch: 0, expectedBatches: 0, extracted: 1 },
+    { aborts: 'job', abortAt: 'during the first batch', abortDuringBatch: 1, expectedBatches: 1, extracted: 1 },
     // An aborted batch usually returns no progress, so the loop leaves through
     // no_progress and only the check after the loop sees the abort.
-    { abortAt: 'during a batch that then reports no progress', abortDuringBatch: 1, expectedBatches: 1, extracted: 0 },
-  ])('stops and throws the abort reason when the job aborts $abortAt', async ({ abortDuringBatch, expectedBatches, extracted }) => {
-    const controller = new AbortController();
-    if (abortDuringBatch === 0) controller.abort(new Error('timeout'));
+    { aborts: 'job', abortAt: 'during a batch that then reports no progress', abortDuringBatch: 1, expectedBatches: 1, extracted: 0 },
+    { aborts: 'lock', abortAt: 'before the first batch', abortDuringBatch: 0, expectedBatches: 0, extracted: 1 },
+    { aborts: 'lock', abortAt: 'during the first batch', abortDuringBatch: 1, expectedBatches: 1, extracted: 1 },
+    { aborts: 'lock', abortAt: 'during a batch that then reports no progress', abortDuringBatch: 1, expectedBatches: 1, extracted: 0 },
+  ])('stops and throws the abort reason when the $aborts signal aborts $abortAt', async ({ aborts, abortDuringBatch, expectedBatches, extracted }) => {
+    const job = new AbortController();
+    const lock = new AbortController();
+    const aborting = aborts === 'job' ? job : lock;
+    const reason = new Error(`${aborts} aborted`);
+    if (abortDuringBatch === 0) aborting.abort(reason);
     let batches = 0;
     let lockSettled = false;
+    const batchSignals: AbortSignal[] = [];
     await expect(
       runExtractAtomsDrain(
         {
-          withLock: async (work) => { try { return await work(); } finally { lockSettled = true; } },
+          withLock: async (work) => { try { return await work(lock.signal); } finally { lockSettled = true; } },
           countRemaining: async () => 999, // never drains
-          runBatch: async () => {
+          runBatch: async (signal) => {
             batches++;
-            if (batches === abortDuringBatch) controller.abort(new Error('timeout'));
+            batchSignals.push(signal);
+            if (batches === abortDuringBatch) aborting.abort(reason);
             return { extracted, skipped: 0 };
           },
           now: () => 0, // window never elapses
         },
-        { windowMs: 1_000_000, signal: controller.signal },
+        { windowMs: 1_000_000, signal: job.signal },
       ),
-    ).rejects.toThrow('timeout');
+    ).rejects.toBe(reason);
     expect(batches).toBe(expectedBatches);
+    // The running batch sees the abort, so runPhaseExtractAtoms stops at its next item.
+    expect(batchSignals.map((s) => s.reason)).toEqual(Array(expectedBatches).fill(reason));
     expect(lockSettled).toBe(true);
   });
 });
@@ -231,7 +242,7 @@ describe('shared wiring helper holds the cycle lock (5A)', () => {
   // not from `r.status` (which collapses partial and total failure into the
   // same 'warn' value — the exact discard the issue reports).
   it('runBatch derives providerFailure from failures.length + zero processed items, not r.status', () => {
-    const runBatchBlock = src.slice(src.indexOf('runBatch: async () => {'));
+    const runBatchBlock = src.slice(src.indexOf('runBatch: async (signal) => {'));
     expect(runBatchBlock).toContain('d.failures');
     expect(runBatchBlock).toContain('transcripts_processed');
     expect(runBatchBlock).toContain('pages_processed');
