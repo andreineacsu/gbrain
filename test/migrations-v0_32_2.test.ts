@@ -568,22 +568,24 @@ describe('phaseCVerify', () => {
   });
 
   test.each([
-    ['a non-duplicate fence row is not indexed', [1, 2]],
-    ['an indexed row number is not in the fence', [1, 3, 4]],
-  ])('reports drift on a page with a duplicate active row when %s (#5814)', async (_case, indexed) => {
+    ['a non-duplicate fence row is not indexed', [1, 2], 'not indexed: 3'],
+    ['an indexed row number is not in the fence', [1, 3, 4], 'not in fence: 4'],
+    ['each side holds a row number the other lacks', [1, 4], 'not indexed: 3; not in fence: 4'],
+    ['more row numbers are missing than the detail lists', [1, 3, 4, 5, 6, 7, 8, 9, 10], 'not in fence: 4, 5, 6, 7, 8, +2 more'],
+  ])('reports drift on a page with a duplicate active row when %s (#5814)', async (_case, indexed, missing) => {
     await writeFencedPage(DUPLICATE_FENCE);
     for (const rowNum of indexed) {
       await engine.executeRaw(
         `INSERT INTO facts (source_id, entity_slug, fact, kind, visibility, notability,
                             valid_from, source, confidence, row_num, source_markdown_slug)
          VALUES ('default', $1, $2, 'fact', 'private', 'medium', now(), 'manual', 1.0, $3, $1)`,
-        [SLUG, DUPLICATE_FENCE[rowNum - 1]?.claim ?? 'Lives in Lisbon', rowNum],
+        [SLUG, DUPLICATE_FENCE[rowNum - 1]?.claim ?? `Visited city ${rowNum}`, rowNum],
       );
     }
 
     const r = await __testing.phaseCVerify(engine, OPTS);
     expect(r.status).toBe('failed');
-    expect(r.detail).toBe(`1 pages drifted: ${SLUG} (fence=3, db=${indexed.length})`);
+    expect(r.detail).toBe(`1 pages drifted: ${SLUG} (fence=3, db=${indexed.length}; ${missing})`);
   });
 });
 

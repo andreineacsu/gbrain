@@ -458,6 +458,14 @@ function fenceFactsResult(outcome: PhaseBOutcome): OrchestratorPhaseResult {
 
 // ── Phase C — Verify ────────────────────────────────────────
 
+/** Row numbers a drift detail names per side before it summarizes the rest. */
+const DRIFT_ROWS_SHOWN = 5;
+
+function listDriftRows(rows: number[]): string {
+  const shown = rows.slice(0, DRIFT_ROWS_SHOWN).join(', ');
+  return rows.length > DRIFT_ROWS_SHOWN ? `${shown}, +${rows.length - DRIFT_ROWS_SHOWN} more` : shown;
+}
+
 async function phaseCVerify(
   engine: BrainEngine | null,
   opts: OrchestratorOpts,
@@ -520,10 +528,14 @@ async function phaseCVerify(
       // extract_facts indexes it once (#1781) while the managed publication
       // projection indexes every fence row, so both states are in sync.
       const duplicates = duplicateActiveFenceRows(parsed.facts);
-      const drifted = [...indexed].some(n => !fenced.has(n))
-        || [...fenced].some(n => !indexed.has(n) && !duplicates.has(n));
-      if (drifted) {
-        mismatches.push(`${g.source_markdown_slug} (fence=${parsed.facts.length}, db=${indexed.size})`);
+      const notIndexed = [...fenced].filter(n => !indexed.has(n) && !duplicates.has(n)).sort((a, b) => a - b);
+      const notInFence = [...indexed].filter(n => !fenced.has(n)).sort((a, b) => a - b);
+      if (notIndexed.length > 0 || notInFence.length > 0) {
+        const missing = [
+          notIndexed.length > 0 ? `not indexed: ${listDriftRows(notIndexed)}` : '',
+          notInFence.length > 0 ? `not in fence: ${listDriftRows(notInFence)}` : '',
+        ].filter(Boolean).join('; ');
+        mismatches.push(`${g.source_markdown_slug} (fence=${parsed.facts.length}, db=${indexed.size}; ${missing})`);
       }
       pagesChecked += 1;
     }
