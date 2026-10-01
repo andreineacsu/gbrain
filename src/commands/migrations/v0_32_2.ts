@@ -11,8 +11,10 @@
  *   A. Schema       — assert migration v51 has run.
  *   B. Fence facts  — backfill DB facts → entity-page fences (dry-run
  *                     by default; explicit --write required).
- *   C. Verify       — re-parse each fence-owned page, count rows, compare
- *                     against the DB rows for that page; partial on
+ *   C. Verify       — re-parse each fence-owned page and compare its fence
+ *                     row numbers with the DB rows for that page; a
+ *                     duplicate active fence row may be absent from the
+ *                     index (extract_facts indexes it once). Partial on
  *                     mismatch. Conversation-miner (`cli:`) facts are not
  *                     fence-owned (extract-conversation-facts writes the
  *                     chat log as source of truth) and are excluded.
@@ -465,7 +467,8 @@ async function phaseCVerify(
 
   try {
     // Per touched page (= any page with a fenced row in the DB), re-parse
-    // the fence from disk and compare its row numbers to the DB's.
+    // the fence (the canonical file, or the database copy on a managed
+    // brain) and compare its row numbers to the DB's.
     const sources = await engine.executeRaw<SourceLookup>(
       `SELECT id, local_path FROM sources`,
     );
