@@ -599,10 +599,48 @@ describe('session-start', () => {
     expect(out.get()).not.toContain('run gbrain doctor');
   });
 
-  test('last-session line + stale push-status surfaced [B4]', async () => {
-    const liveDir = join(home(), 'transcripts', 'live');
-    mkdirSync(liveDir, { recursive: true });
-    writeFileSync(join(liveDir, 'prev.txt'), JSON.stringify({ ts: '2026-08-07T09:00:00Z', session_id: 'prev', exchange: 'wrapped up the acme-example memo' }) + '\n');
+  // #5558: the live dir holds one buffer per session; any buffer other than
+  // the starting session's is a concurrent session's, or one SessionEnd never
+  // deleted (/exit, crash). The line may only replay the starting session's
+  // own buffer; the foreign buffers are written NEWER so a pick-the-newest
+  // reader fails every case, and the `sess/own` row fails a raw-id reader.
+  const lastActivityLabel = "This session's last activity";
+  const lastSessionCases: Array<{ name: string; stdin: string; shown: string | null }> = [
+    { name: 'own session (compact/resume re-entry)', stdin: JSON.stringify({ session_id: 'sess-own', source: 'compact' }), shown: 'wrapped up the acme-example memo' },
+    { name: 'own session, id the stop writer sanitizes', stdin: JSON.stringify({ session_id: 'sess/own', source: 'resume' }), shown: 'wrapped up the acme-example memo' },
+    { name: 'a different session starting', stdin: JSON.stringify({ session_id: 'sess-new', source: 'startup' }), shown: null },
+    { name: 'no session_id in the payload', stdin: '', shown: null },
+  ];
+  for (const c of lastSessionCases) {
+    test(`last-session line is scoped to the starting session: ${c.name} [#5558]`, async () => {
+      const liveDir = join(home(), 'transcripts', 'live');
+      mkdirSync(liveDir, { recursive: true });
+      const buffer = (sid: string, exchange: string, ageSec: number) => {
+        const p = join(liveDir, `${sid}.txt`);
+        writeFileSync(p, JSON.stringify({ ts: '2026-08-07T09:00:00Z', session_id: sid, exchange }) + '\n');
+        const t = Date.now() / 1000 - ageSec;
+        utimesSync(p, t, t);
+      };
+      buffer('sess-own', 'wrapped up the acme-example memo', 600);
+      buffer('sess-other', 'private notes from widget-co session', 60);
+      buffer('unknown', 'sessionless stop from charlie-example', 30);
+      const ws = join(tmp, 'ws');
+      mkdirSync(ws, { recursive: true });
+      const out = collectStdout();
+      expect(await runHook(['session-start'], { ...out.io, stdin: c.stdin, cwd: ws })).toBe(0);
+      const text = out.get();
+      expect(text).not.toContain('private notes from widget-co session');
+      expect(text).not.toContain('sessionless stop from charlie-example');
+      if (c.shown) {
+        expect(text).toContain(`${lastActivityLabel}: 2026-08-07T09:00:00Z`);
+        expect(text).toContain(c.shown);
+      } else {
+        expect(text).not.toContain(lastActivityLabel);
+      }
+    });
+  }
+
+  test('stale push-status surfaced [B4]', async () => {
     const bootDir = join(home(), 'bootstrap');
     mkdirSync(bootDir, { recursive: true });
     writeFileSync(join(bootDir, 'push-status.json'), JSON.stringify({ ts: new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString(), ok: true }));
@@ -610,10 +648,7 @@ describe('session-start', () => {
     mkdirSync(ws, { recursive: true });
     const out = collectStdout();
     await runHook(['session-start'], { ...out.io, stdin: '', cwd: ws });
-    const text = out.get();
-    expect(text).toContain('Last session activity');
-    expect(text).toContain('acme-example memo');
-    expect(text).toContain('>48h ago');
+    expect(out.get()).toContain('>48h ago');
   });
 
   test('parser-drift status file surfaced at session start [G3]', async () => {

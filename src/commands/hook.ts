@@ -481,14 +481,18 @@ async function hookSessionStart(io: HookIo): Promise<number> {
   try {
     const j = await readStdinJson(io, 250);
     const ws = io.cwd ?? (typeof j?.cwd === 'string' ? (j.cwd as string) : process.cwd());
+    // Same sanitizer as the stop writer and the compact banking path: a raw
+    // vs sanitized id would miss this session's buffer and split the pack
+    // cursor key (adversarial review).
+    const sessionId = sanitizeSessionId(j?.session_id);
 
     const work = (async () => {
       // 1. MEMORY.md digest — allowlisted sections only, ≤3KB [A3].
       const digest = memoryDigest(join(ws, 'MEMORY.md'));
       if (digest) out.push(digest);
 
-      // 2. Last-session line from the stop-buffer dir [G15 consumer].
-      const last = await lastSessionLine();
+      // 2. Last-session line from THIS session's stop buffer [G15 consumer].
+      const last = await lastSessionLine(sessionId);
       if (last) out.push(last);
 
       // 3. Push staleness [B4].
@@ -537,10 +541,6 @@ async function hookSessionStart(io: HookIo): Promise<number> {
         if (packSocket) {
           const secret = readIpcSecretForConfig(cfg);
           if (secret) {
-            // Same sanitizer as the compact banking path — a raw vs sanitized
-            // id would split the cursor key and the warm pack would miss the
-            // banked entities (adversarial review).
-            const sessionId = sanitizeSessionId(j?.session_id);
             const trigger = typeof j?.source === 'string' ? `session-start:${j.source as string}` : 'session-start';
             // Clamp the IPC timeout to the REMAINING hook deadline (minus a
             // 100ms write margin) so the pack call can never be the thing
@@ -637,26 +637,25 @@ async function liveBufferDir(): Promise<string> {
   return ensureDir0700(join(home, 'transcripts', 'live'));
 }
 
-async function lastSessionLine(): Promise<string | null> {
+/**
+ * The starting session's OWN last exchange only (#5558). Any other buffer in
+ * the live dir is a concurrent session's, or one SessionEnd never deleted
+ * (/exit, crash). No session id means the shared `unknown` bucket.
+ */
+async function lastSessionLine(sessionId: string): Promise<string | null> {
+  if (sessionId === 'unknown') return null;
   try {
-    const dir = await liveBufferDir();
-    let newest: { path: string; mtime: number } | null = null;
-    for (const name of readdirSync(dir)) {
-      if (!name.endsWith('.txt')) continue;
-      const p = join(dir, name);
-      const st = statSync(p);
-      if (!newest || st.mtimeMs > newest.mtime) newest = { path: p, mtime: st.mtimeMs };
-    }
-    if (!newest) return null;
-    const lines = readFileSync(newest.path, 'utf8').split('\n').filter((l) => l.trim());
+    const p = join(await liveBufferDir(), `${sessionId}.txt`);
+    if (!existsSync(p)) return null;
+    const lines = readFileSync(p, 'utf8').split('\n').filter((l) => l.trim());
     const last = lines[lines.length - 1];
     if (!last) return null;
     try {
       const e = JSON.parse(last) as { ts?: string; exchange?: string };
       const snippet = typeof e.exchange === 'string' ? ` — ${e.exchange.slice(0, 200)}` : '';
-      return `Last session activity: ${e.ts ?? 'unknown time'}${snippet}`;
+      return `This session's last activity: ${e.ts ?? 'unknown time'}${snippet}`;
     } catch {
-      return `Last session activity: ${last.slice(0, 200)}`;
+      return `This session's last activity: ${last.slice(0, 200)}`;
     }
   } catch {
     return null;
