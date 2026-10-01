@@ -43,6 +43,7 @@ import type { BrainEngine } from '../../core/engine.ts';
 import { loadConfig, toEngineConfig } from '../../core/config.ts';
 import { createEngine } from '../../core/engine-factory.ts';
 import { formatFenceDate, parseFactsFence, renderFactsTable, replaceOrInsertFactsFence } from '../../core/facts-fence.ts';
+import { duplicateActiveFenceRows } from '../../core/facts/extract-from-fence.ts';
 import { resolvePageWriteTarget } from '../../core/write-through.ts';
 import { serializePageToMarkdown } from '../../core/markdown.ts';
 import { managedPersistenceEnabled } from '../../core/persistence/ownership.ts';
@@ -464,7 +465,7 @@ async function phaseCVerify(
 
   try {
     // Per touched page (= any page with a fenced row in the DB), re-parse
-    // the fence from disk and compare row counts to the DB.
+    // the fence from disk and compare its row numbers to the DB's.
     const sources = await engine.executeRaw<SourceLookup>(
       `SELECT id, local_path FROM sources`,
     );
@@ -475,8 +476,8 @@ async function phaseCVerify(
     // (chat-log shape is the source of truth). Same cli: exclusion as
     // extract_facts reconciliation. Counting them here fails every brain
     // that ran extract-conversation-facts.
-    const groups = await engine.executeRaw<{ source_id: string; source_markdown_slug: string; n: string }>(
-      `SELECT source_id, source_markdown_slug, COUNT(*) AS n
+    const groups = await engine.executeRaw<{ source_id: string; source_markdown_slug: string; row_nums: number[] }>(
+      `SELECT source_id, source_markdown_slug, array_agg(row_num ORDER BY row_num) AS row_nums
          FROM facts
         WHERE row_num IS NOT NULL
           AND COALESCE(source, '') NOT LIKE 'cli:%'
@@ -510,10 +511,16 @@ async function phaseCVerify(
         body = readFileSync(target.filePath, 'utf-8');
       }
       const parsed = parseFactsFence(body);
-      const fenceCount = parsed.facts.length;
-      const dbCount = parseInt(g.n, 10);
-      if (fenceCount !== dbCount) {
-        mismatches.push(`${g.source_markdown_slug} (fence=${fenceCount}, db=${dbCount})`);
+      const indexed = new Set(g.row_nums.map(Number));
+      const fenced = new Set(parsed.facts.map(f => f.rowNum));
+      // #5814: a duplicate active row may be absent from the index.
+      // extract_facts indexes it once (#1781) while the managed publication
+      // projection indexes every fence row, so both states are in sync.
+      const duplicates = duplicateActiveFenceRows(parsed.facts);
+      const drifted = [...indexed].some(n => !fenced.has(n))
+        || [...fenced].some(n => !indexed.has(n) && !duplicates.has(n));
+      if (drifted) {
+        mismatches.push(`${g.source_markdown_slug} (fence=${parsed.facts.length}, db=${indexed.size})`);
       }
       pagesChecked += 1;
     }
