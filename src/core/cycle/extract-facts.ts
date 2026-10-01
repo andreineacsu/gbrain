@@ -66,6 +66,7 @@ import { writeReceipt } from '../extract/receipt-writer.ts';
 import { classifyRunStop, upsertExtractRollup } from '../extract/rollup-writer.ts';
 import { parseFactsFence, FACTS_FENCE_BEGIN } from '../facts-fence.ts';
 import {
+  duplicateActiveFenceRows,
   extractFactsFromFenceText,
   type FenceExtractedFact,
 } from '../facts/extract-from-fence.ts';
@@ -711,17 +712,10 @@ export async function runExtractFacts(
     // trajectory query against the page returns import dates instead of
     // claim dates.
     const pageEffectiveDate = page.effective_date ? new Date(page.effective_date) : null;
-    // #1781: duplicate ACTIVE rows (same claim and source) index once. A
-    // struck history row never collapses with an active row that carries the
-    // same text, so a claim that reverts to an earlier value stays active.
-    const activeKeys = new Set<string>();
-    const extracted = extractFactsFromFenceText(parsed.facts, slug, sourceId, { pageEffectiveDate }).filter(f => {
-      if (f.expired_at != null) return true;
-      const key = `${f.fact}\u0000${f.source}`;
-      if (activeKeys.has(key)) return false;
-      activeKeys.add(key);
-      return true;
-    });
+    // #1781: duplicate ACTIVE rows (same claim and source) index once.
+    const duplicates = duplicateActiveFenceRows(parsed.facts);
+    const extracted = extractFactsFromFenceText(parsed.facts, slug, sourceId, { pageEffectiveDate })
+      .filter(f => !duplicates.has(f.row_num));
 
     if (opts.dryRun) return 'next';
 
