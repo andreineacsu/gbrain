@@ -876,7 +876,7 @@
               "unpushed": 0
             }
           },
-          "message": "0 knowledge asset(s) have no git remote: . Current recovery is not verified for all repositories. Run `gbrain backup status` for fix commands (`gbrain bootstrap repo` / `git remote add origin <url>` / `gbrain sources harden <id>`).",
+          "message": "1 knowledge asset(s) lack verified recovery: default (not_a_git_repo). Current recovery is not verified for all repositories. Run `gbrain backup status` for fix commands (`gbrain bootstrap repo` / `git remote add origin <url>` / `gbrain sources harden <id>`).",
           "name": "backup_coverage",
           "status": "warn"
         },
@@ -912,7 +912,7 @@
         },
         {
           "category": "brain",
-          "message": "Every DB page is file-backed or under a declared/default db_only path (derive-phase defaults: life/events/ atoms/ concepts/ extracts/ dream-cycle-summaries/)",
+          "message": "Every DB page is file-backed or under a declared/default db_only path (derive-phase defaults: life/events/ atoms/ concepts/ extracts/ dream-cycle-summaries/).",
           "name": "undeclared_db_only_pages",
           "status": "ok"
         },
@@ -1144,7 +1144,7 @@
       "status": "warnings",
       "top_issues": [
         {
-          "fix": "0 knowledge asset(s) have no git remote: . Current recovery is not verified for all repositories. Run `gbrain backup status` for fix commands (`gbrain bootstrap repo` / `git remote add origin <url>` / `gbrain sources harden <id>`).",
+          "fix": "1 knowledge asset(s) lack verified recovery: default (not_a_git_repo). Current recovery is not verified for all repositories. Run `gbrain backup status` for fix commands (`gbrain bootstrap repo` / `git remote add origin <url>` / `gbrain sources harden <id>`).",
           "name": "backup_coverage",
           "status": "warn",
           "tier": "symptom"
