@@ -470,7 +470,7 @@ export async function doctorReportRemote(
   //   - Three-state: ok / warn / fail.
   checks.push(await checkFederationHealth(engine));
 
-  // 13. v0.42 self_upgrade_health: mode, whether behind, recent failures.
+  // 13. v0.42 self_upgrade_health: mode, whether behind, a held auto-upgrade, recent failures.
   // File-plane only (no engine) — works on thin clients too.
   checks.push(checkSelfUpgradeHealth());
 

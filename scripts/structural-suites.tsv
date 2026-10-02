@@ -27,7 +27,7 @@ test/autopilot-nightly-probe-wiring.test.ts	autopilot wiring: nightly quality pr
 test/autopilot-operator-pause.test.ts	autopilot operator pause	5	source-surface-helper
 test/autopilot-parser-probe-wiring.test.ts	autopilot wiring: conversation-parser probe	10	source-surface-helper
 test/autopilot-pause-marker.test.ts	pause marker fences minion job pickup	1	readFileSync
-test/autopilot-self-upgrade.test.ts	autopilot self-upgrade static-shape regressions	4	source-surface-helper
+test/autopilot-self-upgrade.test.ts	autopilot self-upgrade static-shape regressions	5	source-surface-helper
 test/autopilot-shutdown-engine-close.test.ts	autopilot.ts graceful engine shutdown (#1872)	6	source-surface-helper
 test/autopilot-supervisor-wiring.test.ts	autopilot.ts ↔ ChildWorkerSupervisor wiring	7	source-surface-helper
 test/backup-cli.serial.test.ts	runBackupCli — PGLite lock fallback	3	readFileSync,source-surface-helper

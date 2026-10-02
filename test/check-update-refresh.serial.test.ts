@@ -10,13 +10,16 @@
  * `fetch` (cross-file-unsafe under the parallel runner).
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { VERSION } from '../src/version.ts';
 import { parseSemver } from '../src/core/semver.ts';
 import { readUpdateCache, writeUpdateCache } from '../src/core/self-upgrade.ts';
 import { fetchLatestRelease, parseVersionFileBody, refreshUpdateCache, runCheckUpdate } from '../src/commands/check-update.ts';
+import { fetchLatestBunFloor, parseBunFloor, readFetchedBunFloor } from '../src/core/release-source.ts';
+import { makeGitFixture } from './helpers/git-fixture.ts';
 
 const realFetch = globalThis.fetch;
 const realLog = console.log;
@@ -76,6 +79,64 @@ describe('fetchLatestRelease — resolves from the VERSION file, discriminates f
   test('garbage body → no_releases', async () => {
     stubVersionFetch('<html>rate limited</html>');
     expect(await fetchLatestRelease()).toEqual({ ok: false, reason: 'no_releases' });
+  });
+});
+
+describe('#5855: the Bun floor of the latest release', () => {
+  test('parseBunFloor reads a `>=X.Y.Z` engines.bun floor and refuses every other shape', () => {
+    const cases: Array<[string, string | null]> = [
+      [JSON.stringify({ name: 'gbrain', engines: { bun: '>=1.4.0' } }), '>=1.4.0'],
+      [JSON.stringify({ engines: { bun: '>= 1.5.1' } }), '>= 1.5.1'],
+      [JSON.stringify({ engines: { node: '>=20' } }), null],
+      [JSON.stringify({ engines: { bun: 140 } }), null],
+      [JSON.stringify({ engines: { bun: '*' } }), null],
+      [JSON.stringify({ engines: { bun: '^1.4.0' } }), null],
+      [JSON.stringify({ engines: { bun: '>=1.4.0 <2' } }), null],
+      [JSON.stringify({ engines: { bun: '=>1.4.0' } }), null],
+      [JSON.stringify({ engines: { bun: '--1' } }), null],
+      [JSON.stringify({ engines: { bun: '<1 >2 1' } }), null],
+      [JSON.stringify({ engines: { bun: '$(rm -rf /)' } }), null],
+      [JSON.stringify({ engines: { bun: `>=${'1'.repeat(200)}.0.0` } }), null],
+      ['<html>rate limited</html>', null],
+      [`{"engines":{"bun":">=1.4.0"},"pad":"${'x'.repeat(2_000_000)}"}`, null],
+    ];
+    for (const [body, floor] of cases) expect(parseBunFloor(body), body.slice(0, 60)).toBe(floor);
+  });
+
+  test('fetchLatestBunFloor reads master package.json; any failure is null', async () => {
+    const stub = (respond: () => Response) => {
+      globalThis.fetch = (async (url: any) => {
+        if (!String(url).includes('/gbrain/master/package.json')) throw new Error(`unexpected fetch ${url}`);
+        return respond();
+      }) as typeof fetch;
+    };
+    stub(() => new Response(JSON.stringify({ engines: { bun: '>=1.6.0' } })));
+    expect(await fetchLatestBunFloor()).toBe('>=1.6.0');
+    stub(() => new Response('Not Found', { status: 404 }));
+    expect(await fetchLatestBunFloor()).toBeNull();
+    stub(() => { throw new Error('network down'); });
+    expect(await fetchLatestBunFloor()).toBeNull();
+  });
+
+  test('readFetchedBunFloor reads the floor `git pull` will merge, not the checked-out one', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'gbrain-bunlink-floor-'));
+    try {
+      const origin = join(root, 'origin');
+      mkdirSync(origin);
+      const upstream = await makeGitFixture(origin);
+      writeFileSync(join(origin, 'package.json'), JSON.stringify({ engines: { bun: '>=1.4.0' } }));
+      upstream.commitAll('floor 1.4.0');
+      const clone = join(root, 'clone');
+      execFileSync('git', ['clone', '-q', origin, clone], { stdio: 'ignore' });
+      writeFileSync(join(origin, 'package.json'), JSON.stringify({ engines: { bun: '>=1.9.0' } }));
+      upstream.commitAll('floor 1.9.0');
+      expect(readFetchedBunFloor(clone)).toBe('>=1.9.0');
+
+      execFileSync('git', ['-C', clone, 'checkout', '-q', '-b', 'no-upstream'], { stdio: 'ignore' });
+      expect(readFetchedBunFloor(clone)).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

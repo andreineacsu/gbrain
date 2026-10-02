@@ -39,6 +39,11 @@ describe('autopilot self-upgrade static-shape regressions', () => {
     expect(AUTOPILOT_SRC).toContain('attemptAutopilotSelfUpgrade(engine, engineType, lockPath, () => !configurationBlocked())');
     expect(SELF_UPGRADE_SRC).toMatch(/if \(!mayContinue\(\)\) return;[\s\S]*?execSync\('gbrain upgrade --swap-only'/);
   });
+  test('#5855: the Bun-floor gate (bun on PATH; bun-link reads the fetched floor) runs before the swap for every install but the binary, and its hold is audited', () => {
+    expect(SELF_UPGRADE_SRC).toMatch(/let decision = decideSelfUpgrade\([\s\S]{0,600}installMethod !== 'binary'[\s\S]{0,300}decision = gateOnTargetRuntime\(decision, floor, pathBunVersion\(\)\);\s*\}\s*if \(decision\.action !== 'apply'\)[\s\S]*?execSync\('gbrain upgrade --swap-only'/);
+    expect(SELF_UPGRADE_SRC).toContain("const floor = bunLinkRoot ? readFetchedBunFloor(bunLinkRoot) : await fetchLatestBunFloor();");
+    expect(SELF_UPGRADE_SRC).toContain("['unsupported_install', 'known_bad', 'unsupported_runtime'].includes(decision.action)");
+  });
   test('apply path unlinks the lock before exit so the relaunched binary does not self-exit on a stale lock', () => {
     // The exit-for-relaunch block unlinks lockPath then process.exit(0).
     expect(SELF_UPGRADE_SRC).toMatch(/unlinkSync\(lockPath\)[\s\S]{0,120}process\.exit\(0\)/);

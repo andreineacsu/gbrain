@@ -1,16 +1,19 @@
 /**
  * Release-source readers: the files on master that describe the latest
- * release (VERSION, CHANGELOG.md), read from raw.githubusercontent.com.
- * Shared by `gbrain check-update` and `gbrain self-upgrade`;
- * `src/commands/check-update.ts` re-exports the readers it always exported.
- * No DB; every reader returns a failure value instead of throwing.
+ * release (VERSION, the package.json Bun floor, CHANGELOG.md), read from
+ * raw.githubusercontent.com, plus the Bun floor of a bun-link clone's fetched
+ * upstream. Shared by `gbrain check-update`, `gbrain self-upgrade` and the
+ * autopilot self-upgrade channel; `src/commands/check-update.ts` re-exports
+ * the readers it always exported. No DB; every reader returns a failure value
+ * instead of throwing.
  */
 
+import { execFileSync } from 'node:child_process';
 import { VERSION } from '../version.ts';
 import { isValidVersionString, parseSemver, semverGt, semverLte } from './semver.ts';
 
 /** Master on raw.githubusercontent.com, the release train's one trusted host
- * for VERSION and CHANGELOG.md. */
+ * for VERSION, package.json and CHANGELOG.md. */
 const RAW_MASTER_BASE = 'https://raw.githubusercontent.com/garrytan/gbrain/master';
 
 /** GET one file from RAW_MASTER_BASE with a 5s timeout. A network error
@@ -69,6 +72,58 @@ export async function fetchLatestRelease(): Promise<LatestReleaseResult> {
     return { ok: true, tag, published_at: '', url: RELEASE_NOTES_URL };
   } catch {
     return { ok: false, reason: 'network_error' };
+  }
+}
+
+/** package.json on master: the `engines.bun` floor of the release `VERSION`
+ * names, from the same trusted host. Read right before a swap, so it describes
+ * master as the swap will install it (#5855). */
+const PACKAGE_SOURCE_PATH = 'package.json';
+const PACKAGE_BODY_LIMIT = 256 * 1024;
+
+/** Extract the `engines.bun` floor from a raw package.json body. Only the
+ * `>=X.Y.Z` shape the release pins passes (test/runtime-version.test.ts);
+ * anything else is null, which the self-upgrade runtime gate treats as
+ * "cannot confirm" (fail closed). A looser range could read as satisfied by
+ * any Bun (`Bun.semver.satisfies('1.3.14', '--1')` is true). */
+export function parseBunFloor(body: string): string | null {
+  if (body.length > PACKAGE_BODY_LIMIT) return null;
+  let floor: unknown;
+  try {
+    floor = (JSON.parse(body) as { engines?: { bun?: unknown } })?.engines?.bun;
+  } catch {
+    return null;
+  }
+  return typeof floor === 'string' && /^>= ?\d{1,4}\.\d{1,4}\.\d{1,4}$/.test(floor) ? floor : null;
+}
+
+/** Resolve the latest release's Bun floor (see PACKAGE_SOURCE_PATH). Any
+ * failure returns null. */
+export async function fetchLatestBunFloor(): Promise<string | null> {
+  try {
+    const res = await fetchRawMaster(PACKAGE_SOURCE_PATH);
+    return res.ok ? parseBunFloor(await res.text()) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The Bun floor of a bun-link clone's upstream as `git pull --ff-only` will
+ * merge it: fetch, then read package.json at `@{u}`. Live master, where the
+ * raw.githubusercontent copy can lag a floor bump that just landed by minutes
+ * (#5855). Any failure, an upstream-less branch included, returns null. */
+export function readFetchedBunFloor(repoRoot: string): string | null {
+  try {
+    execFileSync('git', ['-C', repoRoot, 'fetch', '-q'], { stdio: 'ignore', timeout: 60_000 });
+    const body = execFileSync('git', ['-C', repoRoot, 'show', '@{u}:package.json'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 10_000,
+      maxBuffer: PACKAGE_BODY_LIMIT + 1,
+    });
+    return parseBunFloor(body);
+  } catch {
+    return null;
   }
 }
 

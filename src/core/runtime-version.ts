@@ -1,3 +1,5 @@
+import { execFileSync } from 'node:child_process';
+
 /**
  * Lowest supported Bun: contains the Linux child-exit fix (oven-sh/bun#30301)
  * and the guarded transport's explicit TLS serverName support.
@@ -8,6 +10,25 @@ export function unsupportedBunMessage(version = typeof Bun === 'undefined' ? '' 
   if (/^\d+\.\d+\.\d+(?:\+.*)?$/.test(version) && Bun.semver.satisfies(version, `>=${MINIMUM_BUN_VERSION}`)) return null;
   return `GBrain requires Bun ${MINIMUM_BUN_VERSION} or newer (found ${version ? `Bun ${version}` : 'no Bun runtime'}).\n`
     + 'Fix: run `bun upgrade`, then restart GBrain. If a `gbrain upgrade` stopped here, finish it with `gbrain post-upgrade`.';
+}
+
+/**
+ * The version of the `bun` on PATH: the runtime a swapped-in release starts on
+ * (its `#!/usr/bin/env bun` shebang under the autopilot wrapper's PATH) and the
+ * one `bun upgrade` replaces. A long-running daemon's own `Bun.version` keeps
+ * its launch value (#5855). null when `bun` cannot run or prints no version.
+ */
+export function pathBunVersion(): string | null {
+  try {
+    const out = execFileSync('bun', ['--version'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 10_000,
+    }).trim();
+    return /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(out) ? out : null;
+  } catch {
+    return null;
+  }
 }
 
 export function assertSupportedBun(version?: string): void {

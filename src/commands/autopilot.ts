@@ -34,13 +34,16 @@ import { VERSION } from '../version.ts';
 import {
   canSelfUpdate,
   decideSelfUpgrade,
+  gateOnTargetRuntime,
   isCacheFresh,
   readUpdateCache,
   reconcileBreadcrumb,
   resolveSelfUpgradeMode,
 } from '../core/self-upgrade.ts';
 import { logSelfUpgrade } from '../core/audit/self-upgrade-audit.ts';
-import { detectInstallMethod } from './upgrade.ts';
+import { fetchLatestBunFloor, readFetchedBunFloor } from '../core/release-source.ts';
+import { pathBunVersion } from '../core/runtime-version.ts';
+import { detectBunLink, detectInstallMethod } from './upgrade.ts';
 import { evaluateQuietHours } from '../core/minions/quiet-hours.ts';
 import { inspectLock } from '../core/db-lock.ts';
 import { relativeSourceLocalPathSkipWarning } from '../core/sources-load.ts';
@@ -382,8 +385,8 @@ export function guardAutopilotEngine(engine: BrainEngine, state: OwnerProcessing
 
 /**
  * The autopilot silent self-upgrade channel. Opt-in (`self_upgrade.mode=auto`).
- * Fires only when behind + idle + in quiet hours + the install can self-update
- * and the target isn't known-bad. On apply: write the breadcrumb, run
+ * Fires only when behind + idle + in quiet hours + self-updatable install +
+ * target not known-bad + Bun floor met. On apply: write the breadcrumb, run
  * `gbrain upgrade --swap-only` (fast; defers post-upgrade to the relaunch),
  * then unlink the autopilot lock and exit(0) so the supervisor relaunches the
  * new binary (no in-process re-exec — Bun has no execve). Never throws.
@@ -419,7 +422,7 @@ export async function attemptAutopilotSelfUpgrade(
     const verdict = evaluateQuietHours({ start: qh?.start ?? 23, end: qh?.end ?? 8, tz }, new Date());
     const installMethod = detectInstallMethod();
 
-    const decision = decideSelfUpgrade({
+    let decision = decideSelfUpgrade({
       mode: 'auto',
       channel: 'autopilot',
       currentVersion: VERSION,
@@ -430,9 +433,15 @@ export async function attemptAutopilotSelfUpgrade(
       canSelfUpdate: canSelfUpdate(installMethod),
       throttledByInterval: false, // cache TTL is the fetch throttle
     });
+    // #5855: never swap in a release the bun on PATH cannot start (a binary carries its own Bun).
+    if (decision.action === 'apply' && installMethod !== 'binary') {
+      const bunLinkRoot = installMethod === 'bun-link' ? detectBunLink()?.repoRoot : undefined;
+      const floor = bunLinkRoot ? readFetchedBunFloor(bunLinkRoot) : await fetchLatestBunFloor();
+      decision = gateOnTargetRuntime(decision, floor, pathBunVersion());
+    }
 
     if (decision.action !== 'apply') {
-      if (['unsupported_install', 'known_bad'].includes(decision.action)) {
+      if (['unsupported_install', 'known_bad', 'unsupported_runtime'].includes(decision.action)) {
         logSelfUpgrade({
           channel: 'autopilot',
           action: decision.action,

@@ -9,6 +9,7 @@ import {
   clearUpdateCache,
   decideSelfUpgrade,
   formatMarker,
+  gateOnTargetRuntime,
   isCacheFresh,
   isSnoozeActive,
   parseMarker,
@@ -20,6 +21,7 @@ import {
   writeSnooze,
   writeUpdateCache,
   type DecideSelfUpgradeInputs,
+  type SelfUpgradeAction,
 } from '../src/core/self-upgrade.ts';
 
 function baseInputs(over: Partial<DecideSelfUpgradeInputs> = {}): DecideSelfUpgradeInputs {
@@ -119,6 +121,28 @@ describe('decideSelfUpgrade — pure branches', () => {
     });
     test('gate order: known_bad beats idle/quiet gates', () => {
       expect(auto({ failedVersions: ['0.43.0'], idle: false }).action).toBe('known_bad');
+    });
+
+    test('#5855: an apply is held when the target Bun floor is above the bun on PATH, or either is unknown', () => {
+      const cases: Array<{ floor: string | null; bun: string | null; action: SelfUpgradeAction; reason?: string[] }> = [
+        { floor: '>=1.4.0', bun: '1.4.2', action: 'apply' },
+        { floor: '>=1.4.0', bun: '1.4.0', action: 'apply' },
+        { floor: '>=1.4.0', bun: '1.4.0+5a1b2c3', action: 'apply' },
+        { floor: '>=1.4.0', bun: '1.3.14', action: 'unsupported_runtime', reason: ['0.43.0 requires Bun >=1.4.0', 'bun on PATH is 1.3.14', 'bun upgrade'] },
+        { floor: null, bun: '1.4.2', action: 'unsupported_runtime', reason: ['could not read the Bun floor of 0.43.0'] },
+        { floor: '>=1.4.0', bun: null, action: 'unsupported_runtime', reason: ['could not run `bun --version` on PATH'] },
+      ];
+      for (const c of cases) {
+        const d = gateOnTargetRuntime(auto(), c.floor, c.bun);
+        expect(d.action, `${c.floor} on ${c.bun}`).toBe(c.action);
+        expect(d.latest).toBe('0.43.0');
+        for (const fragment of c.reason ?? []) expect(d.reason).toContain(fragment);
+      }
+    });
+
+    test('#5855: the runtime gate leaves a non-apply decision unchanged', () => {
+      const busy = auto({ idle: false });
+      expect(gateOnTargetRuntime(busy, '>=9.0.0', '1.4.2')).toEqual(busy);
     });
   });
 });

@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, setSystemTime, test } from 'bun:test';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -64,6 +64,45 @@ describe('checkSelfUpgradeHealth', () => {
       expect(c.message).toContain('self-upgrade failure');
       expect(c.message).toContain('gbrain self-upgrade');
     });
+  });
+
+  test('#5855: an auto-upgrade held for the Bun floor warns with `bun upgrade` until a later apply or a manual upgrade to it', async () => {
+    await withHome(() => {
+      const held = '0.99.0 requires Bun >=9.0.0 (bun on PATH is 1.4.2); run `bun upgrade`, then the next quiet-hours tick applies it';
+      logSelfUpgrade({ channel: 'autopilot', action: 'apply', current: '0.42.0', latest: '0.43.0', outcome: 'failed', error: 'boom' });
+      logSelfUpgrade({ channel: 'autopilot', action: 'unsupported_runtime', current: '0.42.0', latest: '0.99.0', outcome: 'skipped', reason: held });
+      const c = checkSelfUpgradeHealth();
+      expect(c.status).toBe('warn');
+      expect(c.message).toContain(`Auto-upgrade to 0.99.0 held: ${held}`);
+
+      logSelfUpgrade({ channel: 'autopilot', action: 'apply', current: '0.42.0', latest: '0.99.0', reason: 'auto-upgrading 0.42.0 -> 0.99.0' });
+      expect(checkSelfUpgradeHealth().message).not.toContain('held');
+
+      logSelfUpgrade({ channel: 'autopilot', action: 'unsupported_runtime', current: '0.42.0', latest: VERSION, outcome: 'skipped', reason: `${VERSION} requires Bun >=9.0.0` });
+      expect(checkSelfUpgradeHealth().message).not.toContain('held');
+    });
+  });
+
+  test('#5855: the newest event decides across the ISO-week boundary (held state and the last failure)', async () => {
+    // Wednesday of ISO week 40; the previous-week events sit on Sunday of week 39.
+    setSystemTime(new Date('2026-09-30T12:00:00Z'));
+    try {
+      await withHome(() => {
+        logSelfUpgrade({ ts: '2026-09-27T23:00:00.000Z', channel: 'autopilot', action: 'apply', current: '0.42.0', latest: '0.43.0', reason: 'auto-upgrading 0.42.0 -> 0.43.0' });
+        logSelfUpgrade({ channel: 'autopilot', action: 'unsupported_runtime', current: '0.43.0', latest: '0.99.0', outcome: 'skipped', reason: '0.99.0 requires Bun >=9.0.0' });
+        expect(checkSelfUpgradeHealth().message).toContain('Auto-upgrade to 0.99.0 held');
+      });
+      await withHome(() => {
+        logSelfUpgrade({ ts: '2026-09-27T23:00:00.000Z', channel: 'autopilot', action: 'apply', current: '0.42.0', latest: '0.43.0', outcome: 'failed', error: 'older' });
+        logSelfUpgrade({ channel: 'autopilot', action: 'apply', current: '0.42.0', latest: '0.44.0', outcome: 'failed', error: 'newer' });
+        const message = checkSelfUpgradeHealth().message;
+        expect(message).toContain('Last: 0.44.0');
+        expect(message).toContain('newer');
+        expect(message).not.toContain('older');
+      });
+    } finally {
+      setSystemTime();
+    }
   });
 
   test('known-bad versions in config are surfaced', async () => {

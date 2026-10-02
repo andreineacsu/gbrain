@@ -927,7 +927,7 @@ export function detectInstallMethod(): 'bun' | 'bun-link' | 'binary' | 'clawhub'
  * Returns { repoRoot } when confident; null otherwise (caller falls
  * through to the existing detection chain).
  */
-function detectBunLink(): { repoRoot: string } | null {
+export function detectBunLink(): { repoRoot: string } | null {
   try {
     const argv1 = process.argv[1];
     if (!argv1) return null;

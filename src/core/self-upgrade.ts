@@ -70,6 +70,7 @@ export type SelfUpgradeAction =
   | 'busy'
   | 'outside_quiet_hours'
   | 'unsupported_install'
+  | 'unsupported_runtime'
   | 'notify'
   | 'apply';
 
@@ -174,6 +175,29 @@ export function decideSelfUpgrade(inp: DecideSelfUpgradeInputs): SelfUpgradeDeci
     return { action: 'unsupported_install', reason: 'install method cannot self-update', ...base };
   }
   return { action: 'apply', reason: `auto-upgrading ${inp.currentVersion} -> ${inp.latestVersion}`, ...base };
+}
+
+/**
+ * Runtime gate for an `apply` on an install that runs the target on the host's
+ * Bun (every method but `binary`, which carries its own runtime). Holds the
+ * upgrade when the target's `engines.bun` floor is above the `bun` on PATH, or
+ * when either version could not be read: once swapped, every command refuses
+ * at startup (the relaunched daemon included, before it can reconcile the
+ * breadcrumb) and an unattended host has nothing that upgrades Bun (#5855).
+ * The target is NOT recorded known-bad, so the first tick after the cause
+ * clears applies it. Pure.
+ */
+export function gateOnTargetRuntime(
+  decision: SelfUpgradeDecision,
+  targetBunFloor: string | null,
+  pathBun: string | null,
+): SelfUpgradeDecision {
+  if (decision.action !== 'apply') return decision;
+  const hold = (reason: string): SelfUpgradeDecision => ({ ...decision, action: 'unsupported_runtime', reason });
+  if (!targetBunFloor) return hold(`could not read the Bun floor of ${decision.latest}; the next quiet-hours tick retries`);
+  if (!pathBun) return hold(`could not run \`bun --version\` on PATH; the next quiet-hours tick retries ${decision.latest}`);
+  if (Bun.semver.satisfies(pathBun, targetBunFloor)) return decision;
+  return hold(`${decision.latest} requires Bun ${targetBunFloor} (bun on PATH is ${pathBun}); run \`bun upgrade\`, then the next quiet-hours tick applies it`);
 }
 
 /**

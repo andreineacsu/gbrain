@@ -34,7 +34,7 @@ construction. The behavior is governed by one file-plane config key,
 | Mode | Behavior | Who it's for |
 |------|----------|--------------|
 | `notify` (default) | Emit the marker + a 4-option prompt; never apply without confirmation. | Interactive installs / anyone with a human in the loop. |
-| `auto` (opt-in) | Apply silently, but ONLY during quiet hours, ONLY when the brain is idle, doctor-gated, and never re-trying a known-bad version. | Headless / always-on installs (autopilot daemon, the `gbrain serve` host). |
+| `auto` (opt-in) | Apply silently, but ONLY during quiet hours, ONLY when the brain is idle, doctor-gated, never re-trying a known-bad version, and (from the autopilot daemon) never installing a release the host's Bun cannot start. | Headless / always-on installs (autopilot daemon, the `gbrain serve` host). |
 | `off` | Never check. | Air-gapped / pinned installs. |
 
 Enable hands-off upgrades on an always-on install with one line:
@@ -48,6 +48,16 @@ because applying code from GitHub unattended is, by design, remote code
 execution. The trust model is TLS + GitHub (same as `gbrain upgrade`);
 signature verification is a tracked follow-up. Apply manually any time with
 `gbrain self-upgrade`.
+
+A source or package install runs the new release on the `bun` on PATH, so the
+autopilot daemon compares that `bun` with the release's `engines.bun` floor
+right before swapping (a bun-link clone reads the floor from its freshly
+fetched upstream, other installs from `package.json` on master). A release the
+host cannot start is held rather than marked known-bad, and `gbrain doctor`
+reports the hold under `self_upgrade_health` with its cause. When the host's
+Bun is older, run `bun upgrade` and the next quiet-hours tick applies the
+release; when the floor or the `bun` version cannot be read, the next tick
+retries on its own. A compiled binary carries its own Bun and skips this check.
 
 The `auto` quiet-hours window is configured via the
 `self_upgrade.quiet_hours` config key

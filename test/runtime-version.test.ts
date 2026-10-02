@@ -5,16 +5,19 @@
  * Protects: the refusal text users on an old Bun see (found + required
  * versions, `bun upgrade`, restart, `gbrain post-upgrade`), the CLI gate
  * (exit 1 everywhere, `--version` still answering, autopilot's log copy), the
- * `bun_runtime` doctor row, and the floor stated by package.json and the
- * cloud setup script.
+ * `bun_runtime` doctor row, the floor stated by package.json and the cloud
+ * setup script, and the reading of the `bun` on PATH that the self-upgrade
+ * runtime gate compares against the floor (#5855).
  * Regression: a floor bump that misses one of those places, or a message
  * edit that drops the fix command. Existing guarded-http coverage only checks
  * that a refusal throws, not what it tells the user.
  */
 import { describe, expect, spyOn, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { MINIMUM_BUN_VERSION, assertSupportedBun, exitOnUnsupportedBun, unsupportedBunMessage } from '../src/core/runtime-version.ts';
+import { MINIMUM_BUN_VERSION, assertSupportedBun, exitOnUnsupportedBun, pathBunVersion, unsupportedBunMessage } from '../src/core/runtime-version.ts';
+import { withEnv } from './helpers/with-env.ts';
 import { checkBunRuntime } from '../src/commands/doctor/checks/upgrade-health.ts';
 
 const root = join(import.meta.dir, '..');
@@ -96,5 +99,27 @@ describe('stated Bun floor', () => {
     expect(pkg.engines.bun).toBe(`>=${MINIMUM_BUN_VERSION}`);
     const cloud = readFileSync(join(root, 'templates/bootstrap/cloud-setup-script.sh'), 'utf8');
     expect(/Bun\.semver\.satisfies\(Bun\.version, ">=([\d.]+)"\)/.exec(cloud)?.[1]).toBe(MINIMUM_BUN_VERSION);
+  });
+});
+
+describe('bun on PATH (#5855)', () => {
+  test('pathBunVersion reads the bun on PATH; a missing, failing or garbled bun is null', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'gbrain-path-bun-'));
+    try {
+      const cases: Array<[string | null, string | null]> = [
+        ['#!/bin/sh\necho 1.3.14\n', '1.3.14'],
+        ['#!/bin/sh\necho 1.4.2+5a1b2c3\n', '1.4.2+5a1b2c3'],
+        ['#!/bin/sh\necho "bun is great"\n', null],
+        ['#!/bin/sh\nexit 1\n', null],
+        [null, null],
+      ];
+      for (const [script, version] of cases) {
+        rmSync(join(dir, 'bun'), { force: true });
+        if (script) writeFileSync(join(dir, 'bun'), script, { mode: 0o755 });
+        expect(await withEnv({ PATH: dir }, () => pathBunVersion()), String(script)).toBe(version);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
