@@ -7,7 +7,7 @@ import type { ChatResult } from '../../src/core/ai/gateway.ts';
 import { runPhaseExtractAtoms, countExtractAtomsBacklog, discoverExtractablePages } from '../../src/core/cycle/extract-atoms.ts';
 import { disposePersistenceConsumer, waitForWrite } from '../../src/core/persistence/service.ts';
 import { submitPageMutation } from '../../src/core/persistence/page-mutations.ts';
-import { claimWorktree } from '../../src/core/persistence/ownership.ts';
+import { claimWorktree, worktreeManifest } from '../../src/core/persistence/ownership.ts';
 import { registerLocalWriter, withVerifiedLocalRegistration, type LocalGrant } from '../../src/core/persistence/identity.ts';
 import { withCoordinatedWrite } from '../../src/core/persistence/context.ts';
 import { retryManagedAtomBatch } from '../../src/core/persistence/atom-retry.ts';
@@ -22,7 +22,7 @@ import { registerBuiltinHandlers } from '../../src/commands/jobs.ts';
 import type { MinionJobContext } from '../../src/core/minions/types.ts';
 import { withEnv } from './with-env.ts';
 
-export const atomContractCases = ['publication', 'zero_yield', 'revision', 'removal', 'deferred', 'unavailable', 'source_replaced', 'malformed', 'malformed_retry', 'malformed_retry_failure', 'malformed_retry_revision', 'publication_retry', 'pagination', 'transcript', 'transcript_changed'] as const;
+export const atomContractCases = ['publication', 'zero_yield', 'revision', 'removal', 'deferred', 'unavailable', 'source_replaced', 'malformed', 'malformed_retry', 'malformed_retry_failure', 'malformed_retry_revision', 'publication_retry', 'pagination', 'transcript', 'transcript_changed', 'connector', 'connector_claimed'] as const;
 type Case = typeof atomContractCases[number];
 
 export async function exerciseManagedAtoms(engine: BrainEngine, scenario: Case): Promise<void> {
@@ -51,6 +51,14 @@ export async function exerciseManagedAtoms(engine: BrainEngine, scenario: Case):
         await registerLocalWriter(engine, 'cli');
         binding = await claimWorktree(engine, sourceId, root);
       }
+      // #5856: a Google source's local_path is the connector's state directory, not a canonical checkout.
+      const connectorDir = scenario.startsWith('connector') ? join(home, 'clones', `${sourceId}-google`) : undefined;
+      // Its content files: the manifest skips the fence and owner markers a registered or claimed root carries.
+      const connectorFiles = () => worktreeManifest(connectorDir!).files;
+      if (connectorDir) {
+        mkdirSync(connectorDir, { recursive: true });
+        await engine.executeRaw("UPDATE sources SET local_path=$2, config=jsonb_build_object('kind','google') WHERE id=$1", [sourceId, connectorDir]);
+      }
       await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
       if (scenario === 'unavailable') await engine.executeRaw("UPDATE persistence_worktrees SET state='draining' WHERE id=$1::uuid", [binding!.worktree_id]);
       let calls = 0;
@@ -70,6 +78,12 @@ export async function exerciseManagedAtoms(engine: BrainEngine, scenario: Case):
         });
         if (scenario === 'deferred') await engine.executeRaw("UPDATE persistence_worktrees SET state='draining' WHERE id=$1::uuid", [binding!.worktree_id]);
         if (scenario === 'transcript_changed') writeFileSync(transcript!, 'Changed while extraction was running.');
+        if (scenario === 'connector_claimed') {
+          // The owner claims the connector source after the atom preflight, before admission.
+          await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+          await claimWorktree(engine, sourceId, connectorDir!);
+          await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+        }
         if (scenario === 'publication_retry') {
           const path = join(root!, 'atoms', new Date().toISOString().slice(0, 10));
           mkdirSync(path, { recursive: true });
@@ -153,14 +167,24 @@ export async function exerciseManagedAtoms(engine: BrainEngine, scenario: Case):
         expect(await discoverExtractablePages(engine, sourceId)).toEqual([]);
         return;
       }
-      if (scenario === 'revision' || scenario === 'removal' || scenario === 'source_replaced' || scenario === 'transcript_changed') {
+      if (scenario === 'revision' || scenario === 'removal' || scenario === 'source_replaced' || scenario === 'transcript_changed' || scenario === 'connector_claimed') {
         expect(calls).toBe(1);
         expect(first.status).toBe('warn');
         expect(first.details?.atoms_extracted).toBe(0);
+        if (connectorDir) expect(connectorFiles()).toEqual({});
         expect(await engine.executeRaw("SELECT id FROM pages WHERE source_id=$1 AND type='atom'", [sourceId])).toHaveLength(0);
         expect(await engine.executeRaw("SELECT fingerprint FROM op_checkpoints WHERE op='managed-atoms' AND completed_keys->0->>'sourceId'=$1", [sourceId])).toHaveLength(0);
         if (scenario === 'revision') expect((await engine.getPage(page.slug, { sourceId }))?.compiled_truth).toContain('A concurrent edit.');
         if (scenario === 'removal') expect(await engine.getPage(page.slug, { sourceId })).toBeNull();
+        if (scenario === 'connector_claimed') {
+          // The next run extracts through the new owner instead of replaying the refused database-only batch.
+          await disposePersistenceConsumer(engine);
+          expect((await runPhaseExtractAtoms(engine, opts)).status).toBe('ok');
+          expect(calls).toBe(2);
+          const [atom] = await engine.executeRaw<{ slug: string }>("SELECT slug FROM pages WHERE source_id=$1 AND type='atom'", [sourceId]);
+          expect(Object.keys(connectorFiles())).toEqual([`${atom.slug}.md`]);
+          expect(await countExtractAtomsBacklog(engine, sourceId)).toBe(0);
+        }
         return;
       }
       if (scenario === 'pagination') {
@@ -209,6 +233,12 @@ export async function exerciseManagedAtoms(engine: BrainEngine, scenario: Case):
         expect(await engine.executeRaw('SELECT c.id FROM content_chunks c JOIN pages p ON p.id=c.page_id WHERE p.source_id=$1 AND p.slug=$2', [sourceId, atoms[0].slug])).not.toHaveLength(0);
         if (!transcript) expect(await engine.executeRaw('SELECT l.id FROM links l JOIN pages f ON f.id=l.from_page_id JOIN pages t ON t.id=l.to_page_id WHERE f.source_id=$1 AND t.source_id=$1 AND f.slug=$2 AND t.slug=$3', [sourceId, page.slug, atoms[0].slug])).toHaveLength(1);
         if (root) expect(readFileSync(join(root, `${atoms[0].slug}.md`), 'utf8')).toContain('visibility: private');
+      }
+      if (connectorDir) {
+        // Database-only, exactly as the connector's own sync publishes: no file lands in its state directory.
+        expect(connectorFiles()).toEqual({});
+        expect(await engine.executeRaw("SELECT DISTINCT authority->>'databaseOnlyReason' AS reason FROM persistence_requests WHERE source_id=$1", [sourceId]))
+          .toEqual([{ reason: 'connector_database' }]);
       }
       if (scenario !== 'malformed' && !transcript) expect(await countExtractAtomsBacklog(engine, sourceId)).toBe(0);
       expect((await engine.getPage(page.slug, { sourceId }))?.frontmatter).not.toHaveProperty('atoms_scan_hash');

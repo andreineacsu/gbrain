@@ -10,6 +10,7 @@ import { currentVerifiedLocalWriter, localHostId, registerLocalWriter } from './
 import { admitWriteInTransaction, getWriteRequest, receiptFor } from './journal.ts';
 import { digest, requireUuid, sha256 } from './digest.ts';
 import { acquireWorktree, getWorktreeBinding, managedPersistenceEnabled, type WorktreeBinding } from './ownership.ts';
+import { isConnectorSourceKind } from './connector-identity.ts';
 import { preparePageMutation } from './page-prepare.ts';
 import { assertPersistenceAccepting, waitForWrite, writeResponse } from './service.ts';
 import type { PreparedMutation } from './coordinator.ts';
@@ -55,8 +56,8 @@ export async function managedAtomSession(engine: BrainEngine, sourceId: string, 
   if (caller && caller.kind !== 'application' || currentVerifiedLocalWriter()?.remote) {
     throw new OperationError('permission_denied', 'Atom extraction cannot mutate a managed brain through an untrusted caller; a trusted local, source-wide writer is required.');
   }
-  const [source] = await engine.executeRaw<{ incarnation: string; archived: boolean; local_path: string | null }>(
-    'SELECT incarnation,archived,local_path FROM sources WHERE id=$1', [sourceId]);
+  const [source] = await engine.executeRaw<{ incarnation: string; archived: boolean; local_path: string | null; kind: string | null }>(
+    "SELECT incarnation,archived,local_path,config->>'kind' AS kind FROM sources WHERE id=$1", [sourceId]);
   if (!source || source.archived) throw new OperationError('source_changed', 'The atom source is unavailable.');
   if (!currentVerifiedLocalWriter()) await registerLocalWriter(engine, 'cli');
   const authority = await submissionAuthority({ engine, remote: false, sourceId } as OperationContext,
@@ -68,7 +69,10 @@ export async function managedAtomSession(engine: BrainEngine, sourceId: string, 
   const binding = await getWorktreeBinding(engine, sourceId);
   const root = source.local_path || (sourceId === 'default' ? await engine.getConfig('sync.repo_path') : null);
   const writeThrough = !/^(false|0|off|no)$/i.test(await engine.getConfig('sync.write_through') ?? 'true');
-  if (writeThrough && root && !binding) throw new OperationError('owner_unavailable', 'Atom maintenance requires the configured canonical owner.');
+  // An unbound connector source is database-only by design (connector_database), like its connector sync:
+  // its local_path is the connector's state directory, not a canonical checkout.
+  const connectorDatabase = writeThrough && !binding && isConnectorSourceKind(source.kind);
+  if (writeThrough && root && !binding && !connectorDatabase) throw new OperationError('owner_unavailable', 'Atom maintenance requires the configured canonical owner.');
   if (writeThrough && binding && (binding.owner_host_id !== localHostId() || binding.state !== 'active' || !binding.local_path)) {
     throw new OperationError('owner_unavailable', 'The canonical atom owner is unavailable; no extraction was started.');
   }
@@ -78,6 +82,7 @@ export async function managedAtomSession(engine: BrainEngine, sourceId: string, 
     await lock.release();
   }
   if (!writeThrough) authority.databaseOnlyReason = 'disabled_by_config';
+  else if (connectorDatabase) authority.databaseOnlyReason = 'connector_database';
   else if (!binding) authority.databaseOnlyReason = 'no_repo_configured';
   const session: ManagedAtomSession = { sourceId, incarnation: source.incarnation, authority, binding: writeThrough ? binding : null, config: { engine: engine.kind } as GBrainConfig };
   if (retry) {
@@ -141,7 +146,10 @@ function runKey(session: ManagedAtomSession, origin: AtomOrigin): string {
     if (atomRetryInputKey(session, session.retry.origin) !== atomRetryInputKey(session, origin)) throw new OperationError('source_changed', 'The atom retry input no longer matches its accepted source snapshot.');
     return session.retry.runKey;
   }
-  return atomInputKey(session, origin);
+  // A database-only connector run is its own run: once an owner claims the source, the owner's
+  // run extracts again instead of replaying the batch the claim refused (claiming keeps the incarnation).
+  const key = atomInputKey(session, origin);
+  return session.authority.databaseOnlyReason === 'connector_database' ? digest([key, 'connector_database']) : key;
 }
 
 function atomRequestId(key: string, slug: string): string {
@@ -260,6 +268,10 @@ export async function prepareManagedAtomMutation(engine: BrainEngine, row: Write
     throw new OperationError('permission_denied', 'Unsupported atom maintenance intent.');
   }
   const validate = async (tx: BrainEngine) => {
+    // A connector preflighted as unbound publishes database-only; one claimed since then must use its owner.
+    if (row.authority.databaseOnlyReason === 'connector_database' && await getWorktreeBinding(tx, row.source_id)) {
+      throw new OperationError('source_changed', 'The connector source gained a canonical owner after atom preflight; the next run extracts through its owner.');
+    }
     if (p.origin.kind === 'transcript') {
       if (sha256(readFileSync(p.origin.locator)) !== p.origin.textHash) throw new OperationError('source_changed', 'The accepted atom transcript changed.');
     } else {
