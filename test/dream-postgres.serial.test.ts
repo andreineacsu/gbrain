@@ -6,7 +6,7 @@
  * found" when neither --dir nor an on-disk sync.repo_path existed — so the
  * DB-only maintenance phases (notably resolve_symbol_edges, the call-graph
  * builder) could never run on a Supabase brain. Now brainDir can be null: the
- * 6 filesystem phases skip with reason `no_brain_dir` and the DB phases run.
+ * filesystem phases skip with reason `no_brain_dir` and the DB phases run.
  *
  * Covers: the null-brainDir path, A1 (the --source per-source scope fix),
  * A7 (deriveStatus reports `ok` not `clean` when edges resolve), and the
@@ -72,6 +72,26 @@ describe('runDream — checkout-less brain (no --dir, no sync.repo_path)', () =>
     expect(rse?.status).not.toBe('fail');
     expect(rse?.details?.reason).not.toBe('no_brain_dir');
     expect(rse?.details?.reason).not.toBe('no_database');
+  });
+
+  test('--phase extract with no --source drains every source database-only (#5875)', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config) VALUES
+         ('repo-a', 'repo-a', NULL, '{}'::jsonb), ('gmail-a', 'gmail-a', NULL, '{"kind":"google"}'::jsonb)
+       ON CONFLICT (id) DO NOTHING`,
+    );
+    await engine.executeRaw(
+      `INSERT INTO pages (slug, source_id, type, title, compiled_truth, timeline)
+       VALUES ('people/alice', 'repo-a', 'person', 'Alice', 'Quiet page.', ''),
+              ('people/bob', 'gmail-a', 'person', 'Bob', 'Quiet page.', '')`,
+    );
+    const report = await runDream(engine, ['--phase', 'extract', '--json']);
+    expect(report?.brain_dir).toBeNull();
+    const extract = phase(report, 'extract');
+    expect(extract?.status).toBe('ok');
+    expect(extract?.details?.database_only).toBe(true);
+    expect(extract?.details?.stale_pages_drained).toBe(2);
+    expect(await engine.countStalePagesForExtraction({})).toBe(0);
   });
 
   test('--phase lint skips with no_brain_dir (does not exit 1)', async () => {

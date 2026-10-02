@@ -464,10 +464,10 @@ export interface CycleOpts {
   /** Defaults to ALL_PHASES. Pass a subset for --phase lint etc. */
   phases?: CyclePhase[];
   /**
-   * Brain directory (git repo). Required for filesystem phases (lint,
-   * backlinks, sync, synthesize, extract, patterns). `null` when the brain has
-   * no on-disk checkout (postgres/remote engine) — those phases are skipped
-   * with reason `no_brain_dir` and the DB-only phases still run.
+   * Brain directory (git repo). Required for filesystem phases (lint, backlinks,
+   * sync, synthesize, patterns). `null` with no on-disk checkout (postgres/remote
+   * engine, a connector source's cycle): those skip with reason `no_brain_dir`,
+   * extract runs only its database stale drain, and the DB-only phases run.
    */
   brainDir: string | null;
   /** Whether sync should run `git pull`. Default false (cron-safe). */
@@ -1301,7 +1301,7 @@ async function runPhaseSync(
 
 async function runPhaseExtract(
   engine: BrainEngine,
-  brainDir: string,
+  brainDir: string | null, // null: only the database stale drain runs (#5875)
   dryRun: boolean,
   changedSlugs?: string[],
   signal?: AbortSignal,
@@ -1333,7 +1333,8 @@ async function runPhaseExtract(
     }
     // Incremental path: if sync told us which slugs changed, only extract those.
     // On a 54K-page brain this turns a 10-minute full walk into a sub-second pass.
-    const result = await runExtractCore(engine, {
+    const databaseOnly = brainDir === null;
+    const result = databaseOnly ? undefined : await runExtractCore(engine, {
       mode: 'all',
       jsonMode: false, // batch errors stay human-readable on stderr, as in a plain `gbrain extract`
       quiet: true, // the cycle owns the report — no helper summary on stdout (keeps dream --json pure)
@@ -1345,7 +1346,7 @@ async function runPhaseExtract(
     });
     const linksCreated = result?.links_created ?? 0;
     const timelineCreated = result?.timeline_entries_created ?? 0;
-    const incremental = changedSlugs !== undefined;
+    const incremental = !databaseOnly && changedSlugs !== undefined;
     // #4062: the targeted pass above only covers what sync reported (or the
     // fs walk found) — pages left stale for any OTHER reason (extractor
     // version bump, DB-only writes, a prior aborted sweep) never re-extracted
@@ -1355,9 +1356,9 @@ async function runPhaseExtract(
     // full ~30-min STALE_TIME_BUDGET_MS stays with the explicit
     // `gbrain extract --stale` command — an unbounded in-cycle drain would
     // starve every later phase behind a big backlog; the remainder drains
-    // across subsequent cycles), no-op when nothing is stale. Failures
-    // degrade to details (the targeted pass already succeeded — a drain
-    // hiccup must not fail the phase).
+    // across subsequent cycles), no-op when nothing is stale. After a targeted
+    // pass, failures degrade to details (that pass succeeded, so a drain hiccup
+    // must not fail the phase); database-only, the drain failure fails it.
     let staleRemaining: number | undefined;
     let staleDetails: Record<string, unknown> = {};
     try {
@@ -1379,19 +1380,20 @@ async function runPhaseExtract(
         staleRemaining: drained.staleRemaining,
       };
     } catch (e) {
+      if (databaseOnly) throw e; // database-only: the drain is the whole phase
       staleDetails = { stale_drain_error: e instanceof Error ? e.message : String(e) };
     }
     return {
       phase: 'extract',
       status: 'ok',
       duration_ms: 0,
-      summary: incremental
+      summary: databaseOnly ? `database-only: ${staleDetails.stale_pages_drained ?? 0} stale page(s) drained` : incremental
         ? `${linksCreated} link(s), ${timelineCreated} timeline entries (incremental: ${changedSlugs.length} slugs)`
         : `${linksCreated} link(s), ${timelineCreated} timeline entries`,
       details: {
         linksCreated, timelineCreated,
         pages_processed: result?.pages_processed ?? 0,
-        incremental,
+        incremental, ...(databaseOnly ? { database_only: true } : {}),
         ...(incremental ? { slugs_targeted: changedSlugs.length } : {}),
         ...staleDetails,
         ...(staleRemaining !== undefined && staleRemaining > 0 ? { stale_backlog: true } : {}),
@@ -2260,8 +2262,6 @@ export async function runCycle(
           summary: 'no database connected',
           details: { reason: 'no_database' },
         });
-      } else if (brainDir === null) {
-        phaseResults.push(skipNoBrainDir('extract'));
       } else {
         // Pass changed slugs from sync for incremental extract.
         // If sync didn't run (phases exclude it) or failed, syncPagesAffected

@@ -176,6 +176,52 @@ describe('cycle extract phase stale drain (#4062)', () => {
     });
   });
 
+  // #5875: a connector source's per-source cycle has no brain directory
+  // (#5673). The drain needs none, so extract runs it database-only instead
+  // of skipping with no_brain_dir, and stays scoped to the cycle's source.
+  test('a cycle with no brain directory drains its own source database-only', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path, config) VALUES ('gmail-a', 'gmail-a', NULL, '{"kind":"google"}'::jsonb)`,
+    );
+    await engine.executeRaw(
+      `INSERT INTO pages (slug, source_id, type, title, compiled_truth, timeline)
+       VALUES ('people/carol', 'gmail-a', 'person', 'Carol', 'Met [[people/dan]] today.', ''),
+              ('people/dan', 'gmail-a', 'person', 'Dan', 'Quiet page.', '')`,
+    );
+    await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+      const report = await runCycle(engine, { brainDir: null, sourceId: 'gmail-a', phases: ['extract'] });
+      const extractPhase = report.phases.find(p => p.phase === 'extract');
+      expect(extractPhase?.status).toBe('ok');
+      expect(extractPhase?.details?.database_only).toBe(true);
+      expect(extractPhase?.summary).toBe('database-only: 2 stale page(s) drained');
+      expect(extractPhase?.details?.stale_pages_drained).toBe(2);
+      expect(extractPhase?.details?.staleRemaining).toBe(0);
+      expect(report.totals.pages_extracted).toBe(2);
+    });
+    const links = await engine.getLinks('people/carol', { sourceId: 'gmail-a' });
+    expect(links.some(l => l.to_slug === 'people/dan')).toBe(true);
+    // The other source's stale pages are left for its own cycle.
+    expect(await engine.countStalePagesForExtraction({ sourceId: 'wiki' })).toBe(2);
+  });
+
+  // A drain failure after a targeted pass degrades to details (#4062); with
+  // no brain directory the drain is the whole phase, so it fails it.
+  for (const checkout of [true, false]) {
+    test(`a drain failure ${checkout ? 'after a targeted pass degrades to details' : 'fails a database-only extract'}`, async () => {
+      const count = spyOn(engine, 'countStalePagesForExtraction').mockRejectedValueOnce(new Error('pool exhausted'));
+      try {
+        await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
+          const report = await runCycle(engine, { brainDir: checkout ? brainDir : null, sourceId: 'wiki', phases: ['extract'] });
+          const extractPhase = report.phases.find(p => p.phase === 'extract');
+          expect(extractPhase?.status).toBe(checkout ? 'ok' : 'fail');
+          expect(checkout ? extractPhase?.details?.stale_drain_error : extractPhase?.error?.message).toContain('pool exhausted');
+        });
+      } finally {
+        count.mockRestore();
+      }
+    });
+  }
+
   test('drains stale DB-only pages after the targeted pass and reports staleRemaining', async () => {
     await withEnv({ GBRAIN_HOME: gbrainHome }, async () => {
       const report = await runCycle(engine, {
