@@ -9,7 +9,7 @@
  *      estimate prices the chat model the gateway runs and the judge share at
  *      the judge model; an explicit --max-cost on an unpriced model is refused
  *      before any work; an unpriced embedding model counts at $0 through
- *      gateway.embed.
+ *      gateway.embed; brainstorm_health names an unpriced cross or judge model.
  *   2. Regression: the run tracker built as `maxCostUsd ?? 5` without
  *      `pricingOverrides`, so every gateway.chat reserve() throws no_pricing
  *      and the remedy the error names never reaches the run.
@@ -25,6 +25,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../../src/core/pglite-engine.ts';
+import type { BrainEngine } from '../../src/core/engine.ts';
 import type { ChunkInput } from '../../src/core/types.ts';
 import { installFixtureChunks } from '../helpers/page-projection.ts';
 import {
@@ -41,6 +42,7 @@ import {
   type ChatOpts,
   type ChatResult,
 } from '../../src/core/ai/gateway.ts';
+import { checkBrainstormHealth } from '../../src/commands/doctor/checks/graph-embedding.ts';
 import { resolveBrainstormCostGate } from '../../src/core/brainstorm/cost-gate.ts';
 import { isModelPriceable } from '../../src/core/budget/reservation-cost.ts';
 
@@ -382,5 +384,64 @@ describe('#5873 resolveBrainstormCostGate', () => {
     expect(isModelPriceable(served, 'chat', overrides)).toBe(false);
     const gate = resolveBrainstormCostGate({ crossModel: 'nvidia:nemotron-3-super', judgeModel: PRICED, embedModel: null, pricingOverrides: overrides });
     expect(isModelPriceable(served, 'chat', gate.pricingOverrides)).toBe(true);
+  });
+});
+
+describe('#5873 brainstorm_health names an unpriced brainstorm chat model', () => {
+  const DOCTOR_CASES: Array<{
+    name: string;
+    gatewayModel: string;
+    judgeModel?: string;
+    overrides?: Record<string, number>;
+    unpriced: { model: string; role: 'chat' | 'judge' } | null;
+  }> = [
+    { name: 'unpriced gateway chat model -> warn', gatewayModel: UNPRICED, unpriced: { model: UNPRICED, role: 'chat' } },
+    { name: 'unpriced judge model (models.brainstorm.judge) -> warn naming the judge', gatewayModel: PRICED, judgeModel: UNPRICED_JUDGE, unpriced: { model: UNPRICED_JUDGE, role: 'judge' } },
+    { name: 'pricing.overrides prices it -> no pricing warning', gatewayModel: UNPRICED, overrides: { [UNPRICED]: 3 }, unpriced: null },
+    { name: 'priced chat model -> no pricing warning', gatewayModel: PRICED, unpriced: null },
+  ];
+
+  for (const c of DOCTOR_CASES) {
+    test(c.name, async () => {
+      configureGateway({ chat_model: c.gatewayModel, env: {} });
+      if (c.judgeModel) await engine.setConfig('models.brainstorm.judge', c.judgeModel);
+      if (c.overrides) await engine.setConfig('pricing.overrides', JSON.stringify(c.overrides));
+      const check = await checkBrainstormHealth(engine);
+      if (c.unpriced) {
+        expect(check.status).toBe('warn');
+        expect(check.message).toContain(`brainstorm ${c.unpriced.role} model "${c.unpriced.model}" has no price`);
+        expect(check.message).toContain('against the default $5 ceiling');
+        expect(check.message).toContain('--max-cost');
+        expect(check.message).toContain(`gbrain config set pricing.overrides '{"${c.unpriced.model}": {"input":`);
+      } else {
+        expect(check.status).toBe('ok');
+        expect(check.message).not.toContain('has no price');
+      }
+    });
+  }
+
+  test('no configured gateway -> the pricing signal is skipped, not guessed', async () => {
+    resetGateway();
+    const check = await checkBrainstormHealth(engine);
+    expect(check.status).toBe('ok');
+  });
+
+  test('a config read failure in the pricing step -> warn naming the failure', async () => {
+    configureGateway({ chat_model: PRICED, env: {} });
+    const failing = new Proxy(engine, {
+      get(target, prop, receiver) {
+        if (prop === 'getConfig') {
+          return async (key: string) => {
+            if (key === 'models.brainstorm.judge') throw new Error('config plane unreachable');
+            return target.getConfig(key);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as BrainEngine;
+    const check = await checkBrainstormHealth(failing);
+    expect(check.status).toBe('warn');
+    expect(check.message).toContain('Could not check brainstorm chat model pricing (config plane unreachable)');
   });
 });
