@@ -143,6 +143,7 @@ import {
   makeAliasMap,
   resetExtractorState,
   getCacheStats,
+  trajectoryMethodologyNote,
   type AliasMap,
 } from '../eval/longmemeval/extract.ts';
 import { normalizeModelId } from '../core/model-id.ts';
@@ -154,13 +155,6 @@ import { persistRunRecord, type EvalRunRecord } from './eval-run-all.ts';
 // Back-compat re-exports (these used to live here; tests + consumers import from the harness).
 export { loadResumeSet } from '../eval/longmemeval/resume.ts';
 export { emitByTypeSummary } from '../eval/longmemeval/emit.ts';
-
-/**
- * v0.40.2.0 — methodology disclosure marker. Stamped on every row when
- * trajectory routing is enabled so downstream readers see the preprocessing
- * step is in the pipeline ("gbrain + Haiku-preprocess" vs "gbrain alone").
- */
-const TRAJECTORY_METHODOLOGY_NOTE = 'extractor=haiku-preprocess-full-haystack-v1';
 
 const HUGGINGFACE_URL = 'https://huggingface.co/datasets/xiaowu0162/longmemeval';
 
@@ -486,9 +480,9 @@ export interface RunOpts {
   exitOnError?: boolean;
   /** Inject a chat client for tests; defaults to the gateway-routed client (#4636). */
   client?: ThinkLLMClient;
-  /** Separate stub for the Haiku claim extractor (defaults to the same gateway client). */
+  /** Separate stub for the claim extractor (defaults to the same gateway client). */
   extractorClient?: ThinkLLMClient;
-  /** Model id for the extractor's Haiku call. Defaults to a tier-utility model via resolveModel. */
+  /** Model id for the claim extractor. Defaults to the utility tier via resolveModel. */
   extractorModel?: string;
   /**
    * Inject a pre-built benchmark brain instead of creating one inside this
@@ -1325,7 +1319,7 @@ export async function runEvalLongMemEval(args: string[], runOpts: RunOpts = {}):
     const total = xc.hits + xc.misses;
     const pct = total === 0 ? 0 : (xc.hits / total) * 100;
     process.stderr.write(`[longmemeval] extractor.cache_hits: ${xc.hits} / ${total} sessions (${pct.toFixed(1)}%, cached_bodies=${xc.size})\n`);
-    process.stderr.write(`[longmemeval] methodology_note: ${TRAJECTORY_METHODOLOGY_NOTE}\n`);
+    process.stderr.write(`[longmemeval] methodology_note: ${trajectoryMethodologyNote(extractorModel)}\n`);
   }
 
   finishRun({
@@ -1401,7 +1395,7 @@ async function runOneQuestion(
       const p = adapterPages[i];
       pageMeta.push({ slug: p.slug, content: p.content, date: dates[i] });
       await importFromContent(engine, p.slug, p.content, { noEmbed: opts.keywordOnly });
-      // Inline Haiku extractor populates the facts table so trajectory routing
+      // Inline claim extractor populates the facts table so trajectory routing
       // has data to retrieve. Fail-open per session.
       if (ctx.trajectoryEnabled) {
         await extractAndInsertClaims({
@@ -1497,7 +1491,7 @@ async function runOneQuestion(
       trajectory_points: route.points,
       entity_resolved: route.entityResolved,
       resolution_source: route.resolutionSource,
-      methodology_note: TRAJECTORY_METHODOLOGY_NOTE,
+      methodology_note: trajectoryMethodologyNote(ctx.extractorModel),
     } : {}),
   };
   Object.assign(extra, buildCaptureExtras({ pool, preRerank, meta, results, slugToRaw, gold }), await decideLane.lmeDecideRow(engine, ctx.decide, meta, decideBefore));

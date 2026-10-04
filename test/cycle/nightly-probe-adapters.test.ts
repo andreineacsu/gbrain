@@ -8,16 +8,28 @@
  *   - missing receipt file → throws with paste-ready hint
  *   - malformed receipt JSON → throws with the bad content prefix
  *   - exit-code passthrough
+ *   - a routed batch keeps the daemon's brain-configured gateway (#5872)
  */
 
-import { describe, test, expect } from 'bun:test';
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { afterEach, beforeEach, describe, test, expect } from 'bun:test';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  PROBE_QA_DIMENSIONS,
+  buildCrossModalProbeCall,
+  buildLongMemEvalProbeCall,
   runCrossModalBatchForProbe,
 } from '../../src/core/cycle/nightly-probe-adapters.ts';
+import type { NightlyProbeModelRoutes } from '../../src/core/cycle/nightly-probe-routes.ts';
+import {
+  __setChatTransportForTests,
+  configureGateway,
+  getChatModel,
+  resetGateway,
+} from '../../src/core/ai/gateway.ts';
+import { emptyHome, withEnv } from '../helpers/with-env.ts';
 
 // We can't easily mock the actual CLI functions without `mock.module`
 // (which would force this file to `*.serial.test.ts`). Instead, we test
@@ -123,6 +135,111 @@ describe('nightly-probe-adapters: argv shape regression (codex round-2 #1)', () 
     const source = fs.readFileSync(path, 'utf-8');
 
     expect(source).toContain('searchConfigSnapshot: args.searchConfigSnapshot');
+  });
+});
+
+// #5872: the brain-resolved routes ride the commands' existing flags and opts.
+describe('nightly-probe-adapters: model routes reach the eval commands', () => {
+  const ROUTES: NightlyProbeModelRoutes = {
+    reader: { model: 'claude-cli:claude-opus-5-5', source: 'tier_config' },
+    extractor: { model: 'claude-cli:claude-sonnet-5', source: 'tier_config' },
+    slots: { B: 'claude-cli:claude-fable-5' },
+  };
+  const SNAPSHOT = { 'search.mode': 'balanced' };
+  const PRE_5872_CROSS_MODAL_ARGV = [
+    '--batch', '/w/lme.jsonl',
+    '--output', '/w/summary.json',
+    '--max-usd', '2.5',
+    '--dimensions', PROBE_QA_DIMENSIONS.join(','),
+    '--yes',
+    '--json',
+  ];
+
+  interface Case { name: string; modelRoutes?: NightlyProbeModelRoutes; argv: string[] }
+  const LONGMEMEVAL_CASES: Array<Case & { runOpts: Record<string, unknown> }> = [
+    {
+      name: 'with routes: --model carries the reader, RunOpts.extractorModel the extractor',
+      modelRoutes: ROUTES,
+      argv: ['/f.jsonl', '--output', '/w/lme.jsonl', '--model', 'claude-cli:claude-opus-5-5'],
+      runOpts: { searchConfigSnapshot: SNAPSHOT, exitOnError: false, extractorModel: 'claude-cli:claude-sonnet-5' },
+    },
+    {
+      name: 'no routes: the pre-#5872 call',
+      argv: ['/f.jsonl', '--output', '/w/lme.jsonl'],
+      runOpts: { searchConfigSnapshot: SNAPSHOT, exitOnError: false },
+    },
+  ];
+  const CROSS_MODAL_CASES: Array<Case & { opts: Record<string, unknown> }> = [
+    {
+      name: 'with routes: each set slot rides its flag and the configured gateway is kept',
+      modelRoutes: ROUTES,
+      argv: [...PRE_5872_CROSS_MODAL_ARGV, '--slot-b-model', 'claude-cli:claude-fable-5'],
+      opts: { useConfiguredGateway: true },
+    },
+    {
+      name: 'routes with every slot set: flags in slot order',
+      modelRoutes: { ...ROUTES, slots: { C: 'c-model', A: 'a-model', B: 'b-model' } },
+      argv: [...PRE_5872_CROSS_MODAL_ARGV, '--slot-a-model', 'a-model', '--slot-b-model', 'b-model', '--slot-c-model', 'c-model'],
+      opts: { useConfiguredGateway: true },
+    },
+    {
+      name: 'routes with no slot key set: no slot flag, the configured gateway is kept',
+      modelRoutes: { ...ROUTES, slots: {} },
+      argv: PRE_5872_CROSS_MODAL_ARGV,
+      opts: { useConfiguredGateway: true },
+    },
+    {
+      name: 'no routes: the pre-#5872 call',
+      argv: PRE_5872_CROSS_MODAL_ARGV,
+      opts: {},
+    },
+  ];
+
+  test.each(LONGMEMEVAL_CASES)('LongMemEval $name', ({ modelRoutes, argv, runOpts }) => {
+    const call = buildLongMemEvalProbeCall({
+      fixturePath: '/f.jsonl', outputPath: '/w/lme.jsonl', searchConfigSnapshot: SNAPSHOT, modelRoutes,
+    });
+    expect(call.argv).toEqual(argv);
+    expect(call.runOpts).toEqual(runOpts);
+  });
+
+  test.each(CROSS_MODAL_CASES)('cross-modal $name', ({ modelRoutes, argv, opts }) => {
+    const call = buildCrossModalProbeCall({
+      batchPath: '/w/lme.jsonl', summaryPath: '/w/summary.json', maxUsd: 2.5, modelRoutes,
+    });
+    expect(call.argv).toEqual(argv);
+    expect(call.opts).toEqual(opts);
+  });
+
+  // The batch runs inside the daemon, whose gateway holds the brain-resolved
+  // chat model. Unless the adapter hands its opts to the batch, the batch
+  // rebuilds that gateway from the file plane (an empty home here).
+  describe('runCrossModalBatchForProbe on the brain-configured gateway', () => {
+    const BRAIN_CHAT_MODEL = 'claude-cli:claude-opus-5-5';
+    let dir: string;
+
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), 'nightly-adapter-gateway-'));
+      configureGateway({ chat_model: BRAIN_CHAT_MODEL, env: { ANTHROPIC_API_KEY: 'sk-ant-fake' } });
+      __setChatTransportForTests(async () => { throw new Error('stub judge unavailable'); });
+    });
+
+    afterEach(() => {
+      __setChatTransportForTests(null);
+      resetGateway();
+      rmSync(dir, { recursive: true, force: true });
+    });
+
+    test('with routes the gateway keeps the brain chat model and the routed slot runs', async () => {
+      const batchPath = join(dir, 'lme.jsonl');
+      const summaryPath = join(dir, 'summary.json');
+      writeFileSync(batchPath, JSON.stringify({ question_id: 'q1', question: 'Where?', hypothesis: 'widget-co', answer: 'widget-co' }) + '\n');
+      await withEnv({ GBRAIN_HOME: emptyHome() }, () =>
+        runCrossModalBatchForProbe({ batchPath, summaryPath, maxUsd: 0.01, modelRoutes: ROUTES }));
+      expect(getChatModel()).toBe(BRAIN_CHAT_MODEL);
+      const written = JSON.parse(readFileSync(summaryPath, 'utf-8'));
+      expect(written.slots[1]).toEqual({ id: 'B', model: 'claude-cli:claude-fable-5' });
+    });
   });
 });
 

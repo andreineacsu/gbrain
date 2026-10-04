@@ -804,7 +804,7 @@ Unknown flags exit 1 before any work starts.
 | Flag | Default | Purpose |
 |---|---|---|
 | `--limit N` | run all | Run only the first N questions (after `--question-ids` filtering) |
-| `--model M` | resolved | Answer-generation model; default resolves through `resolveModel()` (`models.eval.longmemeval` config key) |
+| `--model M` | `GBRAIN_MODEL`, else `sonnet` | Answer-generation model. A standalone run opens no brain, so it never reads `models.eval.longmemeval` or `models.tier.*`; the nightly probe resolves those against the brain and passes the result here |
 | `--retrieval-only` | off | Skip LLM answer generation; emit the retrieved sessions as the hypothesis |
 | `--keyword-only` | off | Skip vector embedding: pure keyword retrieval (no reranker, no embed cache) |
 | `--expansion` | **off** | LLM multi-query expansion. Off for EVERY mode — the per-call setting beats the bundle, so `--mode tokenmax` alone does not expand. One Haiku call per question, non-deterministic; each row records `expansion_variants` |
@@ -1141,6 +1141,52 @@ callable in isolation, and the test harness exercises it via DI stubs.
 # Manual smoke (exercises the path via DI stubs, no real API spend).
 bun test test/nightly-quality-probe.test.ts
 ```
+
+#### Model routes
+
+The probe runs inside the autopilot daemon, which holds your brain. Right
+before each run it refreshes the daemon's AI gateway from the brain (the way
+queued jobs do), resolves every model against the brain, and passes the
+result to the two eval commands, which open no brain of their own.
+`gbrain models` prints the same routes under "Nightly quality probe", each
+with its source. It judges provider keys from the shell you run it in: a key
+that only `~/.gbrain/env` holds (the daemon's launcher sources that file)
+reads there as missing, so a slot default it serves shows as a substitute and
+a key-aware default can differ from the daemon's.
+
+| Route | Resolution (first one set wins) | Reaches |
+|---|---|---|
+| Reader | `models.eval.longmemeval` → `models.tier.reasoning` → `models.default` → `GBRAIN_MODEL` → key-aware reasoning default | `gbrain eval longmemeval --model` |
+| Trajectory extractor | `models.tier.utility` → `models.default` → `GBRAIN_MODEL` → key-aware utility default | the claim extractor; the rows' `methodology_note` names it |
+| Judge slot A / B / C | `models.eval.cross_modal.slot_a` / `slot_b` / `slot_c` (aliases expand), else the panel default `openai:gpt-5.2` / `anthropic:claude-opus-4-7` / `deepseek:deepseek-v4-pro` | `gbrain eval cross-modal --slot-<x>-model` |
+
+A slot key always wins, even when its provider has no key here (that slot
+then errors at call time). An unset slot whose default provider has no key on
+this install takes the brain's chat model instead (#4636). Slots A and C share
+that substitute: on a brain with no OpenAI or DeepSeek key, two of the three
+judges are one model, and setting only `slot_b` to the chat model makes all
+three judges one model.
+
+**No metered chat calls on a subscription-only brain.** Route the reader and
+the extractor through tiers on `claude-cli`, and set the three slot keys to
+three *different* models. One provider is enough, for example three claude-cli
+models from different families:
+
+```bash
+gbrain config set models.tier.reasoning claude-cli:claude-opus-5-5
+gbrain config set models.tier.utility claude-cli:claude-sonnet-5
+gbrain config set models.eval.cross_modal.slot_a claude-cli:claude-opus-5-5
+gbrain config set models.eval.cross_modal.slot_b claude-cli:claude-sonnet-5
+gbrain config set models.eval.cross_modal.slot_c claude-cli:claude-haiku-4-5-20251001
+gbrain models   # the "Nightly quality probe" block shows every route and its source
+```
+
+Query embeddings still go to your embedding provider.
+
+**Say to your agent:** *"Make the nightly quality probe judge with three
+different Claude subscription models so it stops spending on API keys."* (the
+agent runs `gbrain config set models.eval.cross_modal.slot_<a|b|c> <model>`
+and checks the result with `gbrain models`).
 
 Observability:
 - `~/.gbrain/audit/quality-probe-YYYY-Www.jsonl` — one event per run with

@@ -7,7 +7,21 @@ import type { BrainEngine } from '../core/engine.ts';
 import type { GBrainConfig } from '../core/config.ts';
 import { gbrainPath as gbrainHomePath } from '../core/config.ts';
 import type { AutopilotDaemonState } from './autopilot-daemon.ts';
+import type { NightlyProbeModelRoutes } from '../core/cycle/nightly-probe-routes.ts';
 import { logError } from './autopilot.ts';
+
+/**
+ * The quality probe's model routes (#5872): refresh the daemon's gateway from
+ * the brain the way queued jobs do, so a `gbrain config set models.*` made
+ * after daemon start reaches the #4636 judge substitute, then resolve the
+ * reader, extractor and judge-slot routes against the same brain.
+ */
+export async function resolveNightlyProbeModelRoutesForDaemon(engine: BrainEngine): Promise<NightlyProbeModelRoutes> {
+  const { refreshGatewayForJob } = await import('./jobs.ts');
+  const { resolveNightlyProbeModelRoutes } = await import('../core/cycle/nightly-probe-routes.ts');
+  await refreshGatewayForJob(engine);
+  return resolveNightlyProbeModelRoutes(engine);
+}
 
 export async function runNightlyQualityProbeStep(engine: BrainEngine, cfg: GBrainConfig | null, repoPath: string): Promise<void> {
   // 4.5 — Nightly quality probe (v0.41).
@@ -47,6 +61,7 @@ export async function runNightlyQualityProbeStep(engine: BrainEngine, cfg: GBrai
         resolveMaxUsd: () => maxUsd,
         resolveRepoRoot: () => (fixtureAtPkgRoot ? pkgRoot : repoPath ?? gbrainHomePath('.')),
         resolveSearchConfigSnapshot: () => resolveNightlyProbeSearchConfigSnapshot(engine),
+        resolveModelRoutes: () => resolveNightlyProbeModelRoutesForDaemon(engine),
         runLongMemEval: runLongMemEvalForProbe,
         runCrossModalBatch: runCrossModalBatchForProbe,
         now: () => new Date(),

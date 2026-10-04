@@ -295,14 +295,18 @@ function configureGatewayForCli(): boolean {
  * model itself is usable. Explicit `--slot-*-model` flags always win, an
  * install with all three default providers keyed is untouched, and when no
  * configured model is usable either the defaults stay (the run surfaces the
- * existing no-provider error). Call only after configureGatewayForCli().
+ * existing no-provider error). Call only once the gateway is configured
+ * (configureGatewayForCli(), or the caller's own under useConfiguredGateway).
+ * `log` receives the one line per substituted slot (default: stderr).
  *
  * Exported for the hermetic unit test (the batch DI seam skips gateway
- * configuration entirely, so the policy is pinned at this boundary).
+ * configuration entirely, so the policy is pinned at this boundary) and for
+ * `gbrain models`, which reports the nightly probe's panel with a silent log.
  */
 export function substituteUnavailableDefaultSlots(
   slots: SlotConfig[],
   explicit: Record<string, string | undefined>,
+  log: (line: string) => void = line => { process.stderr.write(line); },
 ): SlotConfig[] {
   let fallback: string | null = null;
   try {
@@ -314,7 +318,7 @@ export function substituteUnavailableDefaultSlots(
   if (!fallback) return slots;
   return slots.map(s => {
     if (explicit[s.id] || isAvailable('chat', s.model)) return s;
-    process.stderr.write(
+    log(
       `[eval cross-modal] slot ${s.id} default ${s.model} has no usable provider here; ` +
       `using the configured chat model ${fallback} instead (#4636).\n`,
     );
@@ -330,6 +334,14 @@ export function substituteUnavailableDefaultSlots(
  */
 export interface RunCrossModalOpts {
   runEval?: typeof runEval;
+  /**
+   * #5872: the caller already configured the gateway from its brain (the
+   * nightly probe inside the autopilot daemon). Skip configureGatewayForCli(),
+   * which would rebuild the process-global gateway from the file plane and
+   * drop the brain-resolved chat model; the chat-provider gate and the #4636
+   * substitution still run, in batch mode even with an injected `runEval`.
+   */
+  useConfiguredGateway?: boolean;
 }
 
 export async function runEvalCrossModal(args: string[], opts: RunCrossModalOpts = {}): Promise<number> {
@@ -391,7 +403,7 @@ export async function runEvalCrossModal(args: string[], opts: RunCrossModalOpts 
   // Configure the AI gateway. Without this, every chat() call throws
   // "AI gateway is not configured" because the cli.ts no-DB branch skips
   // connectEngine (T3=A).
-  configureGatewayForCli();
+  if (!opts.useConfiguredGateway) configureGatewayForCli();
 
   // Probe whether the gateway can serve `chat`. If not, we can't run.
   if (!isAvailable('chat')) {
@@ -700,10 +712,12 @@ async function runBatchMode(parsed: ParsedArgs, opts: RunCrossModalOpts): Promis
   // Configure gateway (same path as single-task mode). When runEval is
   // injected (test mode), skip the gateway availability gate — the injected
   // function handles its own backend, so requiring an API key here would
-  // make hermetic unit tests impossible. Runs BEFORE the cost estimate so
-  // the #4636 slot substitution below prices what actually runs.
-  if (!opts.runEval) {
-    configureGatewayForCli();
+  // make hermetic unit tests impossible — unless the caller configured the
+  // gateway itself (useConfiguredGateway), whose gate and substitution
+  // still run. Runs BEFORE the cost estimate so the #4636 slot
+  // substitution below prices what actually runs.
+  if (!opts.runEval || opts.useConfiguredGateway) {
+    if (!opts.useConfiguredGateway) configureGatewayForCli();
     if (!isAvailable('chat')) {
       process.stderr.write(
         'Error: AI gateway has no usable chat provider. ' +

@@ -24,6 +24,7 @@ import * as path from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { logQualityProbeEvent, readRecentQualityProbeEvents } from '../audit-quality-probe.ts';
+import { NightlyProbeModelRoutesError, type NightlyProbeModelRoutes } from './nightly-probe-routes.ts';
 
 /** Run-once gate window in ms. 24h matches the "nightly" cadence. */
 const NIGHTLY_WINDOW_MS = 24 * 60 * 60 * 1000;
@@ -61,13 +62,25 @@ export interface NightlyProbeDeps {
   resolveRepoRoot: () => string | Promise<string>;
   /** Resolves live search-mode/reranker overrides copied into the isolated benchmark brain. */
   resolveSearchConfigSnapshot?: () => Record<string, string> | Promise<Record<string, string>>;
+  /**
+   * Refreshes the gateway from the live brain and resolves the reader,
+   * extractor and judge-slot routes (#5872). Runs only on a run that passed
+   * the rate limit; a rejection becomes an `error` audit row.
+   */
+  resolveModelRoutes?: () => Promise<NightlyProbeModelRoutes>;
   /** Runs the longmemeval command; returns the path to the JSONL output. */
-  runLongMemEval: (args: { fixturePath: string; outputPath: string; searchConfigSnapshot?: Record<string, string> }) => Promise<void>;
+  runLongMemEval: (args: {
+    fixturePath: string;
+    outputPath: string;
+    searchConfigSnapshot?: Record<string, string>;
+    modelRoutes?: NightlyProbeModelRoutes;
+  }) => Promise<void>;
   /** Runs the cross-modal batch; returns exit code (0/1/2). */
   runCrossModalBatch: (args: {
     batchPath: string;
     summaryPath: string;
     maxUsd: number;
+    modelRoutes?: NightlyProbeModelRoutes;
   }) => Promise<{ exitCode: number; summary?: { pass_count: number; fail_count: number; inconclusive_count: number; error_count: number; est_cost_usd: number; verdict: string } }>;
   /** Now provider — overridable for tests of the 24h rate limit. */
   now: () => Date;
@@ -212,11 +225,20 @@ export async function runNightlyQualityProbe(deps: NightlyProbeDeps): Promise<Ni
     const searchConfigSnapshot = deps.resolveSearchConfigSnapshot
       ? await deps.resolveSearchConfigSnapshot()
       : undefined;
-    await deps.runLongMemEval({ fixturePath, outputPath: lmeOutPath, searchConfigSnapshot });
+    let modelRoutes: NightlyProbeModelRoutes | undefined;
+    if (deps.resolveModelRoutes) {
+      try {
+        modelRoutes = await deps.resolveModelRoutes();
+      } catch (err) {
+        throw err instanceof NightlyProbeModelRoutesError ? err : new NightlyProbeModelRoutesError(err);
+      }
+    }
+    await deps.runLongMemEval({ fixturePath, outputPath: lmeOutPath, searchConfigSnapshot, modelRoutes });
     const { exitCode, summary } = await deps.runCrossModalBatch({
       batchPath: lmeOutPath,
       summaryPath,
       maxUsd,
+      modelRoutes,
     });
 
     const outcome: NightlyProbeResult['outcome'] = (() => {

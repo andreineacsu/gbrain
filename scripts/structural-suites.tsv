@@ -93,6 +93,8 @@ test/cycle-drain-renewal.test.ts	drain-loop wiring (structural — the shape gua
 test/cycle-patterns-deadline-budget.test.ts	deadline plumbing wiring (structural)	7	readFileSync,source-surface-helper
 test/cycle-patterns.test.ts	patterns private-queue keepalive wiring	1	readFileSync
 test/cycle-phase-deadline-drift.test.ts	propose_takes deadline < job timeout (#4168)	4	readFileSync
+test/cycle/nightly-probe-routes.test.ts	resolveNightlyProbeModelRoutes	6	source-surface-helper
+test/cycle/nightly-probe-routes.test.ts	resolveNightlyProbeModelRoutesForDaemon (autopilot step dep)	3	source-surface-helper
 test/destructive-guard.test.ts	FK-RESTRICT lifecycle (clientsReferencingSource + purge skip)	9	readFileSync
 test/destructive-guard.test.ts	assessDestructiveImpact	5	readFileSync
 test/destructive-guard.test.ts	formatters (display helpers)	4	readFileSync

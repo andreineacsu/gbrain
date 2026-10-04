@@ -206,6 +206,50 @@ describe('runNightlyQualityProbe (DI stub harness)', () => {
     });
   });
 
+  test('threads the brain-resolved model routes into both adapters (#5872)', async () => {
+    await withEnv({ GBRAIN_AUDIT_DIR: auditTmp }, async () => {
+      const routes = {
+        reader: { model: 'claude-cli:claude-opus-5-5', source: 'tier_config' as const },
+        extractor: { model: 'claude-cli:claude-sonnet-5', source: 'tier_config' as const },
+        slots: { B: 'claude-cli:claude-fable-5' },
+      };
+      const seen: { lme?: unknown; crossModal?: unknown } = {};
+      const r = await runNightlyQualityProbe(makeDeps({
+        resolveModelRoutes: async () => routes,
+        runLongMemEval: async (args) => { seen.lme = args.modelRoutes; },
+        runCrossModalBatch: async (args) => {
+          seen.crossModal = args.modelRoutes;
+          return {
+            exitCode: 0,
+            summary: { pass_count: 5, fail_count: 0, inconclusive_count: 0, error_count: 0, est_cost_usd: 0.35, verdict: 'pass' },
+          };
+        },
+      }));
+      expect(r.outcome).toBe('pass');
+      expect(seen.lme).toEqual(routes);
+      expect(seen.crossModal).toEqual(routes);
+    });
+  });
+
+  test('resolveModelRoutes throws → error audit row naming the routes, LongMemEval never starts (#5872)', async () => {
+    await withEnv({ GBRAIN_AUDIT_DIR: auditTmp }, async () => {
+      let longMemEvalCalls = 0;
+      const r = await runNightlyQualityProbe(makeDeps({
+        resolveModelRoutes: async () => { throw new Error('gateway refresh failed'); },
+        runLongMemEval: async () => { longMemEvalCalls++; },
+      }));
+      expect(r.outcome).toBe('error');
+      expect(longMemEvalCalls).toBe(0);
+      const events = await readEvents();
+      expect(events).toHaveLength(1);
+      expect(events[0].outcome).toBe('error');
+      expect(events[0].detail).toBe(
+        'nightly-quality-probe: could not resolve the model routes (reader, extractor, judge slots) ' +
+        'from the brain: gateway refresh failed',
+      );
+    });
+  });
+
   test('runLongMemEval throws → outcome: error with audit row', async () => {
     await withEnv({ GBRAIN_AUDIT_DIR: auditTmp }, async () => {
       const r = await runNightlyQualityProbe(makeDeps({
