@@ -1174,18 +1174,22 @@ then errors at call time). An unset slot whose default provider has no key on
 this install takes the brain's chat model instead (#4636). Slots A and C share
 that substitute: on a brain with no OpenAI or DeepSeek key, two of the three
 judges are one model, and setting only `slot_b` to the chat model makes all
-three judges one model.
+three judges one model. When `models.tier.reasoning` is set and neither
+`models.chat` nor `models.eval.longmemeval` is, the chat model and the reader
+both resolve to that tier, so the substitute is also the reader: those judges
+grade their own answers.
 
 **No metered chat calls on a subscription-only brain.** Route the reader and
 the extractor through tiers on `claude-cli`, and set the three slot keys to
-three *different* models. One provider is enough, for example three claude-cli
-models from different families:
+three *different* models, none of them the reader (`gbrain models` shows it),
+so no judge grades its own answers. One provider is enough, for example three
+claude-cli models from different families:
 
 ```bash
 gbrain config set models.tier.reasoning claude-cli:claude-opus-5-5
 gbrain config set models.tier.utility claude-cli:claude-sonnet-5
-gbrain config set models.eval.cross_modal.slot_a claude-cli:claude-opus-5-5
-gbrain config set models.eval.cross_modal.slot_b claude-cli:claude-sonnet-5
+gbrain config set models.eval.cross_modal.slot_a claude-cli:claude-fable-5-1
+gbrain config set models.eval.cross_modal.slot_b claude-cli:claude-sonnet-5-5
 gbrain config set models.eval.cross_modal.slot_c claude-cli:claude-haiku-4-5-20251001
 gbrain models   # the "Nightly quality probe" block shows every route and its source
 ```
@@ -1193,7 +1197,8 @@ gbrain models   # the "Nightly quality probe" block shows every route and its so
 Query embeddings still go to your embedding provider.
 
 **Say to your agent:** *"Make the nightly quality probe judge with three
-different Claude subscription models so it stops spending on API keys."* (the
+different Claude subscription models, none of them the model that answers the
+questions, so it stops spending on API keys."* (the
 agent runs `gbrain config set models.eval.cross_modal.slot_<a|b|c> <model>`
 and checks the result with `gbrain models`).
 
