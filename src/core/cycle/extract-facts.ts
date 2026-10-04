@@ -512,12 +512,10 @@ export async function runExtractFacts(
   // tripped the guard forever with drain advice (`apply-migrations
   // --force-retry 0.32.2`) that is a structural no-op for them.
   //
-  // #5504: a connector fact whose entity resolved in another federated
-  // source is DB-only by construction and carries the cross-source
-  // provenance prefix. When the writing source later gains a page with the
-  // same slug (a contact page), that row is not a v0.31 backfill row and
-  // must not halt this source's cycle. The reconcile pass never touches it
-  // either way (it keys on source_markdown_slug, which the row leaves NULL).
+  // #5504: a connector fact about another federated source's page is DB-only
+  // and carries the cross-source provenance prefix; a same-slug page added
+  // here later must not make it a v0.31 backfill row that halts this cycle.
+  // Reconcile never touches it (it keys on source_markdown_slug, left NULL).
   const legacy = await engine.executeRaw<{ n: string }>(
     `SELECT COUNT(*) AS n
        FROM facts f
