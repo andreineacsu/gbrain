@@ -192,7 +192,10 @@ exactly one other `federated: true` source has the page, the loop row and the
 commitment fact carry that page's slug (no stub page is created), and the
 entity card and `gbrain waiting` context of that page show them for local
 callers. Two federated sources holding the page is ambiguous, so the rows keep
-today's fallback and a log line names them.
+today's fallback and a log line names them. The match in the other source must
+be the page's slug, its own name or an alias it lists (such as an email
+address); a bare first name that only prefixes a page there is a guess, so the
+counterparty stays unresolved.
 
 `gbrain waiting` and `gbrain loops list` read across **every source in the
 brain** by default (loops live in google sources, not `default` — a

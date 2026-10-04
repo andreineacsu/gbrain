@@ -290,6 +290,18 @@ describe('writeSingleFact × cross-source resolution (#5504)', () => {
     expect(events[0]).toMatchObject({ slug: 'felicia-example', source_id: 'g-conn', reason: 'unprefixed' });
   });
 
+  test('bare first name whose only page is in another federated source: unresolved, refused and audited by the stub guard', async () => {
+    const r = await connectorWrite('Felicia');
+
+    expect(r.entity_slug).toBe('felicia');
+    expect((await factRow(r.id)).source_markdown_slug).toBeNull();
+    expect((await crossSourceRows())[0]?.source).toBe('test:cross-source');
+    expect(existsSync(join(connDir, 'felicia.md'))).toBe(false);
+    const events = await auditEvents();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ slug: 'felicia', source_id: 'g-conn', reason: 'unprefixed' });
+  });
+
   // Withdrawals are subject-scoped on the resolved slug. For a cross-source
   // row that slug names a page in another source, so forget and the
   // re-extract check must both key on it, or the forgotten commitment

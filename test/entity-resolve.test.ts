@@ -9,6 +9,7 @@ import {
 } from '../src/core/entities/resolve.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
+import { normalizeAlias } from '../src/core/search/alias-normalize.ts';
 
 /**
  * Entity resolution prefix expansion tests.
@@ -501,11 +502,54 @@ describe('resolveConnectorEntitySlug: cross-source fallback (#5504)', () => {
       expected: { slug: 'people/erin-example', source: 'fuzzy_match', sourceId: 'xs-b' },
     },
     {
-      name: 'bare name with a single prefix candidate in one other federated source resolves there',
+      // A bare-name prefix match is a guess by cardinality (`prefix_expansion`,
+      // unverified), so it never names a page in another source.
+      name: 'a bare name whose only candidate is a prefix match in another federated source stays unresolved',
       sources: { 'xs-g': { federated: true }, 'xs-b': { federated: true } },
       pages: [erinInB],
       input: 'Erin',
-      expected: { slug: 'people/erin-example', source: 'fuzzy_match', sourceId: 'xs-b' },
+      expected: fallback('erin'),
+    },
+    {
+      // The exact-title pick (N9-5) is tagged `prefix_expansion` too, and the
+      // strict resolver never applies it: unverified, so it stays home.
+      name: 'an exact-title prefix pick in another federated source stays unresolved',
+      sources: { 'xs-g': { federated: true }, 'xs-b': { federated: true } },
+      pages: [
+        { source: 'xs-b', slug: 'companies/acme', title: 'Acme' },
+        { source: 'xs-b', slug: 'companies/acme-labs', title: 'Acme Labs' },
+      ],
+      input: 'Acme',
+      expected: fallback('acme'),
+    },
+    {
+      name: 'a bare name with a single prefix candidate in the writing source resolves there as prefix_expansion',
+      sources: { 'xs-g': { federated: true }, 'xs-b': { federated: true } },
+      pages: [{ ...erinInB, source: 'xs-g' }],
+      input: 'Erin',
+      expected: { slug: 'people/erin-example', source: 'prefix_expansion', sourceId: 'xs-g' },
+    },
+    {
+      name: 'an exact-title prefix pick in the writing source resolves there as prefix_expansion',
+      sources: { 'xs-g': { federated: true }, 'xs-b': { federated: true } },
+      pages: [
+        { source: 'xs-g', slug: 'companies/acme', title: 'Acme' },
+        { source: 'xs-g', slug: 'companies/acme-labs', title: 'Acme Labs' },
+      ],
+      input: 'Acme',
+      expected: { slug: 'companies/acme', source: 'prefix_expansion', sourceId: 'xs-g' },
+    },
+    {
+      // Single-source order since #5769: a page's own name beats another
+      // page's alias (a former name), in another source too.
+      name: 'a page\'s own name in another federated source beats a different page\'s alias there',
+      sources: { 'xs-g': { federated: true }, 'xs-b': { federated: true } },
+      pages: [
+        { source: 'xs-b', slug: 'people/jordan-lee-example', title: 'Jordan Lee-Example' },
+        { source: 'xs-b', slug: 'people/jordan-smith-example', title: 'Jordan Smith-Example', aliases: [normalizeAlias('Jordan Lee-Example')] },
+      ],
+      input: 'Jordan Lee-Example',
+      expected: { slug: 'people/jordan-lee-example', source: 'fuzzy_match', sourceId: 'xs-b' },
     },
     {
       name: 'an email alias in one other federated source resolves there',
@@ -555,7 +599,7 @@ describe('resolveConnectorEntitySlug: cross-source fallback (#5504)', () => {
       name: 'a match in one source and ambiguous candidates in another keep the fallback',
       sources: { 'xs-g': { federated: true }, 'xs-b': { federated: true }, 'xs-c': { federated: true } },
       pages: [
-        erinInB,
+        { ...erinInB, aliases: [normalizeAlias('Erin')] },
         { source: 'xs-c', slug: 'people/erin-one', title: 'Erin One' },
         { source: 'xs-c', slug: 'people/erin-two', title: 'Erin Two' },
       ],

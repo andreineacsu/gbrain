@@ -59,6 +59,7 @@ const { runLoopsExtract, isLoopsExtractionEnabled } = await import(
 const { normalizeAlias } = await import('../src/core/search/alias-normalize.ts');
 const { MinionQueue } = await import('../src/core/minions/queue.ts');
 const { readRecentStubGuardEvents } = await import('../src/core/facts/stub-guard-audit.ts');
+const { CROSS_SOURCE_PROVENANCE_PREFIX } = await import('../src/core/facts/write-single.ts');
 const { withEnv } = await import('./helpers/with-env.ts');
 
 const SRC = 'g1';
@@ -746,46 +747,85 @@ describe('runLoopsExtract: counterparty page in another federated source (#5504)
     return { slug, r };
   }
 
-  for (const name of ['Alice Example', 'Alice']) {
-    test(`"${name}" resolves to the page in the federated source: fact, loop row and edge, no stub`, async () => {
-      const { slug, r } = await extractNaming(name);
-      expect(r.status).toBe('extracted');
-      expect(r.loop_ids.length).toBe(1);
+  test('"Alice Example" resolves to the page in the federated source: fact, loop row and edge, no stub', async () => {
+    const { slug, r } = await extractNaming('Alice Example');
+    expect(r.status).toBe('extracted');
+    expect(r.loop_ids.length).toBe(1);
 
-      const [loop] = await engine.executeRaw<{ counterparty_slug: string | null; fact_id: number | null }>(
-        `SELECT counterparty_slug, fact_id FROM open_loops WHERE id = $1`,
-        [r.loop_ids[0]],
-      );
-      expect(loop.counterparty_slug).toBe(PERSON_SLUG);
-      expect(loop.fact_id).not.toBeNull();
+    const [loop] = await engine.executeRaw<{ counterparty_slug: string | null; fact_id: number | null }>(
+      `SELECT counterparty_slug, fact_id FROM open_loops WHERE id = $1`,
+      [r.loop_ids[0]],
+    );
+    expect(loop.counterparty_slug).toBe(PERSON_SLUG);
+    expect(loop.fact_id).not.toBeNull();
 
-      const [fact] = await engine.executeRaw<{ source_id: string; entity_slug: string; source_markdown_slug: string | null }>(
-        `SELECT source_id, entity_slug, source_markdown_slug FROM facts WHERE id = $1`,
-        [loop.fact_id],
-      );
-      expect(fact).toEqual({ source_id: XS, entity_slug: PERSON_SLUG, source_markdown_slug: null });
+    const [fact] = await engine.executeRaw<{ source_id: string; entity_slug: string; source_markdown_slug: string | null }>(
+      `SELECT source_id, entity_slug, source_markdown_slug FROM facts WHERE id = $1`,
+      [loop.fact_id],
+    );
+    expect(fact).toEqual({ source_id: XS, entity_slug: PERSON_SLUG, source_markdown_slug: null });
 
-      // No page file in either tree, and the stub guard never fired.
-      expect(existsSync(join(xsDir, `${PERSON_SLUG}.md`))).toBe(false);
-      expect(existsSync(join(fedDir, `${PERSON_SLUG}.md`))).toBe(false);
-      expect(readdirSync(xsDir)).toEqual([]);
-      const events = await withEnv({ GBRAIN_AUDIT_DIR: auditDir }, async () =>
-        readRecentStubGuardEvents({ sinceMs: 60_000 }),
-      );
-      expect(events).toEqual([]);
+    // No page file in either tree, and the stub guard never fired.
+    expect(existsSync(join(xsDir, `${PERSON_SLUG}.md`))).toBe(false);
+    expect(existsSync(join(fedDir, `${PERSON_SLUG}.md`))).toBe(false);
+    expect(readdirSync(xsDir)).toEqual([]);
+    const events = await withEnv({ GBRAIN_AUDIT_DIR: auditDir }, async () =>
+      readRecentStubGuardEvents({ sinceMs: 60_000 }),
+    );
+    expect(events).toEqual([]);
 
-      // Projection 3 crosses sources: thread page in g-xs -> person page in b-fed.
-      const edges = await engine.executeRaw<{ from_source: string; to_source: string; to_slug: string; link_type: string }>(
-        `SELECT fp.source_id AS from_source, tp.source_id AS to_source, tp.slug AS to_slug, l.link_type
-           FROM links l
-           JOIN pages fp ON fp.id = l.from_page_id
-           JOIN pages tp ON tp.id = l.to_page_id
-          WHERE l.link_source = 'google-loops' AND fp.slug = $1`,
-        [slug],
-      );
-      expect(edges).toEqual([{ from_source: XS, to_source: FED, to_slug: PERSON_SLUG, link_type: 'owes_to' }]);
-    });
-  }
+    // Projection 3 crosses sources: thread page in g-xs -> person page in b-fed.
+    const edges = await engine.executeRaw<{ from_source: string; to_source: string; to_slug: string; link_type: string }>(
+      `SELECT fp.source_id AS from_source, tp.source_id AS to_source, tp.slug AS to_slug, l.link_type
+         FROM links l
+         JOIN pages fp ON fp.id = l.from_page_id
+         JOIN pages tp ON tp.id = l.to_page_id
+        WHERE l.link_source = 'google-loops' AND fp.slug = $1`,
+      [slug],
+    );
+    expect(edges).toEqual([{ from_source: XS, to_source: FED, to_slug: PERSON_SLUG, link_type: 'owes_to' }]);
+  });
+
+  // A bare first name matches the page in b-fed only by prefix, a guess by
+  // cardinality, so it never resolves outside the connector source: it is an
+  // unresolved counterparty like any other.
+  test('"Alice" stays unresolved: no counterparty slug or edge, the fallback fact is refused by the stub guard', async () => {
+    const { slug, r } = await extractNaming('Alice');
+    expect(r.status).toBe('extracted');
+    expect(r.loop_ids.length).toBe(1);
+
+    const [loop] = await engine.executeRaw<{ counterparty_slug: string | null; fact_id: number | null }>(
+      `SELECT counterparty_slug, fact_id FROM open_loops WHERE id = $1`,
+      [r.loop_ids[0]],
+    );
+    expect(loop.counterparty_slug).toBeNull();
+    expect(loop.fact_id).not.toBeNull();
+
+    const [fact] = await engine.executeRaw<{ source_id: string; entity_slug: string; source: string; source_markdown_slug: string | null }>(
+      `SELECT source_id, entity_slug, source, source_markdown_slug FROM facts WHERE id = $1`,
+      [loop.fact_id],
+    );
+    expect(fact.source_id).toBe(XS);
+    expect(fact.entity_slug).toBe('alice');
+    expect(fact.source_markdown_slug).toBeNull();
+    expect(fact.source.startsWith(CROSS_SOURCE_PROVENANCE_PREFIX)).toBe(false);
+
+    expect(readdirSync(xsDir)).toEqual([]);
+    expect(existsSync(join(fedDir, `${PERSON_SLUG}.md`))).toBe(false);
+    const events = await withEnv({ GBRAIN_AUDIT_DIR: auditDir }, async () =>
+      readRecentStubGuardEvents({ sinceMs: 60_000 }),
+    );
+    expect(events.filter((e) => e.slug === 'alice')).toEqual([
+      expect.objectContaining({ slug: 'alice', source_id: XS, reason: 'unprefixed' }),
+    ]);
+
+    const edges = await engine.executeRaw(
+      `SELECT 1 FROM links l JOIN pages fp ON fp.id = l.from_page_id
+        WHERE l.link_source = 'google-loops' AND fp.slug = $1`,
+      [slug],
+    );
+    expect(edges).toEqual([]);
+  });
 
   test('a failed fact projection is logged with slug, source id and error only; the loop row still lands', async () => {
     const originalInsertFact = engine.insertFact.bind(engine);
