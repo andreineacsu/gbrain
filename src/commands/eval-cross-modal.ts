@@ -37,6 +37,8 @@ import type {
   RunEvalResult,
   SlotConfig,
 } from '../core/cross-modal-eval/runner.ts';
+import type { ParsedModelResult } from '../core/cross-modal-eval/json-repair.ts';
+import { splitProviderModelId } from '../core/model-id.ts';
 
 const HELP = `gbrain eval cross-modal — multi-model quality gate
 
@@ -570,6 +572,12 @@ export interface BatchSummary {
   verdict: 'pass' | 'fail' | 'inconclusive' | 'error';
   est_cost_usd: number;
   slots: SlotConfig[];
+  /**
+   * The judges that scored (#5506): distinct models and providers among
+   * the slots that scored at least one question, and per slot in slot
+   * order the questions whose last cycle it scored.
+   */
+  panel: { distinct_models: number; distinct_providers: number; slot_scored_questions: number[] };
   cycles_per_question: number;
   concurrent: number;
   per_question: Array<{
@@ -577,7 +585,67 @@ export interface BatchSummary {
     verdict: 'pass' | 'fail' | 'inconclusive' | 'error' | 'upstream_error';
     error?: string;
     final_aggregate?: unknown;
+    /** Per dimension, one score per slot in slot order (null: that slot gave none). */
+    slot_scores?: Record<string, Array<number | null>>;
   }>;
+}
+
+/**
+ * The judge panel that scored: distinct models and distinct providers (the
+ * `splitProviderModelId` provider) among the slots that scored at least one
+ * question, each such model holding two or more of those slots (its votes
+ * then count more than once in the aggregate), and the silent slots, which
+ * scored none (for example an explicit slot key whose provider is not
+ * usable here).
+ */
+function describeJudgePanel(slots: SlotConfig[], scoredQuestions: number[]): {
+  panel: BatchSummary['panel'];
+  shared: Array<{ model: string; slotIds: string[] }>;
+  silent: SlotConfig[];
+} {
+  const judged = slots.filter((_, i) => (scoredQuestions[i] ?? 0) > 0);
+  const slotIdsByModel = new Map<string, string[]>();
+  for (const s of judged) slotIdsByModel.set(s.model, [...(slotIdsByModel.get(s.model) ?? []), s.id]);
+  const providers = new Set(judged.map(s => splitProviderModelId(s.model).provider ?? ''));
+  return {
+    panel: {
+      distinct_models: slotIdsByModel.size,
+      distinct_providers: providers.size,
+      slot_scored_questions: scoredQuestions,
+    },
+    shared: [...slotIdsByModel].filter(([, ids]) => ids.length > 1).map(([model, slotIds]) => ({ model, slotIds })),
+    silent: slots.filter((_, i) => (scoredQuestions[i] ?? 0) === 0),
+  };
+}
+
+/** Per position in the last cycle's slot list, whether that judge returned a finite score. */
+function lastCycleScoredSlots(result: RunEvalResult): boolean[] {
+  const last = result.cycles[result.cycles.length - 1];
+  return (last?.slots ?? []).map(slot => {
+    const scores = slot.ok ? (slot.parsed as ParsedModelResult | undefined)?.scores : undefined;
+    return Object.values(scores ?? {}).some(e => typeof e?.score === 'number' && Number.isFinite(e.score));
+  });
+}
+
+/**
+ * Each dimension's scores by position in the last cycle's slot list, null
+ * for a slot that errored or gave no score for it. The aggregate keeps only
+ * the scores that arrived, so its `scores` shift onto the wrong judge as
+ * soon as one slot misses. Dimension names match the aggregate's
+ * (trimmed, lowercased). Undefined when no cycle receipt came back.
+ */
+function lastCycleSlotScores(result: RunEvalResult): Record<string, Array<number | null>> | undefined {
+  const last = result.cycles[result.cycles.length - 1];
+  if (!last) return undefined;
+  const out: Record<string, Array<number | null>> = {};
+  for (const dim of Object.keys(result.finalAggregate.dimensions)) {
+    out[dim] = last.slots.map(slot => {
+      const scores = slot.ok ? (slot.parsed as ParsedModelResult | undefined)?.scores : undefined;
+      const entry = Object.entries(scores ?? {}).find(([name]) => name.trim().toLowerCase() === dim)?.[1];
+      return typeof entry?.score === 'number' && Number.isFinite(entry.score) ? entry.score : null;
+    });
+  }
+  return out;
 }
 
 function readBatchRows(path: string): BatchReadResult {
@@ -778,6 +846,7 @@ async function runBatchMode(parsed: ParsedArgs, opts: RunCrossModalOpts): Promis
     // Aggregate verdicts.
     let pass = 0, fail = 0, inconclusive = 0, errored = 0;
     const perQuestionResults: BatchSummary['per_question'] = [];
+    const slotScoredQuestions = slots.map(() => 0);
     for (let i = 0; i < results.length; i++) {
       const r = results[i]!;
       const qid = rows[i]!.question_id;
@@ -793,10 +862,15 @@ async function runBatchMode(parsed: ParsedArgs, opts: RunCrossModalOpts): Promis
       if (v === 'pass') pass++;
       else if (v === 'fail') fail++;
       else inconclusive++;
+      lastCycleScoredSlots(r.value).forEach((scored, idx) => {
+        if (scored && idx < slotScoredQuestions.length) slotScoredQuestions[idx]!++;
+      });
+      const slotScores = lastCycleSlotScores(r.value);
       perQuestionResults.push({
         question_id: qid,
         verdict: v,
         final_aggregate: r.value.finalAggregate,
+        ...(slotScores ? { slot_scores: slotScores } : {}),
       });
     }
 
@@ -833,6 +907,7 @@ async function runBatchMode(parsed: ParsedArgs, opts: RunCrossModalOpts): Promis
     else if (inconclusive > 0) { batchVerdict = 'inconclusive'; exitCode = 2; }
     else { batchVerdict = 'pass'; exitCode = 0; }
 
+    const judgePanel = describeJudgePanel(slots, slotScoredQuestions);
     const summary: BatchSummary = {
       schema_version: 1,
       kind: 'cross_modal_batch_summary',
@@ -847,6 +922,7 @@ async function runBatchMode(parsed: ParsedArgs, opts: RunCrossModalOpts): Promis
       verdict: batchVerdict,
       est_cost_usd: estTotal,
       slots,
+      panel: judgePanel.panel,
       cycles_per_question: cycles,
       concurrent,
       per_question: perQuestionResults,
@@ -869,8 +945,25 @@ async function runBatchMode(parsed: ParsedArgs, opts: RunCrossModalOpts): Promis
       `\n[eval cross-modal batch] verdict=${batchVerdict} ` +
       `pass=${pass} fail=${fail} inconclusive=${inconclusive} ` +
       `error=${errored} upstream_error=${upstreamErrorCount} malformed=${malformedCount} ` +
-      `(total ${totalDenom})\n`,
+      `(total ${totalDenom}) distinct_judge_models=${judgePanel.panel.distinct_models} ` +
+      `distinct_judge_providers=${judgePanel.panel.distinct_providers}\n`,
     );
+    for (const { model, slotIds } of judgePanel.shared) {
+      process.stderr.write(
+        `[eval cross-modal batch] judge ${model} holds slots ${slotIds.join(', ')}, ` +
+        `so its votes count more than once.\n`,
+      );
+    }
+    for (const { model, id } of judgePanel.silent) {
+      process.stderr.write(
+        `[eval cross-modal batch] judge ${model} in slot ${id} scored no question, so it did not judge.\n`,
+      );
+    }
+    if (judgePanel.panel.distinct_providers < 3) {
+      process.stderr.write(
+        `[eval cross-modal batch] fewer than 3 providers judged, so this panel is not cross-modal.\n`,
+      );
+    }
     process.stderr.write(`[eval cross-modal batch] summary receipt: ${summaryPath}\n`);
 
     if (parsed.json) {

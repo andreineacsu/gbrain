@@ -23,6 +23,34 @@ export type QualityProbeOutcome =
   | 'rate_limited'
   | 'no_embedding_key';
 
+/**
+ * One non-passing question of a completed batch: its failing dimensions
+ * (those carrying a fail reason), or its redacted error text. Holds model
+ * ids, fixture question ids and scores only, never judge text.
+ */
+export interface QualityProbeFailure {
+  question_id: string;
+  /**
+   * The batch's per-question verdict: fail, inconclusive, error or
+   * upstream_error, or unknown for an entry whose verdict was unreadable.
+   */
+  verdict: string;
+  /** Absent when the entry carries no aggregate (an error, or a malformed entry). */
+  dimensions?: Array<{
+    /** One of the probe's dimensions, or `unrecognized` for any other name a judge returned. */
+    dimension: string;
+    /** Absent only when a malformed aggregate carries no finite mean. */
+    mean?: number;
+    /** One per judge slot in slot order; null for a slot that gave no score. */
+    scores?: Array<number | null>;
+    fail_reason: string;
+  }>;
+  /** Redacted, at most 200 characters. */
+  error?: string;
+  /** Errors of the slots that did not score (inconclusive), each redacted and cut to 200 characters. */
+  slot_errors?: Array<{ model: string; error: string }>;
+}
+
 export interface QualityProbeAuditEvent {
   ts: string;
   /** Verdict from the cross-modal batch summary (or short-circuit reason). */
@@ -33,13 +61,55 @@ export interface QualityProbeAuditEvent {
   fail_count: number;
   inconclusive_count: number;
   error_count: number;
-  /** Estimated cost in USD (0 when short-circuited before runs). */
+  /**
+   * The batch's pre-flight estimate in USD for its judge calls only, not
+   * spend: priced judge models add to it, unpriced ones (`claude-cli:*`)
+   * add nothing. 0 when no batch summary came back (a short-circuit, or a
+   * run that failed part-way).
+   */
   est_cost_usd: number;
   /** Sha-8 of the fixture file content for change detection. */
   fixture_sha8?: string;
   /** Optional human-readable detail (e.g. error message, "no chat provider configured"). */
   detail?: string;
+  /** Reader and extractor models the run used (rows written after the routes resolved). */
+  reader_model?: string;
+  extractor_model?: string;
+  /** Judge models in slot order, as configured (completed batch). */
+  judge_models?: string[];
+  /** Per judge slot in slot order, the questions it scored; 0 names a slot that did not judge. */
+  judge_scored_questions?: number[];
+  /** Distinct models and providers among the judge slots that scored at least one question. */
+  distinct_judge_models?: number;
+  distinct_judge_providers?: number;
+  /** Non-passing questions, at most 10, in summary order (non-pass rows only). */
+  failures?: QualityProbeFailure[];
+  /**
+   * Metered chat spend of the run: successful chat calls (reader, extractor
+   * and judges), their USD cost from canonical pricing, and the calls with
+   * no price, whose cost is unknown. Covers more calls than `est_cost_usd`,
+   * so it can exceed it.
+   */
+  chat_calls?: number;
+  chat_cost_usd?: number;
+  unpriced_chat_calls?: number;
 }
+
+/** Fields copied onto the row only when the caller set them (rows written before #5506 lack them). */
+const OPTIONAL_EVENT_FIELDS = [
+  'fixture_sha8',
+  'detail',
+  'reader_model',
+  'extractor_model',
+  'judge_models',
+  'judge_scored_questions',
+  'distinct_judge_models',
+  'distinct_judge_providers',
+  'failures',
+  'chat_calls',
+  'chat_cost_usd',
+  'unpriced_chat_calls',
+] as const satisfies ReadonlyArray<keyof QualityProbeAuditEvent>;
 
 /** ISO-week-rotated filename: `quality-probe-YYYY-Www.jsonl`. Mirrors audit-slug-fallback. */
 export function computeQualityProbeAuditFilename(now: Date = new Date()): string {
@@ -69,9 +139,11 @@ export function logQualityProbeEvent(event: Omit<QualityProbeAuditEvent, 'ts'> &
     inconclusive_count: event.inconclusive_count,
     error_count: event.error_count,
     est_cost_usd: event.est_cost_usd,
-    ...(event.fixture_sha8 !== undefined ? { fixture_sha8: event.fixture_sha8 } : {}),
-    ...(event.detail !== undefined ? { detail: event.detail } : {}),
   };
+  const optional = stamped as unknown as Record<string, unknown>;
+  for (const field of OPTIONAL_EVENT_FIELDS) {
+    if (event[field] !== undefined) optional[field] = event[field];
+  }
   const dir = resolveAuditDir();
   const file = path.join(dir, computeQualityProbeAuditFilename());
   try {

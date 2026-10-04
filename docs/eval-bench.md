@@ -1120,6 +1120,16 @@ echo "exit=$?"  # 0=all-pass, 1=any-fail, 2=any-error-or-inconclusive
 - Exit precedence (fail-loud): ERROR > FAIL > INCONCLUSIVE > PASS.
 - Per-question receipts land in a tempdir and are deleted at end of batch; the
   summary inlines per-question verdicts so the audit trail is self-contained.
+  Each scored question also carries `slot_scores`: per dimension, one score
+  per slot in slot order, `null` for a slot that gave none.
+- The summary's `panel` counts the distinct judge models and providers
+  among the slots that scored at least one question, and records per slot
+  (`slot_scored_questions`, slot order) how many questions it scored. The
+  stderr verdict line prints both counts. Stderr also names a model that
+  holds two or more of those slots (its votes count more than once), a slot
+  that scored no question (it did not judge), and says when fewer than
+  three providers judged (the panel is then not cross-modal). None of this
+  changes the verdict or the exit code.
 
 ### Nightly cross-modal quality probe (opt-in, autopilot)
 
@@ -1193,14 +1203,56 @@ Observability:
   outcome (pass / fail / inconclusive / error / budget_exceeded /
   rate_limited / no_embedding_key), pass/fail/inconclusive/error counts,
   est_cost_usd, fixture_sha8. ISO-week rotation (mirrors slug-fallback
-  audit).
+  audit). The row also carries the evidence behind its verdict, in the
+  optional fields below (rows written by older releases lack them and
+  still read).
 - `gbrain doctor` surfaces `nightly_quality_probe_health`:
   - SKIPPED (disabled) — with paste-ready enable command.
   - OK (enabled, no events yet) — autopilot hasn't fired its first run.
   - OK (last 7d all PASS) — with timestamp of latest run.
   - WARN — any FAIL / ERROR / BUDGET_EXCEEDED in the window, with outcome
-    counts and the latest run's reason.
+    counts and the latest run's reason (the digest in `detail`).
+  - The OK and WARN messages name the latest run's judge panel and any
+    slot that scored no question (it did not judge). When one model holds
+    two or more of the slots that judged, its votes count more than once:
+    doctor names that model and the next step, three different models in
+    `models.eval.cross_modal.slot_a`, `slot_b` and `slot_c` (one provider
+    is enough, for example three claude-cli models). Judges from fewer
+    than three providers are reported as not cross-modal, as information;
+    the check's status does not change.
 
-Real expected cost: ~$0.35 per nightly run (5 questions x 3 slots x 1 cycle
-x ~$0.02/call) ≈ $10.50/month. Worst-case under the default budget cap:
-$150/month. Opt-in default prevents discovering this in your card statement.
+| Audit field | Written on | Meaning |
+|---|---|---|
+| `reader_model`, `extractor_model` | rows written after the model routes resolved | The reader and the trajectory extractor the run used. |
+| `judge_models` | rows from a completed batch | The configured judge models in slot order (A, B, C). |
+| `judge_scored_questions` | rows from a completed batch | Per slot in slot order, the questions that judge scored; `0` names a slot that did not judge. |
+| `distinct_judge_models`, `distinct_judge_providers` | rows from a completed batch | How many different models and providers judged, counted over the slots that scored at least one question. The batch's stderr verdict line prints both. |
+| `failures` | fail, inconclusive and error rows from a batch | Up to 10 non-passing questions in summary order: `question_id`, `verdict`, then either `dimensions` (each failing dimension with its `mean`, its per-slot `scores` in slot order, `null` for a slot that gave no score, and its `fail_reason`, `mean_below_7` or `min_below_5`; a dimension name the probe does not ask for reads `unrecognized`) or the `error` text, cut before any raw model output, redacted and cut to 200 characters. An inconclusive question lists the `slot_errors` of the judges that did not score. |
+| `detail` | the same rows | A one-line digest, for example `6/10 questions did not pass (directness mean_below_7 x6); judges: 2 distinct models from 1 provider`. It counts every question that did not pass, also past the 10 listed, and malformed batch rows (`malformed xN`), and names a slot that scored no question. |
+| `chat_calls`, `chat_cost_usd`, `unpriced_chat_calls` | rows of a run that reached its model calls, including a run that failed part-way | The run's metered chat spend: successful chat calls (reader, extractor, judges), their USD cost from canonical pricing, and the calls with no price on file, whose cost is unknown and never counted as 0. |
+
+**Say to your agent:** *"Why did last night's quality probe fail?"* (the
+agent reads the `detail` and `failures` of the latest
+`quality-probe-*.jsonl` row and runs `gbrain doctor`).
+
+Cost: two numbers that cover different calls, so neither bounds the other.
+- `est_cost_usd` is the batch's pre-flight estimate for its judge calls
+  only (an assumed 5,000 input and 4,000 output tokens per judge call). At
+  the fixture's 10 questions it depends on the panel: about $1.80 on the
+  default three-provider panel and $2.80 on a sonnet/opus/sonnet panel (the
+  #4636 substitute on an Anthropic-only brain). Unpriced judges such as
+  `claude-cli:*` add nothing, and a row written without a batch summary (a
+  run that failed part-way) records 0.
+- `chat_cost_usd` is what every chat call of the run cost (reader,
+  extractor and judges), metered as they succeed and recorded also on a row
+  of a run that failed part-way. Calls with no price on file are counted
+  in `unpriced_chat_calls`, not here. Query embeddings are priced
+  separately and not included. On an Anthropic-keyed brain with the
+  sonnet/opus/sonnet panel, one run metered about $0.38 where the batch
+  estimated $2.80; with unpriced judges and a priced reader the metered
+  cost can exceed the estimate.
+
+No per-run cap applies to the probe: it passes `--yes`, which skips the
+batch's `--max-usd` refusal, so `autopilot.nightly_quality_probe.max_usd`
+does not bound its spend. The opt-in default keeps the spend from starting
+unasked; watch `chat_cost_usd` on the audit rows.
