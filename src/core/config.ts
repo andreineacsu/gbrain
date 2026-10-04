@@ -196,8 +196,9 @@ export interface GBrainConfig {
       /** Enable the nightly probe in the autopilot loop. Defaults to false. */
       enabled?: boolean;
       /**
-       * Cost cap (USD) per probe invocation. Defaults to 5.
-       * Worst case: 5 × 30 nights ≈ $150/month per brain.
+       * Value (USD) the probe passes as the cross-modal batch's --max-usd.
+       * Defaults to 5. Not a spend cap: the probe also passes --yes, which
+       * skips that refusal; audit rows record the metered chat_cost_usd.
        */
       max_usd?: number;
     };

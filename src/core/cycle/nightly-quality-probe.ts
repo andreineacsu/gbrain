@@ -38,7 +38,11 @@ import { NightlyProbeModelRoutesError, type NightlyProbeModelRoutes } from './ni
 /** Run-once gate window in ms. 24h matches the "nightly" cadence. */
 const NIGHTLY_WINDOW_MS = 24 * 60 * 60 * 1000;
 
-/** Default max spend per run; matches eval-cross-modal --max-usd default. */
+/**
+ * Default value passed as the batch's --max-usd (matches the eval-cross-modal
+ * default). The probe also passes --yes, which skips that refusal, so this
+ * value does not bound the probe's spend.
+ */
 const DEFAULT_MAX_USD = 5.0;
 
 /** Committed fixture used as the probe's input dataset. */
@@ -65,7 +69,7 @@ export interface NightlyProbeDeps {
   isEnabled: () => boolean | Promise<boolean>;
   /** Returns true when an embedding provider is configured + reachable. */
   hasEmbeddingProvider: () => boolean | Promise<boolean>;
-  /** Resolves the cost cap (config override OR DEFAULT_MAX_USD). */
+  /** Resolves the batch's --max-usd value (config override OR DEFAULT_MAX_USD); --yes makes it no cap. */
   resolveMaxUsd: () => number | Promise<number>;
   /** Resolves the repo root so we can find the committed fixture. */
   resolveRepoRoot: () => string | Promise<string>;
@@ -112,7 +116,8 @@ export function resolveProbeEnabled(
 }
 
 /**
- * Same dual-plane rule for the per-run cost cap. Malformed or negative
+ * Same dual-plane rule for the batch's --max-usd value (not a spend cap:
+ * the probe passes --yes). Malformed or negative
  * values on either plane fall through to the next plane / the default.
  */
 export function resolveProbeMaxUsd(

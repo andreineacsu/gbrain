@@ -1139,7 +1139,6 @@ API spend. Enable per-host:
 
 ```bash
 gbrain config set autopilot.nightly_quality_probe.enabled true
-gbrain config set autopilot.nightly_quality_probe.max_usd 5.00   # optional override
 ```
 
 The autopilot scheduler invokes the probe on its tick cadence when the
