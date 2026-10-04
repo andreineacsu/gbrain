@@ -17,9 +17,11 @@ import { logError } from './autopilot.ts';
  * reader, extractor and judge-slot routes against the same brain.
  */
 export async function resolveNightlyProbeModelRoutesForDaemon(engine: BrainEngine): Promise<NightlyProbeModelRoutes> {
-  const { refreshGatewayForJob } = await import('./jobs.ts');
+  // refreshGatewayForJob's two calls, inlined: importing jobs.ts would grant its flags to `autopilot` in the flag registry.
+  const { refreshGatewayEnvFromFilePlane, reconfigureGatewayWithEngine } = await import('../core/ai/gateway.ts');
   const { resolveNightlyProbeModelRoutes } = await import('../core/cycle/nightly-probe-routes.ts');
-  await refreshGatewayForJob(engine);
+  refreshGatewayEnvFromFilePlane();
+  await reconfigureGatewayWithEngine(engine);
   return resolveNightlyProbeModelRoutes(engine);
 }
 
