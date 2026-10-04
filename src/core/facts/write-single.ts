@@ -124,8 +124,10 @@ export async function writeSingleFact(
   // resolver returned nothing (fail-closed — no live page was verified).
   const resolutionSource = resolved?.source ?? null;
   // #5504: the entity's page lives in another source, so no fence in this
-  // source's tree may back the fact.
+  // source's tree may back the fact, and its provenance carries the prefix
+  // on both the managed and the unmanaged write path.
   const resolvedElsewhere = resolved !== null && 'sourceId' in resolved && resolved.sourceId !== sourceId;
+  const provenance = resolvedElsewhere ? `${CROSS_SOURCE_PROVENANCE_PREFIX}${input.provenance}` : input.provenance;
 
   const { isFactWithdrawn } = await import('./withdrawal.ts');
   if (await isFactWithdrawn(engine, sourceId, visibility, factText, resolvedSlug)) {
@@ -157,7 +159,7 @@ export async function writeSingleFact(
     // unmanaged path stores it, so dedup is per entity.
     const { publishManagedEntityFacts } = await import('./managed-fact-write.ts');
     const written = await publishManagedEntityFacts(engine, sourceId, resolvedSlug, [{ fact: factText, kind, notability: 'medium',
-      source: input.provenance, visibility, confidence: input.confidence ?? 1.0, validFrom: new Date(), validUntil,
+      source: provenance, visibility, confidence: input.confidence ?? 1.0, validFrom: new Date(), validUntil,
       embedding, embedding_model: embeddingModel, sessionId: input.sessionId ?? null }], { supersede: true, attributeFallback: true });
     const [stored] = await engine.executeRaw<{ entity_slug: string | null }>('SELECT entity_slug FROM facts WHERE id=$1', [written.ids[0]]);
     return { id: written.ids[0], status: written.superseded ? 'superseded' : written.inserted ? 'inserted' : 'duplicate', entity_slug: stored?.entity_slug ?? null,
@@ -203,7 +205,7 @@ export async function writeSingleFact(
     kind,
     entity_slug: resolvedSlug,
     visibility,
-    source: resolvedElsewhere ? `${CROSS_SOURCE_PROVENANCE_PREFIX}${input.provenance}` : input.provenance,
+    source: provenance,
     source_session: input.sessionId ?? null,
     confidence: input.confidence ?? 1.0,
     valid_until: validUntil,

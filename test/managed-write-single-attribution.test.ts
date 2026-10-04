@@ -8,10 +8,13 @@
  * slug database-only (no row number, no page, no file); the same claim for the
  * same absent person still deduplicates. The facts backstop (extract_facts)
  * never opts in: its absent-entity rows stay unattributed, deduplicate within
- * a batch, and replay without provider calls.
+ * a batch, and replay without provider calls. A connector fact whose entity
+ * page lives in another federated source (#5504) keeps the `cross-source:`
+ * provenance prefix, database-only.
  * Fails when: the managed fact intent drops the fallback slug for
  * writeSingleFact (the second person's fact dedups against the first), or the
- * opt-in leaks into the backstop.
+ * opt-in leaks into the backstop, or the managed path drops the cross-source
+ * prefix (the extract_facts legacy guard and Phase B would then claim the row).
  */
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
@@ -22,7 +25,7 @@ import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { configureGateway, resetGateway, __setChatTransportForTests, __setEmbedTransportForTests } from '../src/core/ai/gateway.ts';
 import { operationsByName } from '../src/core/operations.ts';
-import { writeSingleFact } from '../src/core/facts/write-single.ts';
+import { CROSS_SOURCE_PROVENANCE_PREFIX, writeSingleFact } from '../src/core/facts/write-single.ts';
 import { claimWorktree } from '../src/core/persistence/ownership.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { isolatedPersistencePostgres } from './helpers/persistence-postgres.ts';
@@ -48,12 +51,12 @@ for (const backend of testBackends()) {
     afterAll(async () => { if (close) await close(); else await engine.disconnect(); rmSync(dir, { recursive: true, force: true }); });
 
     /** A fresh source with a claimed worktree, then managed mode on. */
-    async function managedSource(run: (sourceId: string, root: string) => Promise<void>): Promise<void> {
+    async function managedSource(run: (sourceId: string, root: string) => Promise<void>, config: Record<string, unknown> = {}): Promise<void> {
       const sourceId = `attr-${randomUUID().slice(0, 8)}`;
       const root = mkdtempSync(join(dir, 'root-'));
       await withEnv({ GBRAIN_HOME: join(dir, `home-${sourceId}`) }, async () => {
         await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
-        await engine.executeRaw('INSERT INTO sources(id,name,local_path) VALUES($1,$1,$2)', [sourceId, root]);
+        await engine.executeRaw('INSERT INTO sources(id,name,local_path,config) VALUES($1,$1,$2,$3::text::jsonb)', [sourceId, root, JSON.stringify(config)]);
         await claimWorktree(engine, sourceId, root);
         await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
         await run(sourceId, root);
@@ -82,6 +85,24 @@ for (const backend of testBackends()) {
         expect(await engine.getPage('memory/unattributed', { sourceId })).toBeNull();
         expect(readdirSync(root).filter(name => !name.startsWith('.gbrain'))).toEqual([]);
       });
+    }, 120_000);
+
+    // #5504: without the cross-source provenance prefix, the extract_facts
+    // empty-fence guard and the v0.32.2 Phase B backfill would treat the row as
+    // a pending legacy fact once the connector source gains a same-slug page.
+    test('a connector fact about a page in another federated source keeps its cross-source provenance, database-only', async () => {
+      const peopleSource = `xs-${randomUUID().slice(0, 8)}`;
+      await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
+      await engine.executeRaw(`INSERT INTO sources(id,name,config) VALUES($1,$1,'{"federated":true}'::jsonb)`, [peopleSource]);
+      await engine.putPage('people/fiona-elsewhere', { type: 'person', title: 'Fiona Elsewhere', compiled_truth: '# Fiona Elsewhere', frontmatter: {} }, { sourceId: peopleSource });
+      await managedSource(async (sourceId, root) => {
+        const r = await writeSingleFact(engine, sourceId, { fact: CLAIM, provenance: 'fixture', entity: 'Fiona Elsewhere', kind: 'commitment', crossSourceResolution: true });
+        expect(r).toMatchObject({ status: 'inserted', entity_slug: 'people/fiona-elsewhere' });
+        expect(await engine.executeRaw('SELECT source, entity_slug, row_num, source_markdown_slug FROM facts WHERE source_id=$1', [sourceId])).toEqual([
+          { source: `${CROSS_SOURCE_PROVENANCE_PREFIX}fixture`, entity_slug: 'people/fiona-elsewhere', row_num: null, source_markdown_slug: null },
+        ]);
+        expect(readdirSync(root).filter(name => !name.startsWith('.gbrain'))).toEqual([]);
+      }, { federated: true });
     }, 120_000);
 
     test('the facts backstop never opts in: absent entities stay unattributed, dedup within the batch, and replay without provider calls', async () => {
