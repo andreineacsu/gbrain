@@ -31,7 +31,7 @@
  * a completed result.
  */
 
-import { retainToolWriteRequestId, assertToolWriteCommitted, isPendingToolWrite } from '../tool-write-identity.ts';
+import { retainToolWriteRequestId, runToolWrite, isPendingToolWrite } from '../tool-write-identity.ts';
 import { randomUUID } from 'node:crypto';
 import type { BrainEngine } from '../../engine.ts';
 import type { MinionJobContext, SubagentHandlerData, SubagentResult, ToolDef, ContentBlock, OneshotFallbackReason } from '../types.ts';
@@ -290,8 +290,8 @@ export async function runSubagentOneshot(args: OneshotArgs): Promise<OneshotOutc
         continue;
       }
       try {
-        const output = await args.putPageTool.execute(input, { engine, jobId: ctx.id, remote: true, signal: ctx.signal });
-        assertToolWriteCommitted(output, 'brain_put_page');
+        const putPageTool = args.putPageTool;
+        const output = await runToolWrite(() => putPageTool.execute(input, { engine, jobId: ctx.id, remote: true, signal: ctx.signal }), 'brain_put_page', ctx);
         await persistToolExecComplete(engine, ctx.id, 1, row.ordinal ?? 0, row.tool_use_id, output);
         row.status = 'complete';
       } catch (e) {
@@ -568,13 +568,13 @@ export async function runSubagentOneshot(args: OneshotArgs): Promise<OneshotOutc
     if (ctx.signal?.aborted) throw new DOMException('oneshot write loop aborted by job signal', 'AbortError');
     let output: unknown;
     try {
-      output = await args.putPageTool.execute(input, {
+      const putPageTool = args.putPageTool;
+      output = await runToolWrite(() => putPageTool.execute(input, {
         engine,
         jobId: ctx.id,
         remote: true,
         signal: ctx.signal,
-      });
-      assertToolWriteCommitted(output, 'brain_put_page');
+      }), 'brain_put_page', ctx);
     } catch (e) {
       // Abort/transient-conn errors are not write verdicts (same rule as
       // recovery): rethrow, row stays pending, retry re-executes.

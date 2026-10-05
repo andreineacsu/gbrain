@@ -25,6 +25,7 @@ import {
   type OneshotArgs,
 } from '../../src/core/minions/handlers/subagent-oneshot.ts';
 import type { ChatResult } from '../../src/core/ai/gateway.ts';
+import { __setMaintenanceWriteWaitForTests } from '../../src/core/persistence/maintenance-wait.ts';
 
 let engine: PGLiteEngine;
 let queue: MinionQueue;
@@ -184,22 +185,45 @@ describe('extractWikilinkTargets', () => {
 });
 
 describe('runSubagentOneshot', () => {
-  test('pending write receipts retain the whole ledger and retry without another provider call', async () => {
-    const ctx = await makeCtx(DATA); const args = makeArgs(ctx, DATA, VALID_RESPONSE);
+  /** The real put_page behind a stub that reports the next `queued.left` dispatches as still queued. */
+  function queuedThenCommitted(args: OneshotArgs) {
     const realTool = args.putPageTool!; const realChat = args._chat!;
-    let chatCalls = 0; let pending = true; const ids: unknown[] = [];
-    args._chat = (async (options: Parameters<typeof realChat>[0]) => { chatCalls++; return realChat(options); }) as typeof realChat;
+    const state = { chatCalls: 0, queued: 0, ids: [] as unknown[] };
+    args._chat = (async (options: Parameters<typeof realChat>[0]) => { state.chatCalls++; return realChat(options); }) as typeof realChat;
     args.putPageTool = { ...realTool, execute: async (input, context) => {
-      const id = (input as Record<string, unknown>).request_id; ids.push(id);
-      if (pending) return { request_id: id, state: 'queued', retry_after_ms: 100 };
+      const id = (input as Record<string, unknown>).request_id; state.ids.push(id);
+      if (state.queued-- > 0) return { request_id: id, state: 'queued', retry_after_ms: 20 };
       return realTool.execute(input, context);
     } };
-    await expect(runSubagentOneshot(args)).rejects.toMatchObject({ code: 'write_pending', writeRequest: { state: 'queued' } });
-    const rows = await engine.executeRaw<{ status: string }>('SELECT status FROM subagent_tool_executions WHERE job_id=$1', [ctx.id]);
-    expect(rows).toHaveLength(2); expect(rows.every(row => row.status === 'pending')).toBe(true);
-    pending = false;
+    return state;
+  }
+  const toolRowStatuses = async (jobId: number) =>
+    (await engine.executeRaw<{ status: string }>('SELECT status FROM subagent_tool_executions WHERE job_id=$1 ORDER BY ordinal', [jobId])).map(row => row.status);
+
+  test('pending write receipts retain the whole ledger and retry without another provider call', async () => {
+    const ctx = await makeCtx(DATA); const args = makeArgs(ctx, DATA, VALID_RESPONSE);
+    const run = queuedThenCommitted(args);
+    run.queued = Number.POSITIVE_INFINITY;
+    // No in-run wait (#5474): the job's write wait would otherwise replay the pending receipt for 30 s.
+    const restoreWait = __setMaintenanceWriteWaitForTests(0);
+    try {
+      await expect(runSubagentOneshot(args)).rejects.toMatchObject({ code: 'write_pending', writeRequest: { state: 'queued' } });
+    } finally { restoreWait(); }
+    expect(await toolRowStatuses(ctx.id)).toEqual(['pending', 'pending']);
+    // Recovery replays a still-pending row until its write commits (#5474).
+    run.queued = 2;
     expect((await runSubagentOneshot(args)).kind).toBe('done');
-    expect(chatCalls).toBe(1); expect(ids[1]).toBe(ids[0]);
+    expect(run.chatCalls).toBe(1); expect(run.ids.slice(0, 4)).toEqual(Array(4).fill(run.ids[0]));
+    expect(await toolRowStatuses(ctx.id)).toEqual(['complete', 'complete']);
+  });
+
+  test('a write that commits during the job wait completes in one run without another provider call (#5474)', async () => {
+    const ctx = await makeCtx(DATA); const args = makeArgs(ctx, DATA, VALID_RESPONSE);
+    const run = queuedThenCommitted(args);
+    run.queued = 2;
+    expect((await runSubagentOneshot(args)).kind).toBe('done');
+    expect(run.chatCalls).toBe(1); expect(run.ids.slice(0, 3)).toEqual(Array(3).fill(run.ids[0]));
+    expect(await toolRowStatuses(ctx.id)).toEqual(['complete', 'complete']);
   });
 
   test('happy path: validates, writes both pages via put_page, ledger rows land, transcript persisted', async () => {

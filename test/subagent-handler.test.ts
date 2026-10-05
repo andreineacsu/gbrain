@@ -195,6 +195,25 @@ describe('subagent handler happy path', () => {
     expect(out).toEqual({ echoed: { value: 'v1' } });
   });
 
+  test('a tool write still queued after its own wait is replayed until it commits, without another model call (#5474)', async () => {
+    const ids: unknown[] = [];
+    const tool: ToolDef = { ...makeEchoTool('brain_put_page'), async execute(input) {
+      const request_id = (input as Record<string, unknown>).request_id; ids.push(request_id);
+      return { request_id, state: ids.length < 3 ? 'queued' : 'committed', retry_after_ms: 20 };
+    } };
+    const client = new FakeMessagesClient([
+      { content: [{ type: 'tool_use', id: 'tu_1', name: 'brain_put_page', input: { slug: 'notes/pending-example' } } as any], stop_reason: 'tool_use' as any },
+      { content: [{ type: 'text', text: 'done' }] as any, stop_reason: 'end_turn' },
+    ]);
+    const ctx = await makeCtx({ prompt: 'go' });
+    const result = await makeSubagentHandler({ engine, client, toolRegistry: [tool] })(ctx);
+    expect(result.stop_reason).toBe('end_turn');
+    expect(client.calls.length).toBe(2);
+    expect(ids).toEqual(Array(3).fill(ids[0]));
+    const rows = await engine.executeRaw<{ status: string }>('SELECT status FROM subagent_tool_executions WHERE job_id = $1', [ctx.id]);
+    expect(rows.map(row => row.status)).toEqual(['complete']);
+  });
+
   test('tool throws: row goes failed, model sees error, loop continues', async () => {
     const tool = makeThrowingTool();
     const client = new FakeMessagesClient([

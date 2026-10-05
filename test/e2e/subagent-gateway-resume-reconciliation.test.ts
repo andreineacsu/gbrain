@@ -33,6 +33,7 @@ import {
   type ChatMessage,
   type ChatResult,
 } from '../../src/core/ai/gateway.ts';
+import { __setMaintenanceWriteWaitForTests } from '../../src/core/persistence/maintenance-wait.ts';
 
 let engine: PGLiteEngine;
 
@@ -130,7 +131,7 @@ function assertBalanced(messages: ChatMessage[]): void {
 
 describe('gateway resume reconciliation', () => {
   it('a pending journal write stays pending and replays its UUID before another model turn', async () => {
-    let turns = 0; let pending = true; const identities: unknown[] = [];
+    let turns = 0; let queued = Number.POSITIVE_INFINITY; const identities: unknown[] = [];
     __setChatTransportForTests(async () => {
       turns++;
       return { text: turns === 1 ? '' : 'done', blocks: turns === 1
@@ -147,13 +148,18 @@ describe('gateway resume reconciliation', () => {
         expect(id).toMatch(/^[0-9a-f-]{36}$/);
         const [row] = await engine.executeRaw<{ request_id: string }>("SELECT input->>'request_id' AS request_id FROM subagent_tool_executions WHERE job_id=$1", [jobId]);
         expect(row.request_id).toBe(id);
-        return { request_id: id, state: pending ? 'queued' : 'committed', retry_after_ms: pending ? 100 : null };
+        return { request_id: id, state: queued-- > 0 ? 'queued' : 'committed', retry_after_ms: 20 };
       } }];
-    await expect(buildHandler(registry)(ctx)).rejects.toMatchObject({ code: 'write_pending' });
+    // No in-run wait (#5474): the job's write wait would otherwise replay the pending receipt for 30 s.
+    const restoreWait = __setMaintenanceWriteWaitForTests(0);
+    try {
+      await expect(buildHandler(registry)(ctx)).rejects.toMatchObject({ code: 'write_pending' });
+    } finally { restoreWait(); }
     expect((await engine.executeRaw<{ status: string }>('SELECT status FROM subagent_tool_executions WHERE job_id=$1', [jobId]))[0].status).toBe('pending');
-    pending = false;
+    // The resumed dispatch replays the still-pending write until it commits (#5474).
+    queued = 2;
     await buildHandler(registry)(ctx);
-    expect(turns).toBe(2); expect(identities).toHaveLength(2); expect(identities[1]).toBe(identities[0]);
+    expect(turns).toBe(2); expect(identities).toEqual(Array(4).fill(identities[0]));
     expect((await engine.executeRaw<{ status: string }>('SELECT status FROM subagent_tool_executions WHERE job_id=$1', [jobId]))[0].status).toBe('complete');
   });
 

@@ -3,6 +3,9 @@ import { OperationError, opError } from '../ops/contract.ts';
 import { readFix } from '../ops/op-fix.ts';
 import { isWriteReceipt } from '../persistence/types.ts';
 import { isPersistenceIpcMutation } from '../persistence/ipc.ts';
+import { WRITE_ADMISSION_HEADROOM_MS, replayWhilePending } from '../persistence/write-wait.ts';
+import { WIRE_WRITE_WAIT_MAX_MS } from '../persistence/params.ts';
+import { maintenanceWriteWaitMs } from '../persistence/maintenance-wait.ts';
 
 /** Bind a durable write to its persisted tool execution, including crash replay. */
 export function retainToolWriteRequestId(input: unknown, jobId: number, messageIdx: number, ordinal: number, toolUseId: string, toolName: string): void {
@@ -24,6 +27,39 @@ export function assertToolWriteCommitted(output: unknown, toolName: string): voi
       : `The tool write ended ${output.state}; its receipt holds the recorded error. Read it before deciding whether a new write (with a new request id) is needed.`,
     { fix: readFix(`Reads tool write ${output.request_id}'s durable receipt, read-only.`, { argv: ['gbrain', 'write-request', '--', output.request_id] }) });
   error.writeRequest = output; error.writeError = code; throw error;
+}
+
+/**
+ * A pending tool write stops waiting this long before the job deadline: one
+ * more tool wait at its longest (each replay resends the model's `wait_ms`)
+ * plus admission headroom, so the handler returns `write_pending` (a retry
+ * under a fresh deadline) before the runner's timeout marks the job dead.
+ */
+const TOOL_WRITE_DEADLINE_RESERVE_MS = WIRE_WRITE_WAIT_MAX_MS + WRITE_ADMISSION_HEADROOM_MS;
+
+/**
+ * #5474: run a tool and wait for its accepted write. The tool's own bounded
+ * wait can end while the write is still queued; replaying the same request_id
+ * admits nothing new and calls no model, so the job replays until the write
+ * is terminal, the job is cancelled, or the job deadline less the reserve
+ * arrives (a job without a deadline waits the #5854 maintenance wait). The
+ * job cannot take its next turn without the result. Only then does the write
+ * leave the handler as `write_pending`, its tool row still pending for the
+ * retry: runners count that as a failed attempt, and the dream inline drain
+ * retries at once. Tradeoff: a write that never commits holds the job, and a
+ * serial dream drain behind it, until that deadline. The receipt's
+ * `inspect_owner` advice is no exit signal: it also marks writer-pool
+ * contention and any write older than 2 min, the slow commits this wait is for.
+ */
+export async function runToolWrite(run: () => Promise<unknown>, toolName: string,
+  job: { deadlineAtMs: number | null; signal?: AbortSignal }): Promise<unknown> {
+  const waitMs = job.deadlineAtMs == null ? maintenanceWriteWaitMs()
+    : Math.max(0, job.deadlineAtMs - Date.now() - TOOL_WRITE_DEADLINE_RESERVE_MS);
+  return replayWhilePending(async () => {
+    const output = await run();
+    assertToolWriteCommitted(output, toolName);
+    return output;
+  }, waitMs, { signal: job.signal });
 }
 export function isPendingToolWrite(error: unknown): error is OperationError {
   return error instanceof OperationError && error.code === 'write_pending' && error.writeRequest !== undefined;
