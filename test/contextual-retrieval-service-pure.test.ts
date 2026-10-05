@@ -24,6 +24,8 @@ import {
   type ChatOpts,
   type ChatResult,
 } from '../src/core/ai/gateway.ts';
+import { normalizeAIError } from '../src/core/ai/errors.ts';
+import { ClaudeCliProcessError } from '../src/core/ai/providers/claude-cli-language-model.ts';
 import type { ChunkInput } from '../src/core/types.ts';
 import { MARKDOWN_CHUNKER_VERSION } from '../src/core/chunkers/recursive.ts';
 import { mockEmbedProjectionEngine } from './helpers/embed-projection-mock.ts';
@@ -345,6 +347,27 @@ describe('per-chunk synopsis concurrency', () => {
 
     expect(out.result.kind).toBe('page_fallback');
     expect(started).toBeLessThanOrEqual(3);
+  });
+
+  test('a claude-cli subscription limit is transient, not a title-tier downgrade (#5964)', async () => {
+    const out = await runWithChatStub({
+      chunks: makeChunks(['chunk-0', 'chunk-1']),
+      concurrency: 2,
+      chat: async () => {
+        // The error chat() throws for this failure: normalizeAIError keeps the
+        // claude-cli status as apiErrorStatus and leaves `status` unset.
+        throw normalizeAIError(
+          new ClaudeCliProcessError("claude-cli API error 429: You've hit your session limit", { apiErrorStatus: 429, exitCode: 1 }),
+          'chat(claude-cli:claude-haiku-4-5)',
+        );
+      },
+    });
+
+    expect(out.result.kind).toBe('transient_error');
+    if (out.result.kind === 'transient_error') {
+      expect(out.result.cause).toBe('rate_limit');
+    }
+    expect(out.embeddedChunks).toHaveLength(0);
   });
 
   test('fenced code chunks bypass synopsis calls and leases', async () => {

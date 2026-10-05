@@ -30,6 +30,7 @@
  * loop and handles page-level fall-back.
  */
 
+import { providerErrorChain, providerErrorStatus } from './ai/errors.ts';
 import { chat, type ChatOpts, type ChatResult } from './ai/gateway.ts';
 import { logSynopsisFailure, type SynopsisFailureKind } from './audit-synopsis.ts';
 import { sanitizeSynopsis } from './embedding-context.ts';
@@ -281,8 +282,12 @@ function buildUserPrompt(
 /**
  * Map a thrown error from `gateway.chat()` into the D27 P1-2 failure envelope.
  *
- * Gateway throws Anthropic-flavored errors with HTTP status info; we
- * pattern-match on those for the classification.
+ * chat() throws the gateway's normalized error, which keeps the provider's
+ * own error on `cause` (#5964): the claude-cli provider's status rides as
+ * `apiErrorStatus`, an AI SDK provider's as `statusCode` on the wrapped
+ * cause, and an AI SDK timeout keeps its `TimeoutError` name there. Missing
+ * them turns a rate limit or a timeout into `malformed`, which downgrades the
+ * whole page to the title tier.
  */
 function classifyChatError(err: unknown): {
   kind: SynopsisFailureKind;
@@ -291,22 +296,25 @@ function classifyChatError(err: unknown): {
   if (err == null) {
     return { kind: 'malformed', detail: 'null error' };
   }
-  const e = err as { status?: number; message?: string; code?: string; name?: string };
+  const e = err as { message?: string; code?: string };
   const msg = (e.message ?? String(err)).slice(0, 200);
+  const status = providerErrorStatus(err);
+  const chain = providerErrorChain(err) as Array<{ name?: unknown; code?: unknown }>;
 
-  if (e.status === 401 || e.status === 403) {
-    return { kind: 'auth_failure', detail: `status=${e.status} msg=${msg}` };
+  if (status === 401 || status === 403) {
+    return { kind: 'auth_failure', detail: `status=${status} msg=${msg}` };
   }
-  if (e.status === 429) {
+  if (status === 429) {
     return { kind: 'rate_limit', detail: `status=429 msg=${msg}` };
   }
-  if (e.status != null && e.status >= 500 && e.status < 600) {
-    return { kind: 'provider_5xx', detail: `status=${e.status} msg=${msg}` };
+  if (status != null && status >= 500 && status < 600) {
+    return { kind: 'provider_5xx', detail: `status=${status} msg=${msg}` };
   }
+  // The message test covers wrappers that drop the name: the claude-cli
+  // adapter rejects a timed-out or aborted call as "claude-cli adapter aborted".
   if (
-    e.name === 'AbortError' ||
-    e.code === 'ETIMEDOUT' ||
-    /timeout/i.test(msg)
+    chain.some((c) => c.name === 'AbortError' || c.name === 'TimeoutError' || c.code === 'ETIMEDOUT') ||
+    /timeout|timed out|\baborted\b/i.test(msg)
   ) {
     return { kind: 'timeout', detail: msg };
   }

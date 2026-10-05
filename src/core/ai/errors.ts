@@ -210,6 +210,36 @@ function numericStatusOf(e: unknown): number | undefined {
 }
 
 /**
+ * A thrown provider error and the errors it wraps, outermost first: the
+ * `cause` chain, including the AI SDK's RetryError (`lastError`) once its
+ * retries are spent. normalizeAIError keeps the provider's own error on
+ * `cause`, so its status, name and code are only reachable this way.
+ */
+export function providerErrorChain(err: unknown): object[] {
+  const chain: object[] = [];
+  let cur: unknown = err;
+  for (let depth = 0; cur && typeof cur === 'object' && depth < 5; depth++) {
+    chain.push(cur);
+    const e = cur as { cause?: unknown; lastError?: unknown };
+    cur = e.cause ?? e.lastError;
+  }
+  return chain;
+}
+
+/**
+ * The HTTP status a thrown provider error carries, wherever it sits on its
+ * providerErrorChain: `status`, `statusCode`, or the claude-cli provider's
+ * `apiErrorStatus`, which normalizeAIError carries to the top level.
+ */
+export function providerErrorStatus(err: unknown): number | undefined {
+  for (const e of providerErrorChain(err)) {
+    const status = numericStatusOf(e);
+    if (status !== undefined) return status;
+  }
+  return undefined;
+}
+
+/**
  * Did the provider refuse the request BECAUSE of its `response_format:
  * json_schema` (an Ollama build predating structured outputs, a strict proxy
  * rejecting the schema shape) — as opposed to failing for any other reason?
