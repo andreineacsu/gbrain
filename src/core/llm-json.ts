@@ -7,8 +7,11 @@
  *   1. Strip ```json...``` fences if present, then JSON.parse.
  *   2. Direct JSON.parse.
  *   3. Find the first {...} substring (or [...] when array=true) and parse.
- *   4. Retry 1-3 with reasoning blocks stripped (see stripReasoningBlocks).
- *   5. Return null.
+ *   4. When a fence was found and 1-3 failed on its extract, retry 2-3 on the
+ *      whole text: a ``` inside a JSON string value (a verbatim quote of a
+ *      code block) ends the non-greedy fence extract early.
+ *   5. Retry 1-4 with reasoning blocks stripped (see stripReasoningBlocks).
+ *   6. Return null.
  *
  * Adversarial input throws are swallowed; callers get null on any failure.
  */
@@ -62,7 +65,23 @@ export function parseLlmJson<T>(raw: string, opts: { array?: boolean } = {}): T 
 function parseLlmJsonInner<T>(raw: string, opts: { array?: boolean } = {}): T | null {
   if (typeof raw !== 'string' || !raw.trim()) return null;
   const fenceMatch = raw.match(/```(?:json)?\s*\n?([\s\S]*?)```/i);
-  const cleaned = (fenceMatch ? fenceMatch[1] : raw).trim();
+  if (fenceMatch) {
+    const fenced = parseJsonCandidate<T>(fenceMatch[1].trim(), opts);
+    if (fenced !== null) return fenced;
+    // The extract stops at the FIRST closing ```, which may sit inside a JSON
+    // string (a quoted code block) and cut the payload short. Retry, only
+    // after the extract failed, so every payload that parsed before still
+    // parses the same way (#6069): from the opening fence on when it starts a
+    // line (a real fence, so a brace in prose or a reasoning draft before it
+    // cannot win), else on the whole text (the ``` sat inside a JSON string).
+    const at = fenceMatch.index ?? 0;
+    const startsLine = raw.slice(raw.lastIndexOf('\n', at - 1) + 1, at).trim() === '';
+    return parseJsonCandidate<T>((startsLine ? raw.slice(at) : raw).trim(), opts);
+  }
+  return parseJsonCandidate<T>(raw.trim(), opts);
+}
+
+function parseJsonCandidate<T>(cleaned: string, opts: { array?: boolean }): T | null {
   try {
     const direct = JSON.parse(cleaned);
     if (opts.array && Array.isArray(direct)) return direct as T;
@@ -82,4 +101,108 @@ function parseLlmJsonInner<T>(raw: string, opts: { array?: boolean } = {}): T | 
     }
   }
   return null;
+}
+
+/** Why `parseLlmJson` returned null, for a bounded diagnostic line. */
+export interface LlmJsonFailure {
+  /** The text holds a ``` fence. */
+  fenced: boolean;
+  /** JSON.parse's message for the most complete candidate. */
+  error: string;
+  /** Index in `raw` where that candidate stops being valid JSON (its end when truncated); null when there is no candidate. */
+  offset: number | null;
+}
+
+/**
+ * Explain a `parseLlmJson` miss. The candidate is the span from the first
+ * opening bracket to the last closing one (the whole text when there is
+ * none), the widest span the parse ladder tries. The offset comes from
+ * jsonErrorOffset because Bun's JSON.parse messages carry no position.
+ */
+export function explainLlmJsonFailure(raw: string, opts: { array?: boolean } = {}): LlmJsonFailure {
+  const fenced = raw.includes('```');
+  if (!raw.trim()) return { fenced, error: 'empty response', offset: null };
+  const [open, close] = opts.array ? ['[', ']'] : ['{', '}'];
+  const first = raw.indexOf(open);
+  const start = first >= 0 ? first : raw.search(/\S/);
+  const last = raw.lastIndexOf(close);
+  const candidate = raw.slice(start, last > start ? last + 1 : raw.length);
+  let error = 'valid JSON of the wrong shape';
+  try {
+    JSON.parse(candidate);
+  } catch (e) {
+    error = e instanceof Error ? e.message : String(e);
+  }
+  const at = jsonErrorOffset(candidate);
+  return { fenced, error, offset: at === null || at < 0 ? null : start + at };
+}
+
+/**
+ * Index of the first character where `s` stops being one valid JSON value:
+ * `s.length` when it ends early (truncated), -1 when it is valid, null when
+ * the scan itself fails (nesting deep enough to exhaust the stack).
+ */
+export function jsonErrorOffset(s: string): number | null {
+  let i = 0;
+  const skipWs = (): void => { while (i < s.length && ' \t\n\r'.includes(s[i])) i++; };
+  const str = (): boolean => {
+    i++; // opening quote
+    while (i < s.length) {
+      const ch = s[i];
+      if (ch === '"') { i++; return true; }
+      if (ch < ' ') return false;
+      if (ch === '\\') {
+        const esc = s[i + 1];
+        if (esc !== undefined && '"\\/bfnrt'.includes(esc)) { i += 2; continue; }
+        if (esc === 'u' && /^[0-9a-fA-F]{4}$/.test(s.slice(i + 2, i + 6))) { i += 6; continue; }
+        if (esc === undefined) i++;
+        return false;
+      }
+      i++;
+    }
+    return false;
+  };
+  const num = /-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?/y;
+  const members = (closer: string, member: () => boolean): boolean => {
+    i++; // opening bracket
+    skipWs();
+    if (s[i] === closer) { i++; return true; }
+    while (true) {
+      if (!member()) return false;
+      skipWs();
+      if (s[i] === ',') { i++; continue; }
+      if (s[i] === closer) { i++; return true; }
+      return false;
+    }
+  };
+  const value = (): boolean => {
+    skipWs();
+    const c = s[i];
+    if (c === '{') {
+      return members('}', () => {
+        skipWs();
+        if (s[i] !== '"' || !str()) return false;
+        skipWs();
+        if (s[i] !== ':') return false;
+        i++;
+        return value();
+      });
+    }
+    if (c === '[') return members(']', value);
+    if (c === '"') return str();
+    for (const lit of ['true', 'false', 'null']) {
+      if (s.startsWith(lit, i)) { i += lit.length; return true; }
+    }
+    num.lastIndex = i;
+    const m = num.exec(s);
+    if (m) { i += m[0].length; return true; }
+    return false;
+  };
+  try {
+    if (!value()) return Math.min(i, s.length);
+  } catch {
+    return null; // RangeError from runaway nesting; the caller reports no offset
+  }
+  skipWs();
+  return i < s.length ? i : -1;
 }
