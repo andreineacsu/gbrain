@@ -463,7 +463,15 @@ intent committed with the page; the `facts-backstop` effect becomes
 `dispatched` when its durable worker job is accepted. Extraction availability
 is checked by that worker. The handoff is idempotent and rechecks the source,
 page revision and current writer grant. Confined writers, unchanged pages,
-disabled extraction and dream-generated content do not enqueue work.
+disabled extraction and dream-generated content do not enqueue work. Neither
+does a write that keeps the body (`compiled_truth`, the only text extraction
+reads) of a page that was already eligible: a frontmatter or timeline change,
+or `gbrain repair timeline` writing back rows the database already holds,
+records `facts_backstop: { skipped: "body_unchanged" }`. Such a page's facts
+are extracted when its body next changes. For conversation-shaped pages
+(`conversation`, `meeting`, `slack`, `email`, `imessage`), `gbrain
+extract-conversation-facts --dry-run` shows what a backfill would process
+without model calls, and `--max-cost-usd` caps the run's spend.
 Managed jobs retain the committed page request as their authority and publish
 through the coordinator. Legacy jobs without that request skip with
 `missing_write_authority`; raw queue/fence paths remain unsupported. Activation

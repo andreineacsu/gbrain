@@ -35,13 +35,33 @@ export async function authorizeFactsBackstop(engine: BrainEngine, row: WriteRequ
   }
 }
 
-/** Provider availability belongs to the durable job's execution process. */
-export async function prepareFactsBackstop(engine: BrainEngine, row: WriteRequest, page: ParsedPage): Promise<FactsBackstopStatus> {
+/** An extraction of the page that has not finished; a write moves the revision it is bound to, so it would end `superseded`. */
+async function factsExtractionInFlight(engine: BrainEngine, sourceId: string, slug: string): Promise<boolean> {
+  const rows = await engine.executeRaw(`SELECT 1 FROM persistence_effects WHERE kind='facts-backstop' AND state IN ('queued','running')
+      AND source_id=$1 AND data->>'slug'=$2
+    UNION ALL SELECT 1 FROM minion_jobs WHERE name='facts-absorb' AND status IN ('waiting','active','delayed','paused','waiting-children')
+      AND data->>'sourceId'=$1 AND data->>'slug'=$2 LIMIT 1`, [sourceId, slug]);
+  return rows.length > 0;
+}
+
+/**
+ * Provider availability belongs to the durable job's execution process.
+ * `prior` is the live page before this write. Extraction reads only
+ * compiled_truth, so a write that keeps the body of a page that was already
+ * eligible (a frontmatter or timeline change, or `repair timeline`
+ * materializing rows the database already holds) has nothing new to extract
+ * (#6042), unless it supersedes an unfinished extraction of the page: then it
+ * queues one in that extraction's place.
+ */
+export async function prepareFactsBackstop(engine: BrainEngine, row: WriteRequest, page: ParsedPage,
+  prior?: Pick<ParsedPage, 'type' | 'compiled_truth' | 'frontmatter'>): Promise<FactsBackstopStatus> {
   const confined = derivedExtractionSkip(row.authority);
   if (confined) return { skipped: confined };
   if (!(await isFactsExtractionEnabled(engine))) return { skipped: 'extraction_disabled' };
   const eligible = isFactsBackstopEligible(row.slug, page);
   if (!eligible.ok) return { skipped: eligible.reason };
+  if (prior && prior.compiled_truth === page.compiled_truth && isFactsBackstopEligible(row.slug, prior).ok
+    && !(await factsExtractionInFlight(engine, row.source_id, row.slug))) return { skipped: 'body_unchanged' };
   return { queued: true };
 }
 

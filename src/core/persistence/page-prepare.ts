@@ -381,7 +381,7 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
   const noop = logicalNoop && (snapshot?.page.deleted_at != null) === targetDeleted;
   const project = projected ? await prepareCanonicalProjections(engine,ready.parsedPage,row.slug,row.source_id,snapshot,writer) : undefined;
   const ordinaryPage = ['put_page','capture','restore_page','revert_version','edit_page'].includes(row.operation);
-  const advisories = noop || targetDeleted ? pageNoopAdvisories(row) : !ordinaryPage ? remoteLinkHint(row) : await preparePageAdvisories(engine,row,ready.parsedPage);
+  const advisories = noop || targetDeleted ? pageNoopAdvisories(row) : !ordinaryPage ? remoteLinkHint(row) : await preparePageAdvisories(engine,row,ready.parsedPage,snapshot?.page.deleted_at == null ? snapshot?.page : undefined);
   // A managed maintenance page (e.g. the dream write-back after grounding
   // quarantine) republishes a body; its automatic links follow that body.
   const autoLinkedPage = ordinaryPage || p.kind === 'managed_maintenance_page';

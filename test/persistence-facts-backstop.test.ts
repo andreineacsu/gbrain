@@ -32,7 +32,7 @@ async function prepare(overrides: Partial<OperationContext> = {}, params: Record
   const ctx: OperationContext = { engine, config, dryRun: false, remote: false, sourceId: 'default', logger: { info() {}, warn() {}, error() {} }, ...overrides };
   const authority = await submissionAuthority(ctx, 'put_page', 'default', source.incarnation, 'notes/example');
   const intent = { content, ...params };
-  const current = await engine.readPageSnapshot('notes/example', { sourceId: 'default' });
+  const current = await engine.readPageSnapshot('notes/example', { sourceId: 'default', includeDeleted: true });
   await admitWrite(engine, { principal: authority.principal, authority, operation: 'put_page', sourceId: 'default',
     sourceIncarnation: source.incarnation, slug: 'notes/example', pageId: current?.page.id ?? null, requestId: randomUUID(), callerIntent: intent, intent });
   const row = (await claimNextWrite(engine, localHostId()))!;
@@ -46,6 +46,14 @@ async function claimFacts(row: WriteRequest) {
   return effect;
 }
 async function jobs() { return engine.executeRaw<{ id: number; data: Record<string, unknown>; idempotency_key: string }>("SELECT id,data,idempotency_key FROM minion_jobs WHERE name='facts-absorb'"); }
+/** Hand every queued facts effect to its job and finish the jobs, so no extraction of the page is in flight. */
+async function settleFacts() {
+  await engine.executeRaw("UPDATE persistence_effects SET next_attempt_at=now()+interval '1 hour' WHERE kind<>'facts-backstop'");
+  for (let effect = await claimPersistenceEffect(engine, localHostId()); effect; effect = await claimPersistenceEffect(engine, localHostId())) {
+    await dispatchFactsBackstopEffect(engine, effect, localHostId());
+  }
+  await engine.executeRaw("UPDATE minion_jobs SET status='completed' WHERE name='facts-absorb'");
+}
 
 test('page receipt and bounded extraction debt commit together; durable handoff rolls back and replays once', () => fixture(async () => {
   const row = await publish(); expect(row.outcome?.facts_backstop).toEqual({ queued: true });
@@ -126,6 +134,40 @@ test('confined writers and disabled extraction never receive a queued claim', ()
   const updated = await prepare({}, { content: `${content}\nAdditional content`, expected_revision: current.revision });
   const disabled = await publishMutation(engine, updated.row, updated.prepared);
   expect(disabled.outcome?.facts_backstop).toEqual({ skipped: 'extraction_disabled' });
+}));
+
+test('a write that leaves the page body unchanged records no extraction debt; a body change does (#6042)', () => fixture(async () => {
+  expect((await publish()).outcome?.facts_backstop).toEqual({ queued: true });
+  const titled = (title: string, rest = '') => `${content.replace('title: Field notes', `title: ${title}`)}${rest}`;
+  const timeline = '\n\n<!-- timeline -->\n- **2026-07-01** | A synthetic dated event.';
+  const concept = titled('Revised notes', timeline).replace('type: note', 'type: concept');
+  for (const [change, next, expected, settled] of [
+    // The first write's extraction has not run; this write supersedes it, so it queues in its place.
+    ['title only, extraction in flight', titled('Renamed notes'), { queued: true }, false],
+    ['title only', titled('Revised notes'), { skipped: 'body_unchanged' }, true],
+    ['timeline only', titled('Revised notes', timeline), { skipped: 'body_unchanged' }, true],
+    ['retyped ineligible', concept, { skipped: 'kind:concept' }, true],
+    // The body was never offered while the page was a concept, so becoming eligible extracts it.
+    ['retyped eligible', titled('Revised notes', timeline), { queued: true }, true],
+    ['body', titled('Revised notes', ` One more substantive sentence about the project.${timeline}`), { queued: true }, true],
+  ] as const) {
+    if (settled) await settleFacts();
+    const current = (await engine.readPageSnapshot('notes/example', { sourceId: 'default' }))!;
+    const input = await prepare({}, { content: next, expected_revision: current.revision });
+    const row = await publishMutation(engine, input.row, input.prepared);
+    expect([change, row.state, row.outcome?.facts_backstop]).toEqual([change, 'committed', expected]);
+    expect([change, (await publicEffectsForRequest(engine, row.id)).some(effect => effect.kind === 'facts-backstop')]).toEqual([change, 'queued' in expected]);
+  }
+}));
+
+test('rewriting a deleted page with its old body extracts it again (#6042)', () => fixture(async () => {
+  await publish();
+  await settleFacts();
+  await engine.softDeletePage('notes/example', { sourceId: 'default' });
+  const deleted = (await engine.readPageSnapshot('notes/example', { sourceId: 'default', includeDeleted: true }))!;
+  const input = await prepare({}, { expected_revision: deleted.revision });
+  const restored = await publishMutation(engine, input.row, input.prepared);
+  expect([restored.state, restored.outcome?.facts_backstop]).toEqual(['committed', { queued: true }]);
 }));
 
 test('a slug-bound writer\'s backstop refusal says the page was written and who widens the grant', async () => {
