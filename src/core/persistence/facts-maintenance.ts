@@ -230,14 +230,19 @@ export async function prepareManagedFactsSession(ctx: FactsBackstopCtx,
   return session;
 }
 
+/** Waits for an accepted request of this extraction to settle, once it is proven to carry this input and this writer's authority. */
+async function settleManagedFact(engine: BrainEngine, session: ManagedFactsSession, row: WriteRequest): Promise<WriteRequest> {
+  if ((row.intent?.inputDigest ?? row.outcome?.input_digest) !== session.inputDigest) throw opError('idempotency_conflict', 'The fact request ID was already used with different extraction input.',
+    `Request ${row.request_id} in source ${row.source_id} was accepted for different extraction input, so this extraction was not merged into it. Give this extraction a new request_id; read the receipt to see the original.`,
+    { fix: receiptFix(row.request_id) });
+  await authorizeStoredRequest(engine, row);
+  return waitForWrite(engine, row, session.config, maintenancePublishWaitMs());
+}
+
 async function collectManagedFacts(engine: BrainEngine, session: ManagedFactsSession, rows: WriteRequest[]): Promise<ManagedFactsResult> {
   const result: ManagedFactsResult = { inserted: 0, duplicate: 0, superseded: 0, fact_ids: [], entity_slugs: [], write_requests: [] };
   for (const row of rows) {
-    if ((row.intent?.inputDigest ?? row.outcome?.input_digest) !== session.inputDigest) throw opError('idempotency_conflict', 'The fact request ID was already used with different extraction input.',
-      `Request ${row.request_id} in source ${row.source_id} was accepted for different extraction input, so this extraction was not merged into it. Give this extraction a new request_id; read the receipt to see the original.`,
-      { fix: receiptFix(row.request_id) });
-    await authorizeStoredRequest(engine, row);
-    const finished = await waitForWrite(engine, row, session.config, maintenancePublishWaitMs());
+    const finished = await settleManagedFact(engine, session, row);
     writeResponse(finished);
     result.write_requests.push(receiptFor(finished));
     if ((row.intent?.kind ?? row.outcome?.kind) === 'managed_facts_entity') {
@@ -252,18 +257,51 @@ async function collectManagedFacts(engine: BrainEngine, session: ManagedFactsSes
   return result;
 }
 
-export async function resumeManagedFacts(engine: BrainEngine, session: ManagedFactsSession): Promise<ManagedFactsResult | null> {
+/** The requests accepted under a facts batch key, with their validated completion; null when the batch was never accepted. */
+async function acceptedManagedBatch(engine: BrainEngine, session: ManagedFactsSession, batchKey: string, completionRequestId: string): Promise<WriteRequest[] | null> {
   const rows = await engine.executeRaw<WriteRequest>(`SELECT * FROM persistence_requests WHERE operation='extract_facts'
     AND source_id=$1 AND source_incarnation=$2::uuid AND principal_kind=$3 AND principal_id=$4
     AND (request_id=$6::uuid OR COALESCE(intent->>'batchKey',outcome->>'batch_key')=$5) ORDER BY sequence`, [session.authority.sourceId, session.authority.sourceIncarnation,
-    session.authority.principal.kind, session.authority.principal.id, session.batchKey, session.completionRequestId]);
+    session.authority.principal.kind, session.authority.principal.id, batchKey, completionRequestId]);
   if (!rows.length) return null;
-  const completion = rows.find(row => row.request_id === session.completionRequestId);
+  const completion = rows.find(row => row.request_id === completionRequestId);
   if (!completion) throw opError('storage_error', 'The accepted facts batch has no completion receipt.',
-    `Facts batch requests were accepted in source ${session.authority.sourceId} but their completion request ${session.completionRequestId} was never journaled, so the outcome is unconfirmed. Inspect accepted request ${rows[0].request_id} before resubmitting anything.`,
+    `Facts batch requests were accepted in source ${session.authority.sourceId} but their completion request ${completionRequestId} was never journaled, so the outcome is unconfirmed. Inspect accepted request ${rows[0].request_id} before resubmitting anything.`,
     { fix: receiptFix(rows[0].request_id) });
   await validateManagedFactsCompletion(engine, session, completion);
-  return collectManagedFacts(engine, session, rows);
+  return rows;
+}
+
+export async function resumeManagedFacts(engine: BrainEngine, session: ManagedFactsSession): Promise<ManagedFactsResult | null> {
+  const rows = await acceptedManagedBatch(engine, session, session.batchKey, session.completionRequestId);
+  return rows ? collectManagedFacts(engine, session, rows) : null;
+}
+
+interface ManagedFactsBatchInput { slug: string; pageId: number | null; intent: ManagedFactIntent }
+
+/** Admits a facts batch, its per-entity requests and its completion request, in one transaction. */
+async function admitManagedFactsBatch(engine: BrainEngine, session: ManagedFactsSession,
+  batch: { batchKey: string; completionRequestId: string; embedded: boolean; embedding: FactEmbeddingSignature | null | undefined },
+  inputs: ManagedFactsBatchInput[], abortSignal?: AbortSignal): Promise<WriteRequest[]> {
+  return engine.transaction(async tx => {
+    if (batch.embedded) await assertManagedFactsEmbedding(tx, session.config, batch.embedding, true);
+    const children: string[] = [];
+    const accepted: WriteRequest[] = [];
+    for (const input of [...inputs, { slug: '__managed_facts_complete__', pageId: null, intent: {
+      kind: 'managed_facts_complete', batchKey: batch.batchKey, inputDigest: session.inputDigest,
+      origin: session.origin, originalRequestId: session.originalRequestId, children } as ManagedFactIntent }]) {
+      if (abortSignal?.aborted) throw new DOMException('Fact extraction was aborted before admission.', 'AbortError');
+      await authorizePageVisibility(tx, session.authority, input.slug);
+      const requestId = input.intent.kind === 'managed_facts_complete' ? batch.completionRequestId : managedFactRequestId(batch.batchKey, input.slug);
+      const row = await admitWriteInTransaction(tx, { principal: session.authority.principal, authority: session.authority,
+        operation: 'extract_facts', sourceId: session.authority.sourceId, sourceIncarnation: session.authority.sourceIncarnation,
+        worktreeId: session.binding?.worktree_id, topologyGeneration: session.binding?.topology_generation,
+        requestId, slug: input.slug, pageId: input.pageId, callerIntent: input.intent, intent: input.intent });
+      accepted.push(row);
+      if (input.intent.kind === 'managed_facts_entity') children.push(row.id);
+    }
+    return accepted;
+  });
 }
 
 export async function publishManagedFacts(engine: BrainEngine, session: ManagedFactsSession, ctx: FactsBackstopCtx,
@@ -290,7 +328,7 @@ export async function publishManagedFacts(engine: BrainEngine, session: ManagedF
       valid_from: (fact.valid_from ?? ctx.validFrom ?? new Date()).toISOString(), valid_until: fact.valid_until?.toISOString() ?? null });
     groups.set(slug, group);
   }
-  const inputs: Array<{ slug: string; pageId: number | null; intent: ManagedFactIntent }> = [];
+  const inputs: ManagedFactsBatchInput[] = [];
   for (const [slug, group] of groups) {
     const snapshot = await engine.readPageSnapshot(slug, { sourceId, includeDeleted: true });
     if (snapshot?.page.deleted_at || group.some(fact => fact.entity_slug === slug) && !snapshot) throw opError('page_identity_changed', 'The resolved fact entity was removed.',
@@ -302,24 +340,7 @@ export async function publishManagedFacts(engine: BrainEngine, session: ManagedF
       ...(options.attributeFallback ? { attribute_fallback: true as const } : {}),
       ...(snapshot ? { expected_revision: snapshot.revision } : {}), facts: group } });
   }
-  const rows = await engine.transaction(async tx => {
-    if (embedded) await assertManagedFactsEmbedding(tx, session.config, session.embedding, true);
-    const children: string[] = [];
-    const accepted: WriteRequest[] = [];
-    for (const input of [...inputs, { slug: '__managed_facts_complete__', pageId: null, intent: {
-      kind: 'managed_facts_complete', batchKey: session.batchKey, inputDigest: session.inputDigest,
-      origin: session.origin, originalRequestId: session.originalRequestId, children } as ManagedFactIntent }]) {
-      if (ctx.abortSignal?.aborted) throw new DOMException('Fact extraction was aborted before admission.', 'AbortError');
-      await authorizePageVisibility(tx, session.authority, input.slug);
-      const requestId = input.intent.kind === 'managed_facts_complete' ? session.completionRequestId : managedFactRequestId(session.batchKey, input.slug);
-      const row = await admitWriteInTransaction(tx, { principal: session.authority.principal, authority: session.authority,
-        operation: 'extract_facts', sourceId, sourceIncarnation: session.authority.sourceIncarnation,
-        worktreeId: session.binding?.worktree_id, topologyGeneration: session.binding?.topology_generation,
-        requestId, slug: input.slug, pageId: input.pageId, callerIntent: input.intent, intent: input.intent });
-      accepted.push(row);
-      if (input.intent.kind === 'managed_facts_entity') children.push(row.id);
-    }
-    return accepted;
-  });
+  const rows = await admitManagedFactsBatch(engine, session, { batchKey: session.batchKey, completionRequestId: session.completionRequestId,
+    embedded, embedding: session.embedding }, inputs, ctx.abortSignal);
   return collectManagedFacts(engine, session, rows);
 }
