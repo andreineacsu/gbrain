@@ -8,6 +8,7 @@ import { loadConfig, type GBrainConfig } from '../config.ts';
 import { getCliOptions } from '../cli-options.ts';
 import { PENDING_WRITE_EXIT_CODE } from '../exit-codes.ts';
 import { OperationError } from '../ops/contract.ts';
+import { abortableSleep } from '../retry.ts';
 import { admittedPendingReceipt, type WriteReceipt } from './types.ts';
 import { WIRE_WRITE_WAIT_MAX_MS } from './params.ts';
 
@@ -129,18 +130,22 @@ export function pollCommand(requestId: string): string {
  * Keep the caller's wait across transports that wait less than it (an older
  * owner, or a remote server's own bounded wait): replay the identical request
  * (same request_id, so nothing new is admitted) until it settles or the wait
- * is spent. Only an admitted pending receipt is replayed.
+ * is spent. Only an admitted pending receipt is replayed. An aborted `signal`
+ * ends the pause and stops the replays; the pending error propagates with its
+ * receipt.
  */
 export async function replayWhilePending<T>(send: () => Promise<T>, waitMs: number,
-  sleep: (ms: number) => Promise<void> = ms => new Promise(resolve => setTimeout(resolve, ms))): Promise<T> {
+  { sleep = abortableSleep, signal }: { sleep?: (ms: number, signal?: AbortSignal) => Promise<void>; signal?: AbortSignal } = {}): Promise<T> {
   const deadline = Date.now() + waitMs;
   for (;;) {
     try { return await send(); }
     catch (error) {
       const receipt = pendingReceiptOf(error);
       const remaining = deadline - Date.now();
-      if (!receipt || remaining <= 0) throw error;
-      await sleep(Math.min(Math.max(receipt.retry_after_ms ?? 1000, 50), remaining));
+      if (!receipt || remaining <= 0 || signal?.aborted) throw error;
+      await sleep(Math.min(Math.max(receipt.retry_after_ms ?? 1000, 50), remaining), signal)
+        .catch(sleepError => { if (!signal?.aborted) throw sleepError; });
+      if (signal?.aborted) throw error;
     }
   }
 }

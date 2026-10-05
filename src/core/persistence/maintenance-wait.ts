@@ -31,6 +31,9 @@ export function __setMaintenanceWriteWaitForTests(ms: number | null): () => void
 /** The wait for a maintenance publish outside a job budget. */
 export function maintenancePublishWaitMs(): number { return testWaitMs ?? MAINTENANCE_PUBLISH_WAIT_MS; }
 
+/** A job's write wait when it has no deadline; also a subagent tool write's (#5474). */
+export function maintenanceWriteWaitMs(): number { return testWaitMs ?? MAINTENANCE_WRITE_WAIT_MS; }
+
 export class MaintenanceWriteWait {
   private pending = false;
   constructor(private readonly deadlineAtMs: number | null = null, private readonly now: () => number = Date.now) {}
