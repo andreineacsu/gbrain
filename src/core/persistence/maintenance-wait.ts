@@ -37,7 +37,15 @@ export class MaintenanceWriteWait {
 
   /** The wait for the job's next publish. */
   ms(): number {
-    if (this.pending) return 0;
+    return this.pending ? 0 : this.admissionMs();
+  }
+
+  /**
+   * #6006: how long a publish whose admission met database contention may
+   * keep admitting again. Unlike `ms()` it stays open after an earlier publish
+   * went pending: an unadmitted write has no request that finishes later.
+   */
+  admissionMs(): number {
     const base = testWaitMs ?? MAINTENANCE_WRITE_WAIT_MS;
     return this.deadlineAtMs == null ? base : Math.max(0, Math.min(base, this.deadlineAtMs - this.now()));
   }

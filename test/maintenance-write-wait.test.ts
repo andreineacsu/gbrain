@@ -72,19 +72,22 @@ async function pendingAfter(publish: Promise<unknown>): Promise<{ ms: number; co
   return { ms: performance.now() - started, code };
 }
 
-test('the wait is 30 s, bounded by the job deadline, and zero after a pending publish', () => {
+test('the wait is 30 s, bounded by the job deadline, and zero after a pending publish; the #6006 admission wait stays open after it', () => {
   expect(MAINTENANCE_WRITE_WAIT_MS).toBe(30_000);
   let now = 1_000;
   expect(new MaintenanceWriteWait().ms()).toBe(30_000);
   const bounded = new MaintenanceWriteWait(now + 12_000, () => now);
   expect(bounded.ms()).toBe(12_000);
+  expect(bounded.admissionMs()).toBe(12_000);
   now += 13_000;
   expect(bounded.ms()).toBe(0);
+  expect(bounded.admissionMs()).toBe(0);
   const wait = new MaintenanceWriteWait();
   wait.observe({ state: 'committed' } as WriteRequest);
   expect(wait.ms()).toBe(30_000);
   wait.observe({ state: 'queued' } as WriteRequest);
   expect(wait.ms()).toBe(0);
+  expect(wait.admissionMs()).toBe(30_000);
 });
 
 test('a maintenance publish commits when the writer frees up after 6.5 s (the old 5 s wait returned write_pending)', async () => {

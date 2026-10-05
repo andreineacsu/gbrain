@@ -2,8 +2,11 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { OperationError } from '../ops/contract.ts';
 import { getCode } from '../retry-matcher.ts';
 
+/** How long `retryWriteAdmission` retries confirmed aborts by default before it gives up on database contention. */
+export const ADMISSION_RETRY_BUDGET_MS = 5000;
+
 /** Retry only database-confirmed transaction aborts, retaining the accepted intent and UUID. */
-export async function retryWriteAdmission<T>(requestId: string, attempt: (remainingMs: number) => Promise<T>, budgetMs = 5000): Promise<T> {
+export async function retryWriteAdmission<T>(requestId: string, attempt: (remainingMs: number) => Promise<T>, budgetMs = ADMISSION_RETRY_BUDGET_MS): Promise<T> {
   const deadline = performance.now() + budgetMs;
   for (;;) {
     try {
@@ -26,4 +29,9 @@ export async function retryWriteAdmission<T>(requestId: string, attempt: (remain
       await delay(Math.min(remaining - 1, code === '55P03' ? 5 + Math.random() * 20 : 25 + Math.random() * 75));
     }
   }
+}
+
+/** #6006: admission gave up on database contention and recorded nothing; the same request_id may be admitted again. */
+export function isAdmissionContention(error: unknown): boolean {
+  return error instanceof OperationError && error.code === 'storage_error' && error.detail === 'database_contention';
 }

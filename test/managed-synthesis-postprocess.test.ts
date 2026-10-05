@@ -6,6 +6,11 @@ import { basename, join } from 'node:path';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { runPhaseSynthesize } from '../src/core/cycle/synthesize.ts';
+import { deferPublishOrThrow } from '../src/core/cycle/synthesize-postprocess.ts';
+import { ADMISSION_RETRY_BUDGET_MS, isAdmissionContention } from '../src/core/persistence/admission-retry.ts';
+import * as journal from '../src/core/persistence/journal.ts';
+import { LOCK_COUNTERS_SQL } from '../src/core/persistence/journal.ts';
+import { OperationError } from '../src/core/ops/contract.ts';
 import { acquireWorktree, claimWorktree, getWorktreeBinding } from '../src/core/persistence/ownership.ts';
 import { __setMaintenanceWriteWaitForTests } from '../src/core/persistence/maintenance-wait.ts';
 import { submitPageMutation } from '../src/core/persistence/page-mutations.ts';
@@ -136,6 +141,46 @@ async function childCommittedOrdinaryCycle({ engine, sourceId, root, opts, calls
   const slug = await outputSlug(engine, sourceId);
   await engine.executeRaw("DELETE FROM config WHERE key='dream.synthesize.last_completion_ts'");
   return { ordinary, slug, jobsBefore: await engine.executeRaw('SELECT id FROM minion_jobs ORDER BY id'), spent: calls() };
+}
+
+/** #6006: a contention window that outlasts one admission retry budget, so admission gives up once before it clears. */
+const CONTENTION_WINDOW_MS = ADMISSION_RETRY_BUDGET_MS + 500;
+
+/** Binds a proxied object's other members to the real one. */
+const passThrough = (target: object, key: string | symbol) => {
+  const value = Reflect.get(target, key);
+  return typeof value === 'function' ? value.bind(target) : value;
+};
+
+/**
+ * #6006: fails the counter lock of each `admitWrite` transaction attempt for
+ * which `contended(attempt)` holds with 55P03 (attempts are numbered from 1 and
+ * include admission's own retries), so admission spends its real retry budget
+ * and gives up with storage_error / database_contention. Records stderr while
+ * it is active.
+ */
+function contendAdmissions(contended: (attempt: number) => boolean) {
+  let attempts = 0, injected = 0, stderr = '';
+  const write = spyOn(process.stderr, 'write').mockImplementation(((chunk: string | Uint8Array) => {
+    stderr += String(chunk);
+    return true;
+  }) as never);
+  const contendedTx = (tx: BrainEngine, attempt: number) => new Proxy(tx, { get(target, key) {
+    if (key !== 'executeRaw') return passThrough(target, key);
+    return async (...args: Parameters<BrainEngine['executeRaw']>) => {
+      if (args[0] === LOCK_COUNTERS_SQL && contended(attempt)) {
+        injected++;
+        throw Object.assign(new Error('canceling statement due to lock timeout'), { code: '55P03' });
+      }
+      return target.executeRaw(...args);
+    };
+  } });
+  const admitWrite = journal.admitWrite;
+  const spy = spyOn(journal, 'admitWrite').mockImplementation((engine, ...rest) => admitWrite(new Proxy(engine, { get(target, key) {
+    if (key !== 'transaction') return passThrough(target, key);
+    return (run: (tx: BrainEngine) => Promise<unknown>) => target.transaction(tx => run(contendedTx(tx, ++attempts)));
+  } }), ...rest));
+  return { injected: () => injected, stderr: () => stderr, restore: () => { spy.mockRestore(); write.mockRestore(); } };
 }
 
 test('finalized synthesis never rewrites a later user quotation on same-transcript replay', async () => {
@@ -402,3 +447,182 @@ test('#5854: a postprocess publish still pending after its wait is deferred, the
     expect(await engine.getConfig('dream.synthesize.last_completion_ts')).not.toBeNull();
   });
 }, 120_000);
+
+test('#6006: a postprocess publish whose admission stays contended is deferred, and a contention that clears within the wait is re-admitted', async () => {
+  await fixture(async f => {
+    const { engine, sourceId, calls } = f;
+    const { ordinary, slug, jobsBefore, spent } = await childCommittedOrdinaryCycle(f);
+    const before = (await engine.readPageSnapshot(slug, { sourceId }))!;
+    const outputRequests = () => engine.executeRaw<{ state: string }>(
+      "SELECT state FROM persistence_requests WHERE source_id=$1 AND slug=$2 AND intent->>'kind'='managed_maintenance_page'", [sourceId, slug]);
+    // Contention that outlasts the publish wait: nothing is admitted, so the output is deferred, not failed.
+    let contention = contendAdmissions(() => true);
+    __setMaintenanceWriteWaitForTests(300);
+    let deferred: Awaited<ReturnType<typeof runPhaseSynthesize>>;
+    try { deferred = await runPhaseSynthesize(engine, ordinary); }
+    finally { __setMaintenanceWriteWaitForTests(null); contention.restore(); }
+    expect(contention.injected()).toBeGreaterThan(0);
+    expect(deferred.status).toBe('warn');
+    expect(deferred.details.publish_pending).toBe(1);
+    expect(deferred.details.publish_deferred).toBe('publish deferred (writer busy); finishes next cycle, no action needed');
+    expect(deferred.details.pages_written).toBe(0);
+    expect(await engine.getConfig('dream.synthesize.last_completion_ts')).toBeNull();
+    expect(await outputRequests()).toEqual([]);
+    expect((await engine.readPageSnapshot(slug, { sourceId }))!.revision).toBe(before.revision);
+    expect(contention.stderr()).toMatch(new RegExp(`${slug} \\(request [0-9a-f-]+\\) deferred, write admission blocked by database contention`));
+    await disposePersistenceConsumer(engine);
+    // The next cycle meets contention that outlasts one admission budget (5 s), then clears: the same output is re-admitted.
+    let until: number | undefined;
+    contention = contendAdmissions(() => performance.now() < (until ??= performance.now() + CONTENTION_WINDOW_MS));
+    let next: Awaited<ReturnType<typeof runPhaseSynthesize>>;
+    try { next = await runPhaseSynthesize(engine, ordinary); }
+    finally { contention.restore(); }
+    expect(contention.injected()).toBeGreaterThan(0);
+    expect(next.status).toBe('ok');
+    expect(next.details.publish_pending).toBeUndefined();
+    expect(next.details.written_slugs).toEqual([slug]);
+    expect(contention.stderr()).toMatch(new RegExp(`${slug} \\(request [0-9a-f-]+\\) admitted after database contention`));
+    expect(calls()).toBe(spent);
+    expect(await engine.executeRaw('SELECT id FROM minion_jobs ORDER BY id')).toEqual(jobsBefore);
+    expect(await outputRequests()).toEqual([{ state: 'committed' }]);
+    const snapshot = (await engine.readPageSnapshot(slug, { sourceId }))!;
+    expect(snapshot.page.frontmatter.dream_generated).toBe(true);
+    expect(snapshot.page.compiled_truth).not.toContain('"an entirely invented');
+    expect(await engine.getConfig('dream.synthesize.last_completion_ts')).not.toBeNull();
+  });
+}, 120_000);
+
+test('#6006: a contended summary admission defers the summary, and the next cycle writes it', async () => {
+  await fixture(async f => {
+    const { engine, sourceId, root, calls } = f;
+    const { ordinary, slug, spent } = await childCommittedOrdinaryCycle(f);
+    // The output publish is the cycle's first admission; every later one (the summary) is contended.
+    const contention = contendAdmissions(attempt => attempt > 1);
+    let deferred: Awaited<ReturnType<typeof runPhaseSynthesize>>;
+    try { deferred = await runPhaseSynthesize(engine, ordinary); }
+    finally { contention.restore(); }
+    expect(contention.injected()).toBeGreaterThan(0);
+    expect(deferred.status).toBe('warn');
+    expect(deferred.details.publish_pending).toBe(1);
+    expect(deferred.details.written_slugs).toEqual([slug]);
+    const summarySlug = String(deferred.details.summary_slug);
+    expect(await engine.readPageSnapshot(summarySlug, { sourceId })).toBeNull();
+    expect(contention.stderr()).toContain(`${summarySlug} deferred, write admission blocked by database contention`);
+    expect(await engine.getConfig('dream.synthesize.last_completion_ts')).toBeNull();
+    await disposePersistenceConsumer(engine);
+    const next = await runPhaseSynthesize(engine, ordinary);
+    expect(next.status).toBe('ok');
+    expect(calls()).toBe(spent);
+    expect((await engine.readPageSnapshot(summarySlug, { sourceId }))!.page.compiled_truth).toContain(`[[${slug}]]`);
+    expect(readFileSync(join(root, `${summarySlug}.md`), 'utf8')).toContain(`[[${slug}]]`);
+    expect(await engine.getConfig('dream.synthesize.last_completion_ts')).not.toBeNull();
+  });
+}, 120_000);
+
+test('#6006: a contended admission is re-admitted even after an earlier output publish went pending', async () => {
+  await fixture(async f => {
+    const { engine, sourceId } = f;
+    const { ordinary } = await childCommittedOrdinaryCycle(f);
+    const slugs = (await engine.executeRaw<{ slug: string }>(
+      "SELECT slug FROM pages WHERE source_id=$1 AND slug LIKE 'wiki/personal/reflections/session-%' ORDER BY slug", [sourceId])).map(row => row.slug);
+    expect(slugs).toHaveLength(2);
+    const requests = () => engine.executeRaw<{ slug: string; state: string }>(
+      "SELECT slug, state FROM persistence_requests WHERE source_id=$1 AND slug=ANY($2::text[]) AND intent->>'kind'='managed_maintenance_page' ORDER BY slug", [sourceId, slugs]);
+    // The held worktree keeps the first output's publish pending past its 8 s wait; the second output's
+    // admission then meets contention that outlasts one admission budget (5 s) and clears.
+    const lock = (await acquireWorktree((await getWorktreeBinding(engine, sourceId))!, 1000))!;
+    let until: number | undefined;
+    const contention = contendAdmissions(attempt => attempt > 1 && performance.now() < (until ??= performance.now() + CONTENTION_WINDOW_MS));
+    __setMaintenanceWriteWaitForTests(8_000);
+    let deferred: Awaited<ReturnType<typeof runPhaseSynthesize>>;
+    try { deferred = await runPhaseSynthesize(engine, ordinary); }
+    finally { __setMaintenanceWriteWaitForTests(null); contention.restore(); await lock.release(); }
+    expect(contention.injected()).toBeGreaterThan(0);
+    expect(deferred.status).toBe('warn');
+    expect(deferred.details.publish_pending).toBe(2);
+    expect((await requests()).map(row => row.slug)).toEqual(slugs);
+    await disposePersistenceConsumer(engine);
+    const next = await runPhaseSynthesize(engine, ordinary);
+    expect(next.status).toBe('ok');
+    expect([...next.details.written_slugs as string[]].sort()).toEqual(slugs);
+    expect(await requests()).toEqual(slugs.map(slug => ({ slug, state: 'committed' })));
+  }, 2);
+}, 120_000);
+
+test('#6006: the run shares one re-admission budget, so a later contended output is deferred once an earlier one used it up', async () => {
+  await fixture(async f => {
+    const { engine, sourceId } = f;
+    const { ordinary } = await childCommittedOrdinaryCycle(f);
+    const slugs = (await engine.executeRaw<{ slug: string }>(
+      "SELECT slug FROM pages WHERE source_id=$1 AND slug LIKE 'wiki/personal/reflections/session-%' ORDER BY slug", [sourceId])).map(row => row.slug);
+    expect(slugs).toHaveLength(2);
+    const requests = () => engine.executeRaw<{ slug: string; state: string }>(
+      "SELECT slug, state FROM persistence_requests WHERE source_id=$1 AND slug=ANY($2::text[]) AND intent->>'kind'='managed_maintenance_page' ORDER BY slug", [sourceId, slugs]);
+    // Each output's first admission meets contention that outlasts one admission budget (5 s), then clears.
+    // The run's 3 s re-admission budget, opened by the first output's contention, covers that output's
+    // re-admission and has run out by the time the second output's admission gives up.
+    let episode: number | undefined;
+    const contention = contendAdmissions(() => {
+      const now = performance.now();
+      if (now < (episode ??= now) + CONTENTION_WINDOW_MS) return true;
+      episode = undefined;
+      return false;
+    });
+    __setMaintenanceWriteWaitForTests(3_000);
+    let deferred: Awaited<ReturnType<typeof runPhaseSynthesize>>;
+    try { deferred = await runPhaseSynthesize(engine, ordinary); }
+    finally { __setMaintenanceWriteWaitForTests(null); contention.restore(); }
+    expect(contention.injected()).toBeGreaterThan(0);
+    expect(deferred.status).toBe('warn');
+    expect(await requests()).toHaveLength(1);
+    await disposePersistenceConsumer(engine);
+    const next = await runPhaseSynthesize(engine, ordinary);
+    expect(next.status).toBe('ok');
+    expect(await requests()).toEqual(slugs.map(slug => ({ slug, state: 'committed' })));
+  }, 2);
+}, 120_000);
+
+test('#6006: a cycle cancelled while a contended publish waits to re-admit stops without admitting it', async () => {
+  await fixture(async f => {
+    const { engine, sourceId } = f;
+    const { ordinary, slug } = await childCommittedOrdinaryCycle(f);
+    // Contention outlasts one admission budget, then clears. The cycle is cancelled before admission gives up,
+    // so the cancellation is seen after the pause, where a re-admission would otherwise commit the output.
+    const controller = new AbortController();
+    let until: number | undefined;
+    const contention = contendAdmissions(() => {
+      const now = performance.now();
+      until ??= now + CONTENTION_WINDOW_MS;
+      if (now >= until - 1_000) controller.abort(new Error('cycle cancelled'));
+      return now < until;
+    });
+    let result: Awaited<ReturnType<typeof runPhaseSynthesize>>;
+    try { result = await runPhaseSynthesize(engine, { ...ordinary, signal: controller.signal }); }
+    finally { contention.restore(); }
+    expect(controller.signal.aborted).toBe(true);
+    expect(result.status).toBe('fail');
+    expect(await engine.executeRaw(
+      "SELECT 1 FROM persistence_requests WHERE source_id=$1 AND slug=$2 AND intent->>'kind'='managed_maintenance_page'", [sourceId, slug])).toEqual([]);
+  });
+}, 120_000);
+
+test('#6006: only a contended admission or a pending write is deferred; every other publish error still fails the phase', () => {
+  const opError = (code: ConstructorParameters<typeof OperationError>[0], detail?: string) =>
+    Object.assign(new OperationError(code, 'Synthetic publish error.', 'Synthetic hint.'), detail ? { detail } : {});
+  const cases: Array<{ name: string; error: unknown; contention: boolean; deferred: boolean }> = [
+    { name: 'admission gave up on contention', error: opError('storage_error', 'database_contention'), contention: true, deferred: true },
+    { name: 'accepted write still pending', error: Object.assign(opError('write_pending'), { writeRequest: { state: 'queued' } }), contention: false, deferred: true },
+    { name: 'failed publication', error: opError('storage_error'), contention: false, deferred: false },
+    { name: 'storage_error with another detail', error: opError('storage_error', 'delivered'), contention: false, deferred: false },
+    { name: 'contention detail under another code', error: opError('revision_conflict', 'database_contention'), contention: false, deferred: false },
+    { name: 'plain error', error: new Error('connection reset'), contention: false, deferred: false },
+  ];
+  const write = spyOn(process.stderr, 'write').mockImplementation((() => true) as never);
+  try {
+    for (const c of cases) {
+      expect({ name: c.name, contention: isAdmissionContention(c.error) }).toEqual({ name: c.name, contention: c.contention });
+      if (c.deferred) expect(() => deferPublishOrThrow(c.error, 'dream-cycle-summaries/2026-09-20')).not.toThrow();
+      else expect(() => deferPublishOrThrow(c.error, 'dream-cycle-summaries/2026-09-20')).toThrow(c.error as Error);
+    }
+  } finally { write.mockRestore(); }
+});

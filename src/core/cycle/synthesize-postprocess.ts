@@ -11,6 +11,8 @@ import type { WriteRequest } from '../persistence/model.ts';
 import { publishMaintenancePage, type MaintenanceAuthority } from '../persistence/prepared-maintenance.ts';
 import { writeResponse } from '../persistence/service.ts';
 import { acceptedPendingReceipt } from '../persistence/accepted-pending.ts';
+import { isAdmissionContention } from '../persistence/admission-retry.ts';
+import { MaintenanceWriteWait } from '../persistence/maintenance-wait.ts';
 import type { PhaseResult } from '../cycle.ts';
 import type { DiscoveredTranscript } from './transcript-discovery.ts';
 import { emptyQuoteVerifyStats, groundSource, isDreamOwnedPage, resolveVerifyPrior, verifyDreamPage, type GroundedSource, type GroundingPass } from './synthesize-verify.ts';
@@ -33,6 +35,7 @@ export async function postprocessManagedSynthesis(
   const writtenRefs: OutputRef[] = [];
   const finalizedRefs: OutputRef[] = [];
   let pending = 0;
+  const readmission: ReadmissionBudget = {};
   if (!refs.length) return { writtenRefs, finalizedRefs, stats, pending };
   const outputs = await engine.executeRaw<RetainedOutput>(
     `SELECT t.job_id,j.idempotency_key AS job_key,row_to_json(p) AS request
@@ -106,10 +109,8 @@ export async function postprocessManagedSynthesis(
       content = serializePageToMarkdown(page, snapshot.tags);
     }
     throwIfAborted(opts.signal, '[dream] synthesis postprocessing');
-    try {
-      await publishMaintenancePage(engine, authority, ref.slug, content, { requestId, expectedRevision: revision });
-    } catch (error) {
-      if (!acceptedPendingReceipt(error)) throw error;
+    if (!await publishOrDefer(() => publishMaintenancePage(engine, authority, ref.slug, content, { requestId, expectedRevision: revision }),
+      readmission, () => (authority.wait ??= new MaintenanceWriteWait()).admissionMs(), `${ref.slug} (request ${requestId})`, opts.signal)) {
       pending++;
       continue;
     }
@@ -120,12 +121,64 @@ export async function postprocessManagedSynthesis(
   return { writtenRefs, finalizedRefs, stats, pending };
 }
 
+const CONTENTION_PAUSE_MS = 1_000;
+
+/** #6006: one re-admission budget per postprocess run; its first contended admission sets `until`. */
+interface ReadmissionBudget { until?: number }
+
+/**
+ * #6006: one output publish; false when it is deferred. A publish still
+ * pending after its wait is deferred (#5854). An admission that gave up on
+ * database contention recorded nothing, so the same request id is admitted
+ * again after a pause while the run's re-admission budget lasts, then deferred
+ * too; the next cycle derives the same request id. The run's first contended
+ * admission opens that budget for `admissionMs()` (the job's admission wait,
+ * open even after an earlier publish went pending); once it has run out, a
+ * contended output is deferred after its single attempt. `what` names the
+ * publish in the stderr line a contended publish writes.
+ */
+async function publishOrDefer(publish: () => Promise<unknown>, budget: ReadmissionBudget, admissionMs: () => number,
+  what: string, signal?: AbortSignal): Promise<boolean> {
+  let readmitted = false;
+  for (;;) {
+    try {
+      await publish();
+      if (readmitted) process.stderr.write(`[dream] synthesize: ${what} admitted after database contention\n`);
+      return true;
+    } catch (error) {
+      if (acceptedPendingReceipt(error)) return false;
+      if (!isAdmissionContention(error)) throw error;
+      budget.until ??= Date.now() + admissionMs();
+      if (Date.now() + CONTENTION_PAUSE_MS >= budget.until) {
+        logContentionDeferral(what);
+        return false;
+      }
+    }
+    readmitted = true;
+    await new Promise(resolve => setTimeout(resolve, CONTENTION_PAUSE_MS));
+    throwIfAborted(signal, '[dream] synthesis postprocessing');
+  }
+}
+
+/** #6006: a contention deferral warns like a pending one, so stderr names its cause. */
+function logContentionDeferral(what: string): void {
+  process.stderr.write(`[dream] synthesize: ${what} deferred, write admission blocked by database contention; the next cycle admits it\n`);
+}
+
+/** #6006: the summary publish's error path: a pending or contended publish is deferred (contention logged), anything else rethrown. */
+export function deferPublishOrThrow(error: unknown, what: string): void {
+  if (acceptedPendingReceipt(error)) return;
+  if (!isAdmissionContention(error)) throw error;
+  logContentionDeferral(what);
+}
+
 export const SYNTH_PUBLISH_DEFERRED = 'publish deferred (writer busy); finishes next cycle, no action needed';
 
 /**
- * #5854: an output publish still pending after its wait is deferred, never
- * counted as written: the phase warns, the cooldown stays unstamped, and the
- * next cycle resumes the same request id.
+ * #5854: an output publish still pending after its wait (or, #6006, never
+ * admitted under contention) is deferred, never counted as written: the phase
+ * warns, the cooldown stays unstamped, and the next cycle resumes the same
+ * request id.
  */
 export function withPublishPending(pending: number, result: PhaseResult): PhaseResult {
   if (!pending) return result;
