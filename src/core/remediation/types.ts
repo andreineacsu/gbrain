@@ -9,7 +9,7 @@
 //   - src/core/operations.ts (MCP op run_onboard, admin scope)
 
 import type { RemediationStep } from '../remediation-step.ts';
-import type { RepairPlanStep, RepairStepResult } from './repairs.ts';
+import type { RepairPlanStep, RepairPreviewFailure, RepairStepResult } from './repairs.ts';
 import type { ExplicitRepairNotice } from '../repair/registry.ts';
 import type { CapSource } from '../consent.ts';
 
@@ -55,6 +55,8 @@ export interface RemediationPlan {
   repair_steps?: RepairPlanStep[];
   /** Present with `repair_steps`: explicit-only kinds, never planned as steps; preview each by name. */
   explicit_repairs?: ExplicitRepairNotice[];
+  /** Present with `repair_steps` when a kind's preview failed: that kind is not planned; its preview command shows the error. */
+  repair_preview_failures?: RepairPreviewFailure[];
 }
 
 /**
@@ -157,6 +159,8 @@ export interface RemediationResult {
   repairs?: RepairStepResult[];
   /** Repair steps planned but not run because the user's agreement was missing. */
   repairs_skipped?: RepairPlanStep[];
+  /** Repair kinds whose preview failed, so the run neither planned nor ran them (only when one failed). */
+  repair_preview_failures?: RepairPreviewFailure[];
   /** Cumulative cap and settled spend across the original run and its resumes. */
   budget?: { max_usd: number | null; spent_usd: number; include_repairs: boolean; plan_hash: string };
 }

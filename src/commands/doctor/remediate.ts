@@ -12,21 +12,23 @@
  * consent and step manifest live in the local remediation checkpoint.
  *
  * Explicit-only repair kinds are never steps: the plan lists each with its
- * read-only preview command (`explicit_kind_required`).
+ * read-only preview command (`explicit_kind_required`). A kind whose preview
+ * fails is listed with its error and preview command; the plan and the run go
+ * on without it.
  *
  * After a run, every wave check is classified (cleared, pending,
  * consent_required, operator_required, explicit_kind_required, unsupported).
  * Exit status: 0 when no automatically repairable finding remains and no step
  * failed, even if operator-required, explicit-kind or unsupported findings
  * remain (they are listed); 1
- * otherwise and on budget exhaustion; 2 when the target is unreachable and
- * there is no repair step to run, or a resume is refused.
+ * otherwise, on budget exhaustion and when a repair preview failed; 2 when the
+ * target is unreachable and there is no repair step to run, or a resume is refused.
  */
 import type { BrainEngine } from '../../core/engine.ts';
 import { setCliExitVerdict, writeJsonDocument } from '../../core/cli-force-exit.ts';
 import { clearHealthMemo } from '../../core/health-memo.ts';
 import type { RemediationPlan, RemediationResult } from '../../core/remediation/types.ts';
-import type { RepairPlanStep } from '../../core/remediation/repairs.ts';
+import type { RepairPlanStep, RepairPreviewFailure } from '../../core/remediation/repairs.ts';
 import { repairPreviewCommand, repairSpec, type ExplicitRepairNotice } from '../../core/repair/registry.ts';
 import { findingSource, runWaveChecks, waveRepairKind, type WaveFinding } from './wave-checks.ts';
 import { derivedCapExhaustedError, type CapSource } from '../../core/consent.ts';
@@ -223,22 +225,24 @@ interface RemediationPlanShape {
   blocked: Array<{ check: string; reason: string }>;
   repair_steps?: RepairPlanStep[];
   explicit_repairs?: ExplicitRepairNotice[];
+  repair_preview_failures?: RepairPreviewFailure[];
 }
 
 /**
  * Human-render the remediation plan. "Brain is at target" prints only when
- * the score is at target AND no repair step is pending, so an unreachable
- * target never reads as "nothing to do".
+ * the score is at target AND no repair step is pending or failed its preview,
+ * so an unreachable target never reads as "nothing to do".
  */
 export function renderRemediationPlanLines(plan: RemediationPlanShape, targetScore: number, opts: { noEmbed?: boolean; planHash?: string; paidSteps?: ReadonlySet<number> } = {}): string[] {
   const lines: string[] = [];
   const repairs = plan.repair_steps ?? [];
+  const failedPreviews = plan.repair_preview_failures ?? [];
   lines.push(`Brain score: ${plan.brain_score_current}/100 → target ${targetScore}`);
   if (plan.target_unreachable) {
     lines.push(`Target unreachable: max with autonomous remediation is ${plan.max_reachable_score}/100.`);
   }
   if (plan.plan.length === 0) {
-    if (plan.brain_score_current >= targetScore && repairs.length === 0) {
+    if (plan.brain_score_current >= targetScore && repairs.length === 0 && failedPreviews.length === 0) {
       lines.push('No remediations needed. Brain is at target.');
     }
   } else {
@@ -259,6 +263,10 @@ export function renderRemediationPlanLines(plan: RemediationPlanShape, targetSco
       lines.push(`  R${step.step}. ${step.kind} — ${step.affected} item(s)${cost} [requires user agreement]`);
       lines.push(`     apply: ${step.command}`);
     }
+  }
+  if (failedPreviews.length > 0) {
+    lines.push('\nRepair previews that failed (not planned; preview each by name on this host to retry):');
+    for (const failure of failedPreviews) lines.push(`  ${failure.kind}: ${failure.message} (preview: ${failure.preview_command})`);
   }
   if (plan.explicit_repairs?.length) {
     lines.push('\nExplicit-only repairs (never run by --remediate or gbrain repair --all; preview each by name on this host):');
@@ -333,7 +341,9 @@ export function remediationExitStatus(result: RemediationResult, findings: Remed
   const jobFailed = result.submitted.some(s => s.status !== 'completed' && s.status !== 'submitted' && s.status !== 'dry_run');
   // A stopped step (capacity, pending write, unfinished embeddings) left work behind.
   const repairFailed = (result.repairs ?? []).some(r => r.status === 'failed' || r.status === 'stopped');
-  if (jobFailed || repairFailed) return 1;
+  // A repair kind whose preview failed was neither planned nor run.
+  const previewFailed = (result.repair_preview_failures ?? []).length > 0;
+  if (jobFailed || repairFailed || previewFailed) return 1;
   if (findings.some(f => f.class === 'pending' || f.class === 'consent_required')) return 1;
   if (result.target_unreachable) return 2;
   return 0;
@@ -456,6 +466,11 @@ export async function runRemediate(engine: BrainEngine, args: string[], complete
     if (skipped.length) {
       console.log(`${skipped.length} repair step${skipped.length === 1 ? '' : 's'} skipped (user agreement required): re-run with --include-repairs`);
       for (const step of skipped) console.log(`  - ${step.kind}: ${step.affected} item(s); ${step.command}`);
+    }
+    const failedPreviews = result.repair_preview_failures ?? [];
+    if (failedPreviews.length) {
+      console.log(`${failedPreviews.length} repair preview${failedPreviews.length === 1 ? '' : 's'} failed, so ${failedPreviews.length === 1 ? 'that kind was' : 'those kinds were'} not run:`);
+      for (const failure of failedPreviews) console.log(`  - ${failure.kind}: ${failure.message} (preview: ${failure.preview_command})`);
     }
     for (const f of findings.filter(f => f.class !== 'cleared')) {
       console.log(`[${f.class}] ${f.check_id}: ${f.instruction ?? f.command ?? f.message}`);

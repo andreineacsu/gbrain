@@ -10,12 +10,14 @@
  * free steps still run. Repairs run in-process on the brain host through the
  * same runner `gbrain repair` uses, never as Minion jobs. Explicit-only kinds
  * are never planned or run here: the plan lists them with their preview
- * command, and `runRepairSteps` refuses a supplied step that names one.
+ * command, and `runRepairSteps` refuses a supplied step that names one. A kind
+ * whose preview fails (a statement timeout on a large brain, #6000) is
+ * reported with its preview command and left out; the other kinds still plan.
  */
 import type { BrainEngine } from '../engine.ts';
 import { OperationError } from '../ops/contract.ts';
-import { resolveRepairScope, type RepairKind } from '../repair/core.ts';
-import { AUTO_REPAIR_REGISTRY, explicitKindRequired, repairApplyCommand, repairMaySpend, repairRunner, repairSpec } from '../repair/registry.ts';
+import { resolveRepairScope, type RepairKind, type RepairResult } from '../repair/core.ts';
+import { AUTO_REPAIR_REGISTRY, explicitKindRequired, repairApplyCommand, repairMaySpend, repairPreviewCommand, repairRunner, repairSpec } from '../repair/registry.ts';
 
 export interface RepairPlanStep {
   step: number;
@@ -48,14 +50,31 @@ export interface RepairStepResult {
   message?: string;
 }
 
-/** Brain-wide preview of every kind `--all` runs; kinds with nothing pending are omitted. */
-export async function planRepairSteps(engine: BrainEngine, opts: { noEmbed?: boolean; kinds?: readonly RepairKind[] } = {}): Promise<RepairPlanStep[]> {
+/** A kind whose preview threw: it is not planned, and its preview command shows the error again. */
+export interface RepairPreviewFailure { kind: RepairKind; message: string; preview_command: string }
+
+/**
+ * Brain-wide preview of every kind `--all` runs; kinds with nothing pending are omitted.
+ * With `onPreviewError`, a kind whose preview throws is reported there and left out, and the
+ * rest still plan; without it the error propagates.
+ */
+export async function planRepairSteps(engine: BrainEngine, opts: {
+  noEmbed?: boolean; kinds?: readonly RepairKind[]; onPreviewError?: (failure: RepairPreviewFailure) => void;
+} = {}): Promise<RepairPlanStep[]> {
   const scope = await resolveRepairScope(engine);
   const runner = await repairRunner(engine, { apply: false, noEmbed: opts.noEmbed, logger: { info() {}, warn() {}, error() {} } });
   const steps: RepairPlanStep[] = [];
   for (const spec of AUTO_REPAIR_REGISTRY) {
     if (opts.kinds && !opts.kinds.includes(spec.kind)) continue;
-    const preview = await runner.run(spec.kind, scope);
+    let preview: RepairResult;
+    try {
+      preview = await runner.run(spec.kind, scope);
+    } catch (error) {
+      if (!opts.onPreviewError) throw error;
+      opts.onPreviewError({ kind: spec.kind, message: error instanceof Error ? error.message.slice(0, 300) : String(error),
+        preview_command: repairPreviewCommand(spec.kind) });
+      continue;
+    }
     // contextual-mode stamps only sealed pages; pages the safe-chunks step re-seals become eligible during the run.
     const unlocked = spec.kind === 'contextual-mode' && steps.some(step => step.kind === 'safe-chunks') ? Number(preview.residuals.unsealed_projection ?? 0) : 0;
     if (!preview.affected && !unlocked) continue;

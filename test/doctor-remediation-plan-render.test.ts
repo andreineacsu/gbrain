@@ -51,6 +51,19 @@ describe('renderRemediationPlanLines', () => {
     expect(text).not.toContain('Target unreachable');
   });
 
+  test('at target with a failed repair preview (#6000): lists the failure, never "at target"', () => {
+    const plan = planFixture({
+      brain_score_current: 95,
+      plan: [],
+      repair_steps: [],
+      repair_preview_failures: [{ kind: 'attribution-backfill', message: 'canceling statement due to statement timeout',
+        preview_command: 'gbrain repair attribution-backfill' }],
+    });
+    const text = renderRemediationPlanLines(plan, 90).join('\n');
+    expect(text).toContain('attribution-backfill: canceling statement due to statement timeout (preview: gbrain repair attribution-backfill)');
+    expect(text).not.toContain('Brain is at target');
+  });
+
   test('brain at exact target with empty plan — still "at target"', () => {
     const plan = planFixture({
       brain_score_current: 90,
