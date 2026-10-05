@@ -125,6 +125,19 @@ async function interruptAfterChild(engine: BrainEngine, sourceId: string, opts: 
   await engine.executeRaw('DELETE FROM dream_verdicts');
 }
 
+/** An ordinary (corpus) cycle whose child committed before postprocessing ran; the cooldown is unstamped. */
+async function childCommittedOrdinaryCycle({ engine, sourceId, root, opts, calls }: Parameters<Parameters<typeof fixture>[0]>[0]) {
+  const corpus = join(root, '..', 'corpus');
+  mkdirSync(corpus);
+  writeFileSync(join(corpus, basename(opts.inputFile)), readFileSync(opts.inputFile));
+  await engine.setConfig('dream.synthesize.session_corpus_dir', corpus);
+  const ordinary = { brainDir: root, sourceId, dryRun: false };
+  await interruptAfterChild(engine, sourceId, ordinary);
+  const slug = await outputSlug(engine, sourceId);
+  await engine.executeRaw("DELETE FROM config WHERE key='dream.synthesize.last_completion_ts'");
+  return { ordinary, slug, jobsBefore: await engine.executeRaw('SELECT id FROM minion_jobs ORDER BY id'), spent: calls() };
+}
+
 test('finalized synthesis never rewrites a later user quotation on same-transcript replay', async () => {
   await fixture(async ({ engine, sourceId, root, opts, calls, edit }) => {
     const first = await runPhaseSynthesize(engine, opts);
@@ -357,17 +370,9 @@ test('partial multi-output recovery indexes every finalized output without repub
 }, 120_000);
 
 test('#5854: a postprocess publish still pending after its wait is deferred, then finished by the next ordinary cycle', async () => {
-  await fixture(async ({ engine, sourceId, root, opts, calls }) => {
-    const corpus = join(root, '..', 'corpus');
-    mkdirSync(corpus);
-    writeFileSync(join(corpus, basename(opts.inputFile)), readFileSync(opts.inputFile));
-    await engine.setConfig('dream.synthesize.session_corpus_dir', corpus);
-    const ordinary = { brainDir: root, sourceId, dryRun: false };
-    await interruptAfterChild(engine, sourceId, ordinary);
-    const slug = await outputSlug(engine, sourceId);
-    await engine.executeRaw("DELETE FROM config WHERE key='dream.synthesize.last_completion_ts'");
-    const jobsBefore = await engine.executeRaw('SELECT id FROM minion_jobs ORDER BY id');
-    const spent = calls();
+  await fixture(async f => {
+    const { engine, sourceId, calls } = f;
+    const { ordinary, slug, jobsBefore, spent } = await childCommittedOrdinaryCycle(f);
     const lock = (await acquireWorktree((await getWorktreeBinding(engine, sourceId))!, 1000))!;
     __setMaintenanceWriteWaitForTests(300);
     let deferred: Awaited<ReturnType<typeof runPhaseSynthesize>>;
