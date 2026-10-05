@@ -49,8 +49,10 @@ import {
   dreamInlineQueueAgeMs,
   DREAM_INLINE_LIVE_GRACE_MS,
   CHARS_PER_TOKEN,
+  TRIAGE_VERSION,
   type TriageFileReport,
 } from '../core/cycle/synthesize.ts';
+import { heldBackMarker } from '../core/cycle/triage-unreliable.ts';
 import { discoverTranscripts } from '../core/cycle/transcript-discovery.ts';
 import { passesTriageGate, rescueConfigOf } from '../core/cycle/triage-rescue.ts';
 import { estimateTriageDecideUsd, resolveTriageDecide } from '../core/cycle/triage-decide.ts';
@@ -249,6 +251,13 @@ function estimatePerFileUsd(model: string, maxChars: number, maxTokens: number):
   return (inputTokens / 1_000_000) * pricing.input + (maxTokens / 1_000_000) * pricing.output;
 }
 
+/** Dry-run row for a file with no usable verdict: held back by a running backoff marker, else needs_triage. */
+function dryRunUnjudgedReport(filePath: string, heldBack: boolean): TriageFileReport {
+  return heldBack
+    ? { filePath, worth: false, score: null, content_type: null, reasons: ['held back: unreliable-judge backoff running'], cached: true, backoff: true }
+    : { filePath, worth: false, score: null, content_type: null, reasons: ['needs_triage (dry-run performs no judge calls)'], cached: false, deferred: true };
+}
+
 /**
  * System One S7: when the slot acts, decide verdicts (cache identity =
  * provider + model + policy), the slot threshold and Jev window pricing join
@@ -262,6 +271,8 @@ async function retriageS7(engine: BrainEngine, config: Awaited<ReturnType<typeof
     gate: decide?.gate,
     cacheValid: (cached: DreamVerdict): boolean => isTriageCacheValid(cached, config.triage.model, since)
       || (decide?.acting === true && isTriageCacheValid(cached, decide.identity, since)),
+    // An unreliable-judge backoff marker still running (#6069): the pass skips it, so it costs nothing.
+    heldBack: (cached: DreamVerdict | null): boolean => heldBackMarker(cached, config.triage.model, TRIAGE_VERSION, since) !== null,
     model: decide?.acting ? decide.stats.provider : config.triage.model,
     perFileUsd: decide?.acting ? estimateTriageDecideUsd(decide.stats.provider, config.triage.maxChars) ?? llmUsd : llmUsd,
   };
@@ -322,7 +333,7 @@ export async function runDreamRetriage(engine: BrainEngine | null, args: string[
   // fan-out applies. An operator sweep must never cancel queued jobs the
   // rescue admitted (reconcile below), nor audit rescued files as "rejects".
   const rescueCfg = rescueConfigOf(config.triage);
-  const { decide, gate: decideGate, cacheValid, model: triageModel, perFileUsd } = await retriageS7(engine, config, parsed.since ?? undefined);
+  const { decide, gate: decideGate, cacheValid, heldBack, model: triageModel, perFileUsd } = await retriageS7(engine, config, parsed.since ?? undefined);
 
   let transcripts = discoverTranscripts({
     corpusDir: config.corpusDir,
@@ -335,7 +346,7 @@ export async function runDreamRetriage(engine: BrainEngine | null, args: string[
   // ── Half 1: score the corpus (cached reads in --dry-run; judged otherwise) ──
   let reports: TriageFileReport[];
   const byPath = new Map<string, DreamVerdict>();
-  let passStats = { judged: 0, cacheHits: 0, unreliable: 0, deferred: 0 };
+  let passStats = { judged: 0, cacheHits: 0, unreliable: 0, backoff: 0, deferred: 0 };
   // Estimated spend accumulated across the triage sweep AND the reject audit —
   // one budget spans both halves (CX3 + security review).
   let estimatedSpendUsd = 0;
@@ -363,16 +374,9 @@ export async function runDreamRetriage(engine: BrainEngine | null, args: string[
           cached: true,
         });
       } else {
-        reports.push({
-          filePath: t.filePath,
-          worth: false,
-          score: null,
-          content_type: null,
-          reasons: ['needs_triage (dry-run performs no judge calls)'],
-          cached: false,
-          deferred: true,
-        });
-        passStats.deferred++;
+        const report = dryRunUnjudgedReport(t.filePath, !parsed.force && heldBack(cached));
+        reports.push(report);
+        if (report.backoff) passStats.backoff++; else passStats.deferred++;
       }
     }
   } else {
@@ -383,7 +387,7 @@ export async function runDreamRetriage(engine: BrainEngine | null, args: string[
       if (parsed.force) { missCount++; continue; }
       const cached = await engine.getDreamVerdict(t.filePath, t.contentHash);
       const valid = cached !== null && cacheValid(cached);
-      if (!valid) missCount++;
+      if (!valid && !heldBack(cached)) missCount++;
     }
     // CX3: --max-usd is estimate-based; an unpriced model would silently
     // disable the budget the operator explicitly asked for — refuse instead.
@@ -465,7 +469,7 @@ export async function runDreamRetriage(engine: BrainEngine | null, args: string[
     });
     reports = pass.reports;
     for (const [k, v] of pass.byPath) byPath.set(k, v);
-    passStats = { judged: pass.judged, cacheHits: pass.cacheHits, unreliable: pass.unreliable, deferred: pass.deferred };
+    passStats = { judged: pass.judged, cacheHits: pass.cacheHits, unreliable: pass.unreliable, backoff: pass.backoff, deferred: pass.deferred };
   }
 
   // ── Half 2: queue reconciliation (opt-in) ──
@@ -777,7 +781,7 @@ export async function runDreamRetriage(engine: BrainEngine | null, args: string[
     needs_triage: reports.filter(r => r.deferred).length,
     retriaged: passStats.judged,
     cache_hits: passStats.cacheHits,
-    unreliable: passStats.unreliable,
+    unreliable: passStats.unreliable, backoff: passStats.backoff,
     deferred: passStats.deferred,
     dry_run: parsed.dryRun,
     queue: reconcile,
@@ -790,7 +794,7 @@ export async function runDreamRetriage(engine: BrainEngine | null, args: string[
     const would = parsed.dryRun ? ' (dry-run: no cancels performed)' : '';
     console.log(`[retriage] ${summary.discovered} discovered | ${summary.pass} pass @ threshold ${threshold} | ` +
       `${summary.below_threshold} below | ${summary.needs_triage} need triage | ` +
-      `${summary.retriaged} judged, ${summary.cache_hits} cached, ${summary.unreliable} unreliable`);
+      `${summary.retriaged} judged, ${summary.cache_hits} cached, ${summary.unreliable} unreliable, ${summary.backoff} held back`);
     if (reconcile) {
       console.log(`[retriage] queue: ${reconcile.candidates} candidates | ${reconcile.cancelled} cancelled | ` +
         `${reconcile.converted_for_resubmit} converted for resubmit | ${reconcile.kept_above_threshold} kept | ` +

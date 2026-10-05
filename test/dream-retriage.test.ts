@@ -372,6 +372,30 @@ describe('dream retriage — reconcile matrix', () => {
     }
   }, 30_000);
 
+  // #6069: a file held back by a running unreliable-judge backoff marker is
+  // neither a paid miss nor "needs triage"; the summary counts it on its own
+  // so the buckets still add up to `discovered`.
+  test.each([['--dry-run'], ['a judging run']])('a running backoff marker is counted as held back (%s)', async (mode) => {
+    const rig = await setupRig();
+    try {
+      const held = writeTranscript(rig.corpusDir, '2026-08-10-held.txt');
+      writeTranscript(rig.corpusDir, '2026-08-11-fresh.txt'); // no verdict: a miss
+      await rig.engine.putDreamVerdict(held.filePath, held.hash, {
+        worth_processing: false, reasons: ['judge-unreliable:1:unparseable', 'judge response unparseable'],
+        score: null, content_type: null, segments: [], entities: [], model: TIER_DEFAULTS.utility, triage_version: TRIAGE_VERSION,
+      });
+      const args = mode === '--dry-run' ? ['--dry-run', '--json'] : ['--json', '--yes'];
+      const { out } = await captureStdout(() => withoutAnthropicKey(() => runDreamRetriage(rig.engine, args)));
+      const summary = JSON.parse(out) as { discovered: number; backoff: number; needs_triage: number; retriaged: number };
+      expect(summary.discovered).toBe(2);
+      expect(summary.backoff).toBe(1);
+      expect(summary.retriaged).toBe(0);
+      if (mode === '--dry-run') expect(summary.needs_triage).toBe(1);
+    } finally {
+      await rig.cleanup();
+    }
+  }, 30_000);
+
   test('cancelled row releases its idempotency slot: a later add with the same key creates a fresh row', async () => {
     const rig = await setupRig();
     try {
