@@ -13,7 +13,8 @@
  *      We don't pretend this is bulletproof — frontier models still drift on
  *      adversarial inputs. But we cut the volume of trivial injections by ~95%.
  *
- * Test fixtures in test/think-sanitize.test.ts pin 30+ known attack strings.
+ * Test fixtures in test/think-pipeline.test.ts, test/think-sanitize-trajectory.test.ts
+ * and test/longmemeval-sanitize.test.ts pin known attack strings.
  */
 
 // v0.28.8: exported so the longmemeval benchmark harness can reuse the same
