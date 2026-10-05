@@ -77,4 +77,24 @@ describePg('#4152 dream_verdicts triage-v1 — Postgres', () => {
     expect(rows[0].ent_t).toBe('array');
     expect(rows[0].reasons_t).toBe('array');
   }, 30_000);
+
+  test('#6069 backoff marker: a NULL score binds and reads back on postgres.js; a verdict overwrites it', async () => {
+    const engine = getEngine();
+    const marker = {
+      worth_processing: false,
+      reasons: ['judge-unreliable:1:unparseable', 'judge response unparseable'],
+      score: null,
+      content_type: null,
+      segments: [],
+      entities: [],
+      model: 'anthropic:claude-haiku-4-5-20251001',
+      triage_version: 2,
+    };
+    await engine.putDreamVerdict('/corpus/marker.txt', 'marker-hash-0001', marker);
+    expect(await engine.getDreamVerdict('/corpus/marker.txt', 'marker-hash-0001')).toMatchObject({
+      score: null, worth_processing: false, reasons: marker.reasons, model: marker.model, triage_version: 2,
+    });
+    await engine.putDreamVerdict('/corpus/marker.txt', 'marker-hash-0001', { ...marker, reasons: ['scored'], score: 0.4 });
+    expect(await engine.getDreamVerdict('/corpus/marker.txt', 'marker-hash-0001')).toMatchObject({ score: 0.4, reasons: ['scored'] });
+  }, 30_000);
 });

@@ -646,13 +646,15 @@ describe('E2E synthesize — verdict cache (Q-2)', () => {
   }, 30_000);
 });
 
-describe('E2E synthesize — degenerate verdicts are NOT cached in dream_verdicts', () => {
+describe('E2E synthesize: degenerate verdicts are NOT cached as verdicts in dream_verdicts', () => {
   // A truncated (stop_reason=length) or unparseable judge response used to be
   // banked as a permanent `worth_processing: false` row — a brain whose
   // verdict model reliably truncates (e.g. a reasoning model whose reasoning
   // tokens ate the old 200-token budget) silently rejected every transcript
-  // forever. These tests pin the fix: degenerate verdicts skip the cache
-  // write (with a stderr warning) so the next cycle re-judges.
+  // forever. These tests pin the fix: a degenerate verdict never becomes a
+  // scored row. Since #6069 it leaves a NULL-score backoff marker instead (a
+  // cache miss for every verdict reader), with a stderr warning that carries
+  // the response diagnostic, so the paid call is not repeated every run.
 
   afterEach(() => {
     __setChatTransportForTests(null);
@@ -726,35 +728,51 @@ describe('E2E synthesize — degenerate verdicts are NOT cached in dream_verdict
     }
   }
 
-  test('truncated judge response (stop_reason=length) → no dream_verdicts row + warning', async () => {
-    const { verdictRow, stderr } = await runWithStubbedJudge({
-      text: '{"scor', // reasoning ate the budget; partial JSON
-      stopReason: 'length',
-    });
-    expect(verdictRow).toBeNull();
-    expect(stderr).toMatch(/\[dream\] triage for 2026-05-01-session was truncated/);
-    expect(stderr).toMatch(/not caching in dream_verdicts/);
-  }, 30_000);
-
-  test('unparseable judge response → no dream_verdicts row + warning', async () => {
-    const { verdictRow, stderr } = await runWithStubbedJudge({
-      text: 'not json at all',
-      stopReason: 'end',
-    });
-    expect(verdictRow).toBeNull();
-    expect(stderr).toMatch(/\[dream\] triage for 2026-05-01-session was unparseable/);
-    expect(stderr).toMatch(/not caching in dream_verdicts/);
-  }, 30_000);
-
-  test('boolean-era judge output (no score) is unparseable — never cached', async () => {
+  const degenerateCases = [
+    // Reasoning ate the budget: partial JSON.
+    ['truncated judge response (stop_reason=length)', '{"scor', 'length', 'truncated', 'gateway finish=length'],
+    ['unparseable judge response', 'not json at all', 'end', 'unparseable', 'JSON error'],
     // The old `{"worth_processing": ...}` shape has no score; under triage-v1
     // it must NOT become a cacheable rejection.
-    const { verdictRow, stderr } = await runWithStubbedJudge({
-      text: '{"worth_processing": false, "reasons": ["routine ops"]}',
-      stopReason: 'end',
-    });
-    expect(verdictRow).toBeNull();
-    expect(stderr).toMatch(/\[dream\] triage for 2026-05-01-session was unparseable/);
+    ['boolean-era judge output (no score)', '{"worth_processing": false, "reasons": ["routine ops"]}', 'end', 'unparseable', 'JSON object without a finite numeric score'],
+  ] as const;
+  for (const [name, text, stopReason, kind, diagnostic] of degenerateCases) {
+    test(`${name} → backoff marker, never a scored row, warning with diagnostic`, async () => {
+      const { verdictRow, stderr } = await runWithStubbedJudge({ text, stopReason });
+      expect(verdictRow).toMatchObject({ score: null, worth_processing: false, model: TIER_DEFAULTS.utility, triage_version: TRIAGE_VERSION });
+      expect((verdictRow as { reasons: string[] }).reasons[0]).toBe(`judge-unreliable:1:${kind}`);
+      expect(stderr).toMatch(new RegExp(`\\[dream\\] triage for 2026-05-01-session was ${kind}`));
+      expect(stderr).toContain(diagnostic);
+      expect(stderr).toMatch(/backing off 1 transcript\(s\) after unreliable judge responses; next judge attempt from \S+/);
+    }, 30_000);
+  }
+
+  test('the next run reads the marker from the real engine and skips the paid call; the headline names it', async () => {
+    const rig = await setupRig();
+    try {
+      await rig.engine.setConfig('dream.synthesize.enabled', 'true');
+      await rig.engine.setConfig('dream.synthesize.session_corpus_dir', rig.corpusDir);
+      writeFileSync(join(rig.corpusDir, '2026-05-03-held.txt'), 'a meaningful conversation\n'.repeat(200));
+      let calls = 0;
+      __setChatTransportForTests(async () => {
+        calls++;
+        return {
+          text: 'not json at all', blocks: [], stopReason: 'end',
+          usage: { input_tokens: 10, output_tokens: 20, cache_read_tokens: 0, cache_creation_tokens: 0 },
+          model: 'test:stub', providerId: 'test',
+        };
+      });
+      const run = () => withFakeAnthropicKey(() => captureStderr(() => runPhaseSynthesize(rig.engine, { brainDir: rig.brainDir, dryRun: true })));
+      await run();
+      expect(calls).toBe(1);
+      const { result, stderr } = await run();
+      expect(calls).toBe(1);
+      expect(stderr).toContain('1 transcript(s) skipped while an unreliable-judge backoff runs');
+      expect((result.details.triage as { unreliable_backoff: number }).unreliable_backoff).toBe(1);
+      expect(result.summary).toContain('1 held back after unreliable judge responses');
+    } finally {
+      await rig.cleanup();
+    }
   }, 30_000);
 
   test('control: clean scored verdict is cached with score + model + triage_version', async () => {
@@ -769,7 +787,7 @@ describe('E2E synthesize — degenerate verdicts are NOT cached in dream_verdict
     expect(row.content_type).toBe('routine');
     expect(row.model).toBe(TIER_DEFAULTS.utility);
     expect(row.triage_version).toBe(TRIAGE_VERSION);
-    expect(stderr).not.toMatch(/not caching in dream_verdicts/);
+    expect(stderr).not.toMatch(/not caching in dream_verdicts|backing off/);
   }, 30_000);
 
   test('legacy boolean-era cached row (score NULL) is a MISS — re-judged and overwritten', async () => {

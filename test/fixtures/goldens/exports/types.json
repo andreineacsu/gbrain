@@ -3331,7 +3331,7 @@
           "entities: string[]",
           "model: string",
           "reasons: string[]",
-          "score: number",
+          "score: number | null",
           "segments: TriageSegment[]",
           "triage_version: number",
           "worth_processing: boolean"

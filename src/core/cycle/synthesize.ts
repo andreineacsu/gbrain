@@ -13,7 +13,7 @@ import { acceptedPendingReceipt } from '../persistence/accepted-pending.ts';
  *     │                       │   head/middle/tail sample within max_chars)
  *     │                       │   {score 0-1, content_type, segments, entities}
  *     │                       │     reliable ──► putDreamVerdict (upsert)
- *     │                       │     degenerate ──► report only, NEVER cached
+ *     │                       │     degenerate ──► report + backoff marker (no verdict)
  *     │                       └─ budget exhausted ──► deferred (next run continues)
  *     ▼
  *   gate (passesTriageGate — ONE decision for reports/fan-out/retriage):
@@ -42,7 +42,8 @@ import { acceptedPendingReceipt } from '../persistence/accepted-pending.ts';
  *     job keys (byte-stable — pinned by test/dream-synthesize-chunking.serial.test.ts).
  *   - Edited transcripts produce slugs with content-hash suffix → no overwrite.
  *   - Degenerate triage verdicts (truncated / refusal / unparseable /
- *     score out of [0,1]) are never cached — the next cycle re-judges.
+ *     score out of [0,1]) are never cached as verdicts; a backoff marker
+ *     postpones the next paid attempt (triage-unreliable.ts, #6069).
  *
  * NOT in v1:
  *   - git auto-commit / push (deferred to v1.1, codex finding #5).
@@ -60,6 +61,7 @@ import { normalizeModelId, splitProviderModelId } from '../model-id.ts';
 import { hasAnthropicKey } from '../ai/anthropic-key.ts';
 import { basename, join, dirname, isAbsolute, resolve } from 'node:path';
 import { parseLlmJson } from '../llm-json.ts';
+import { describeJudgeResponse, flushUnreliableMarkers, heldBackMarker, type PendingUnreliableMarker, type UnreliableKind } from './triage-unreliable.ts';
 import type { BrainEngine, DreamVerdict, TriageSegment } from '../engine.ts';
 import type { PhaseResult, PhaseError } from '../cycle.ts';
 import { DEFAULT_PRIVATE_QUEUE_LEASE_MS, MinionQueue } from '../minions/queue.ts';
@@ -538,7 +540,7 @@ async function runPhaseSynthesizeInner(
       threshold: config.triage.threshold,
       concurrency: config.triage.concurrency,
       maxMs: config.triage.maxMs, now: opts.triageNow,
-      signal: opts.signal,
+      signal: opts.signal, ignoreBackoff: !!explicitTarget,
       rescue: rescueConfigOf(config.triage), decide: await resolveTriageDecide(engine),
     }, opts.yieldDuringPhase);
     pass.reports.push(...transcripts.filter(t => retained.has(t.filePath)).map(t => ({ filePath: t.filePath,
@@ -565,7 +567,7 @@ async function runPhaseSynthesizeInner(
       threshold: config.triage.threshold,
       judged: pass.judged,
       cache_hits: pass.cacheHits,
-      unreliable: pass.unreliable,
+      unreliable: pass.unreliable, unreliable_backoff: pass.backoff,
       deferred: pass.deferred,
       degraded: degradedCount,
       below_threshold: pass.reports.filter(r => r.score !== null && !r.worth).length,
@@ -584,9 +586,9 @@ async function runPhaseSynthesizeInner(
       rescue_fired: pass.reports.filter(r => r.rescued === true).length, ...(pass.decide ? { decide: pass.decide } : {}),
     };
     // 3A: a time-boxed cold pass must never read as mass rejection.
-    const deferralSuffix = pass.deferred > 0
+    const deferralSuffix = (pass.deferred > 0
       ? ` (${pass.deferred} not yet triaged — time budget; re-run or use dream retriage)`
-      : '';
+      : '') + (pass.backoff > 0 ? ` (${pass.backoff} held back after unreliable judge responses)` : '');
 
     // Dry-run stops here: the triage pass ran (scores cached), but no
     // synthesis. Codex finding #8: --dry-run does NOT mean "zero LLM calls";
@@ -1943,6 +1945,7 @@ export function makeJudgeClient(verdictModel: string): JudgeClient | null {
         model: modelStr,
         // A chat_fallback_chain entry answered: judgeSignificance marks the verdict uncacheable.
         ...(result.fallbackFrom ? { answered_by: result.model } : {}),
+        gateway_stop_reason: result.stopReason, // kept for the unreliable-verdict diagnostic (#6069)
         content: [{ type: 'text', text: result.text }],
         stop_reason: result.stopReason === 'length' ? 'max_tokens'
           : result.stopReason === 'tool_calls' ? 'tool_use'
@@ -1985,10 +1988,12 @@ export interface TriageResult {
    *                   could be parsed out of the response. Out-of-range scores
    *                   land here deliberately — clamping would cache a
    *                   fabricated verdict.
-   * runTriagePass skips putDreamVerdict for these so the next cycle re-judges
-   * the transcript instead of permanently trusting a degenerate rejection.
+   * runTriagePass never caches these as verdicts (a degenerate rejection would
+   * be permanent); it stores a backoff marker instead (triage-unreliable.ts).
    */
-  unreliable?: 'truncated' | 'refusal' | 'unparseable';
+  unreliable?: UnreliableKind;
+  /** Set with `unreliable`: one bounded line on the response (describeJudgeResponse). */
+  diagnostic?: string;
   /**
    * F6: judge-call token usage when the client surfaced it (gateway clients
    * do; legacy SDK-shape mocks may not). Present on degenerate results too —
@@ -2109,8 +2114,8 @@ Quote verbatim; never paraphrase inside "quote".`;
   // stop_reason === 'max_tokens' means the response was cut off; 'refusal'
   // means the model refused or a content filter blocked it. Even if a
   // parseable JSON object survives either condition, don't trust it as a
-  // durable verdict — mark it unreliable so the caller skips the
-  // dream_verdicts write and the next cycle re-judges. (Legacy SDK-shape
+  // durable verdict — mark it unreliable so the caller stores a backoff
+  // marker, never a verdict (triage-unreliable.ts). (Legacy SDK-shape
   // clients and mocks without a stop_reason field land on undefined here,
   // which is treated as a clean stop — preserves the pre-existing contract.)
   // Widen: the pinned Anthropic SDK's stop_reason union predates 'refusal',
@@ -2126,8 +2131,6 @@ Quote verbatim; never paraphrase inside "quote".`;
     ? { in: rawUsage.input_tokens, out: rawUsage.output_tokens }
     : undefined;
   const answeredBy = (msg as { answered_by?: string }).answered_by;
-  const withTokens = (r: TriageResult): TriageResult =>
-    ({ ...r, ...(callTokens ? { tokens: callTokens } : {}), ...(answeredBy ? { answeredBy } : {}) });
   const refused = stopReasonRaw === 'refusal';
   const abnormalStop: TriageResult['unreliable'] | undefined =
     truncated ? 'truncated' : refused ? 'refusal' : undefined;
@@ -2143,6 +2146,13 @@ Quote verbatim; never paraphrase inside "quote".`;
     entities?: unknown;
     reasons?: unknown;
   }>(text);
+  const scored = !!parsed && typeof parsed.score === 'number' && Number.isFinite(parsed.score);
+  const gatewayStopReason = (msg as { gateway_stop_reason?: string }).gateway_stop_reason;
+  const withTokens = (r: TriageResult): TriageResult => ({
+    ...r, ...(callTokens ? { tokens: callTokens } : {}), ...(answeredBy ? { answeredBy } : {}),
+    ...(r.unreliable ? { diagnostic: describeJudgeResponse(text, { stopReason: stopReasonRaw, gatewayStopReason, outputTokens: callTokens?.out },
+      scored ? 'ok' : parsed ? 'no-score' : 'failed') } : {}),
+  });
 
   // Discriminant: a finite numeric score is REQUIRED. A JSON object without
   // one (`{}`, `{"score": "0.7"}`) is NOT a verdict — treat as unparseable
@@ -2315,6 +2325,8 @@ export interface TriagePassCfg {
   force?: boolean;
   /** Retriage --since: cached rows judged before this instant are stale (re-judged). */
   staleBefore?: Date;
+  /** Explicit --input/--date/--from/--to targets: judge even while an unreliable-judge backoff runs. */
+  ignoreBackoff?: boolean;
   /** Test seam: judge client override (null = simulate no reachable provider). */
   judge?: JudgeClient | null;
   /** Test seam: clock for the maxMs budget. */
@@ -2348,6 +2360,8 @@ export interface TriageFileReport {
   reasons: string[];
   cached: boolean;
   unreliable?: string;
+  /** Not judged: an unreliable-judge backoff marker for this content is still running (#6069). */
+  backoff?: boolean;
   /** True when the maxMs budget (or shouldStop) expired before this file could be judged. */
   deferred?: boolean;
 }
@@ -2360,6 +2374,8 @@ export interface TriagePassResult {
   judged: number;
   cacheHits: number;
   unreliable: number;
+  /** Files skipped while their unreliable-judge backoff runs (no call, no cooldown hold). */
+  backoff: number;
   deferred: number;
   /** F6: summed judge-call usage across cache MISSES this pass (hits are free). */
   tokens: { in: number; out: number };
@@ -2410,6 +2426,9 @@ export async function runTriagePass(
   let judged = 0;
   let cacheHits = 0;
   let unreliableCount = 0;
+  let backoffCount = 0;
+  let llmJudged = 0; // the outage rule reads LLM judge calls only, not S7 decide verdicts
+  const pendingMarkers: PendingUnreliableMarker[] = [];
   let deferredCount = 0;
   let tokensIn = 0;
   let tokensOut = 0;
@@ -2477,6 +2496,14 @@ export async function runTriagePass(
       };
       return;
     }
+    // #6069: an unreliable verdict for this content left a backoff marker; no paid call until it ends.
+    const marker = cfg.ignoreBackoff ? null : heldBackMarker(cached, cfg.model, TRIAGE_VERSION, cfg.staleBefore);
+    if (marker) {
+      backoffCount++;
+      reports[idx] = { filePath: t.filePath, worth: false, score: null, content_type: null, cached: true, unreliable: marker.kind, backoff: true,
+        reasons: [`triage backoff: judge was unreliable (${marker.kind}) on ${marker.attempt} consecutive attempt(s); next attempt after ${new Date(marker.retryAt).toISOString()}`] };
+      return;
+    }
     if (budgetExhausted()) {
       deferredCount++;
       reports[idx] = {
@@ -2521,21 +2548,25 @@ export async function runTriagePass(
         // be bypassed by refusals/truncations/unparseable responses.
         if (cfg.shouldStop?.()) stopped = true;
       }
-      judged++;
+      judged++; llmJudged++;
       if (triage.tokens) {
         tokensIn += triage.tokens.in;
         tokensOut += triage.tokens.out;
       }
       if (triage.unreliable) {
-        // Degenerate judgement — do NOT write it to dream_verdicts: a cached
-        // rejection is permanent for this content hash, and a triage model
-        // that reliably truncates would silently reject every transcript
-        // forever. Log + skip so the next cycle re-judges.
+        // Degenerate judgement, never a verdict: a cached rejection is
+        // permanent for this content hash, and a triage model that reliably
+        // truncates would silently reject every transcript forever. A backoff
+        // marker postpones the next paid attempt instead (#6069), written at the
+        // end of the pass (flushUnreliableMarkers) and never when a fallback
+        // model answered (the configured model never judged this content).
         unreliableCount++;
+        if (!triage.answeredBy) {
+          pendingMarkers.push({ filePath: t.filePath, contentHash: t.contentHash, kind: triage.unreliable, reasons: triage.reasons });
+        }
         process.stderr.write(
           `[dream] triage for ${t.basename} was ${triage.unreliable} ` +
-          `(${triage.reasons.join('; ')}); not caching in dream_verdicts — ` +
-          `next cycle will re-judge ${t.filePath}\n`,
+          `(${[...triage.reasons, triage.diagnostic].filter(Boolean).join('; ')}); not cached as a verdict: ${t.filePath}\n`,
         );
         reports[idx] = {
           filePath: t.filePath,
@@ -2648,7 +2679,9 @@ export async function runTriagePass(
     }
   }
 
-  return { reports, byPath, judged, cacheHits, unreliable: unreliableCount, deferred: deferredCount, tokens: { in: tokensIn, out: tokensOut }, ...(cfg.decide ? { decide: cfg.decide.stats } : {}) };
+  await flushUnreliableMarkers(engine, pendingMarkers,
+    { judged: llmJudged, unreliable: unreliableCount, heldBack: backoffCount, aborted: cfg.signal?.aborted === true }, cfg.model, TRIAGE_VERSION);
+  return { reports, byPath, judged, cacheHits, unreliable: unreliableCount, backoff: backoffCount, deferred: deferredCount, tokens: { in: tokensIn, out: tokensOut }, ...(cfg.decide ? { decide: cfg.decide.stats } : {}) };
 }
 
 // ── Subagent prompt ──────────────────────────────────────────────────

@@ -6779,6 +6779,16 @@ per-transcript synthesis subagents. The dials:
 - `dream.triage.max_tokens` (default 2048, floor 256) — judge output budget.
 - `dream.triage.concurrency` (default 4, clamped 1–16) — concurrent judge
   calls.
+- **Unreliable-judge backoff** (no dial): a judge response that is truncated,
+  refused or unparseable is never cached as a verdict. The stderr warning
+  carries a short diagnostic (size, stop reason, the JSON error and about 120
+  redacted characters around it), and the transcript waits 3, then 6, 12 and
+  24 days before the next paid attempt. When at least half of a run's judge
+  calls fail, which looks like a provider problem, the wait is 6 hours, once.
+  Changed content, or an explicit
+  `gbrain dream --phase synthesize --input <file>` / `--date <day>` run, judges
+  it sooner; raising `dream.triage.max_tokens` alone does not end a running
+  wait. Telemetry: `details.triage.unreliable_backoff`.
 - **Verified-segment rescue** (buried-signal recovery, $0): a transcript whose
   score lands in `[dream.triage.rescue_floor, threshold)` still passes when at
   least `dream.triage.rescue_min_segments` (default 2; **0 disables**) of the

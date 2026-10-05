@@ -452,8 +452,8 @@ export interface TriageSegment {
 
 /**
  * Dream-cycle triage verdict on a transcript (#4152 two-stage cascade).
- * Triage-v1 fields (`score` .. `triage_version`) are null/[] on legacy rows
- * written by the boolean-era judge — callers treat those rows as cache misses.
+ * A NULL `score` is a cache miss: a boolean-era row (triage-v1 fields null/[])
+ * or an unreliable-judge backoff marker (cycle/triage-unreliable.ts, #6069).
  */
 export interface DreamVerdict {
   worth_processing: boolean;
@@ -480,7 +480,7 @@ export const DREAM_VERDICT_TTL_SECONDS = 30 * 86400;
 export interface DreamVerdictInput {
   worth_processing: boolean;
   reasons: string[];
-  score: number;
+  score: number | null; // null only on an unreliable-judge backoff marker
   content_type: string | null;
   segments: TriageSegment[];
   entities: string[];

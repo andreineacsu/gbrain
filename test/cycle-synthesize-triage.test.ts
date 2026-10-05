@@ -13,6 +13,7 @@
 import { describe, test, expect } from 'bun:test';
 import {
   runTriagePass,
+  judgeSignificance,
   buildTriageMapBlock,
   parseSynthV2Key,
   dreamInlineQueueAgeMs,
@@ -411,20 +412,235 @@ describe('runTriagePass — degrade + failure contracts', () => {
     await expect(runTriagePass(engine, ts, baseCfg(judge, { concurrency: 1 }))).rejects.toThrow('database on fire');
   });
 
-  test('unreliable judgments are reported but never cached', async () => {
+});
+
+/**
+ * #6069: an unreliable judgment (truncated / refusal / unparseable) is paid
+ * for and thrown away. It must never become a verdict (a cached rejection is
+ * permanent for the content hash), but re-judging it at full price on every
+ * run is unbounded spend. The pass stores a NULL-score backoff marker in the
+ * verdict slot and skips the transcript until the backoff ends. Pre-fix the
+ * slot stayed empty and every run paid again.
+ */
+describe('runTriagePass: unreliable-judge backoff (#6069)', () => {
+  const key = (t: DiscoveredTranscript) => `${t.filePath}|${t.contentHash}`;
+  const daysAgo = (days: number) => new Date(Date.now() - days * 86_400_000).toISOString();
+  const countingJudge = (calls: { n: number }, text: string, extra: Record<string, unknown> = {}): JudgeClient => ({
+    create: async () => {
+      calls.n++;
+      return { content: [{ type: 'text', text }], stop_reason: 'end_turn', ...extra } as never;
+    },
+  });
+  const seedMarker = (rows: Map<string, DreamVerdict>, t: DiscoveredTranscript, v: Partial<DreamVerdict> = {}) =>
+    seedVerdict(rows, t, { score: null, worth_processing: false, reasons: ['judge-unreliable:1:unparseable'], judged_at: daysAgo(1), ...v });
+
+  test('an unreliable judgment is never a verdict: it stores a NULL-score backoff marker', async () => {
     const { engine, rows } = makeFakeEngine();
     const t = makeTranscript('trunc');
     const judge: JudgeClient = {
-      create: async () => ({
-        content: [{ type: 'text', text: '{"scor' }],
-        stop_reason: 'max_tokens',
-      } as never),
+      create: async () => ({ content: [{ type: 'text', text: '{"scor' }], stop_reason: 'max_tokens' } as never),
     };
     const r = await runTriagePass(engine, [t], baseCfg(judge));
     expect(r.unreliable).toBe(1);
     expect(r.reports[0].unreliable).toBe('truncated');
-    expect(rows.size).toBe(0);
     expect(r.byPath.has(t.filePath)).toBe(false);
+    expect(rows.get(key(t))).toMatchObject({
+      score: null, worth_processing: false, model: MODEL, triage_version: TRIAGE_VERSION,
+      reasons: ['judge-unreliable:1:truncated', 'judge response truncated (stop_reason=max_tokens)'],
+    });
+  });
+
+  test('no judge call while the backoff runs; a failure after it ends doubles the next wait', async () => {
+    const { engine, rows } = makeFakeEngine();
+    const t = makeTranscript('flaky');
+    const calls = { n: 0 };
+    const judge = countingJudge(calls, 'not json at all');
+    await runTriagePass(engine, [t], baseCfg(judge));
+    const held = await runTriagePass(engine, [t], baseCfg(judge));
+    expect(calls.n).toBe(1);
+    expect(held.judged).toBe(0);
+    expect(held.backoff).toBe(1);
+    expect(held.reports[0]).toMatchObject({ backoff: true, cached: true, worth: false, score: null, unreliable: 'unparseable' });
+
+    rows.get(key(t))!.judged_at = daysAgo(3.1); // first step: 3 days
+    const retried = await runTriagePass(engine, [t], baseCfg(judge));
+    expect(calls.n).toBe(2);
+    expect(retried.unreliable).toBe(1);
+    expect(rows.get(key(t))!.reasons[0]).toBe('judge-unreliable:2:unparseable');
+
+    rows.get(key(t))!.judged_at = daysAgo(5); // second step: 6 days
+    const heldAgain = await runTriagePass(engine, [t], baseCfg(judge));
+    expect(calls.n).toBe(2);
+    expect(heldAgain.backoff).toBe(1);
+  });
+
+  test('a reliable verdict once the backoff ends replaces the marker', async () => {
+    const { engine, rows } = makeFakeEngine();
+    const t = makeTranscript('recovered');
+    seedMarker(rows, t, { judged_at: daysAgo(4) });
+    const r = await runTriagePass(engine, [t], baseCfg(scoredJudge(0.8)));
+    expect(r.judged).toBe(1);
+    expect(r.backoff).toBe(0);
+    expect(rows.get(key(t))).toMatchObject({ score: 0.8, reasons: ['mock'] });
+    expect(r.byPath.get(t.filePath)?.score).toBe(0.8);
+  });
+
+  test.each([
+    ['--force', {}, { force: true }],
+    ['another verdict model', { model: 'openai:gpt-example' }, {}],
+    ['an older TRIAGE_VERSION', { triage_version: TRIAGE_VERSION - 1 }, {}],
+    ['retriage --since after the marker', {}, { staleBefore: new Date(Date.now() - 3_600_000) }],
+    ['an explicit --input/--date synthesize target', {}, { ignoreBackoff: true }],
+  ] as const)('a running marker does not hold back a judge call under %s', async (_name, marker, cfg) => {
+    const { engine, rows } = makeFakeEngine();
+    const t = makeTranscript('tuple');
+    seedMarker(rows, t, marker as Partial<DreamVerdict>);
+    const calls = { n: 0 };
+    const r = await runTriagePass(engine, [t], baseCfg(countingJudge(calls, JSON.stringify({ score: 0.6, reasons: ['mock'] })), cfg as Partial<TriagePassCfg>));
+    expect(calls.n).toBe(1);
+    expect(r.backoff).toBe(0);
+    expect(rows.get(key(t))?.score).toBe(0.6);
+  });
+
+  // A pass whose judge calls failed half the time or more looks like a
+  // provider problem, not the pages (the #6069 report: 20 of 21 failed, then
+  // judged cleanly shortly after). Its markers hold 6 hours without counting
+  // an attempt; a lone failure, or a minority, takes the normal backoff.
+  const badOrGoodJudge: JudgeClient = {
+    create: async (params) => {
+      const prompt = String((params as { messages: Array<{ content: unknown }> }).messages[0].content);
+      const text = prompt.startsWith('Transcript bad') ? 'not json' : JSON.stringify({ score: 0.6, reasons: ['mock'] });
+      return { content: [{ type: 'text', text }], stop_reason: 'end_turn' } as never;
+    },
+  };
+  const mixedRun = (bad: number, good: number) => [
+    ...Array.from({ length: bad }, (_, i) => makeTranscript(`bad${i}`)),
+    ...Array.from({ length: good }, (_, i) => makeTranscript(`good${i}`)),
+  ];
+  test.each([
+    ['three of six unreliable looks like an outage: short holds', 3, 3, 'judge-unreliable:0:unparseable:outage'],
+    ['one of two is the smallest outage (the boundary)', 1, 1, 'judge-unreliable:0:unparseable:outage'],
+    ['two of six unreliable: those two back off normally', 2, 4, 'judge-unreliable:1:unparseable'],
+    ['one call that fails is no evidence of an outage', 1, 0, 'judge-unreliable:1:unparseable'],
+  ])('%s', async (_name, bad, good, marker) => {
+    const { engine, rows } = makeFakeEngine();
+    const r = await runTriagePass(engine, mixedRun(bad, good), baseCfg(badOrGoodJudge));
+    expect(r.unreliable).toBe(bad);
+    const markers = [...rows.values()].filter(v => v.score === null);
+    expect(markers.map(v => v.reasons[0])).toEqual(Array(bad).fill(marker));
+    expect([...rows.values()].filter(v => v.score !== null)).toHaveLength(good);
+  });
+
+  test('an outage hold ends after 6 hours; failing in the next outage-looking run escalates to the normal backoff', async () => {
+    const { engine, rows } = makeFakeEngine();
+    const calls = { n: 0 };
+    const judge = countingJudge(calls, 'not json');
+    const ts = mixedRun(2, 0);
+    await runTriagePass(engine, ts, baseCfg(judge));
+    expect((await runTriagePass(engine, ts, baseCfg(judge))).backoff).toBe(2); // held within the 6 hours
+    for (const t of ts) rows.get(key(t))!.judged_at = new Date(Date.now() - 7 * 3_600_000).toISOString();
+    await runTriagePass(engine, ts, baseCfg(judge));
+    expect(calls.n).toBe(4);
+    expect(ts.map(t => rows.get(key(t))!.reasons[0])).toEqual(Array(2).fill('judge-unreliable:1:unparseable'));
+  });
+
+  test('a failed marker write is logged and the pass still returns its reports', async () => {
+    const { engine } = makeFakeEngine();
+    (engine as { putDreamVerdict: unknown }).putDreamVerdict = async () => { throw new Error('connection reset'); };
+    const r = await runTriagePass(engine, [makeTranscript('w')], baseCfg(countingJudge({ n: 0 }, 'not json')));
+    expect(r.unreliable).toBe(1);
+    expect(r.reports[0].unreliable).toBe('unparseable');
+  });
+
+  test('no marker when a fallback model answered or the cycle was cancelled during the call', async () => {
+    const fallback = makeFakeEngine();
+    await runTriagePass(fallback.engine, [makeTranscript('fb')], baseCfg(countingJudge({ n: 0 }, 'not json', { answered_by: 'openai:gpt-example' })));
+    expect(fallback.rows.size).toBe(0);
+
+    const cancelled = makeFakeEngine();
+    const controller = new AbortController();
+    const judge: JudgeClient = {
+      create: async () => {
+        controller.abort();
+        return { content: [{ type: 'text', text: 'not json' }], stop_reason: 'end_turn' } as never;
+      },
+    };
+    await runTriagePass(cancelled.engine, [makeTranscript('cx')], baseCfg(judge, { signal: controller.signal }));
+    expect(cancelled.rows.size).toBe(0);
+  });
+
+  // A marker is for content without a verdict. Under --force the pass never
+  // read the slot, and a concurrent run can write a verdict while this call is
+  // in flight; either way the scored row must survive the failed re-judge.
+  test.each([
+    ['--force re-judges a scored verdict and the call fails', true, false],
+    ['a concurrent run writes a verdict while the call is in flight', false, true],
+  ])('no marker over a scored verdict: %s', async (_name, force, concurrent) => {
+    const { engine, rows } = makeFakeEngine();
+    const t = makeTranscript('kept');
+    if (!concurrent) seedVerdict(rows, t, { score: 0.9, reasons: ['scored'] });
+    const judge: JudgeClient = {
+      create: async () => {
+        if (concurrent) seedVerdict(rows, t, { score: 0.9, reasons: ['scored'] });
+        return { content: [{ type: 'text', text: 'not json' }], stop_reason: 'end_turn' } as never;
+      },
+    };
+    const r = await runTriagePass(engine, [t], baseCfg(judge, { force }));
+    expect(r.unreliable).toBe(1);
+    expect(rows.get(key(t))).toMatchObject({ score: 0.9, reasons: ['scored'] });
+  });
+
+  test('the diagnostic names the JSON error and shows a redacted window around it', async () => {
+    // A literal newline inside a quote is invalid JSON; the window must point at it.
+    // The synthetic token is assembled at runtime so secret scanners never see it in source.
+    const token = 'ghp_' + 'aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5';
+    const text = `\`\`\`json\n{"score": 0.8, "segments": [{"quote": "mail alice@example.com\nkey ${token}"}]}\n\`\`\``;
+    const judge: JudgeClient = {
+      create: async () => ({
+        content: [{ type: 'text', text }], stop_reason: 'end_turn', gateway_stop_reason: 'other', usage: { input_tokens: 900, output_tokens: 42 },
+      } as never),
+    };
+    const r = await judgeSignificance(judge, makeTranscript('diag'), MODEL);
+    expect(r.unreliable).toBe('unparseable');
+    expect(r.diagnostic).toContain(`response ${text.length} chars`);
+    expect(r.diagnostic).toContain('stop_reason=end_turn, gateway finish=other, 42 output tokens, fenced');
+    // The window is centered on the error (the literal newline), after redaction.
+    expect(r.diagnostic).toMatch(/JSON error ".+" at char \d+ near ".*\[REDACTED\]\\nkey <REDACTED:github_token>/);
+    expect(r.diagnostic).toContain('[REDACTED]');
+    expect(r.diagnostic).not.toContain('alice@example.com');
+    expect(r.diagnostic).toContain('<REDACTED:github_token>');
+    expect(r.diagnostic).not.toContain(token);
+  });
+
+  // A value cut by the window's end no longer matches its pattern, which is
+  // why redaction runs over the whole response before the window is cut.
+  test.each([
+    ['a token', 'ghp_' + 'aB3dE5fG7hJ9kL1mN3pQ5rS7tU9vW1xY3zA5', 'ghp_'],
+    ['an email address', 'alice.private@example.com', 'alice.private'],
+  ])('redaction covers %s crossing the window end', async (_name, value, fragment) => {
+    const text = `{"score": 0.8, "q": "x\n${'y'.repeat(80)} ${value} tail"}`;
+    const judge: JudgeClient = {
+      create: async () => ({ content: [{ type: 'text', text }], stop_reason: 'end_turn' } as never),
+    };
+    const r = await judgeSignificance(judge, makeTranscript('edge'), MODEL);
+    expect(r.diagnostic).toContain('near "');
+    expect(r.diagnostic).not.toContain(fragment);
+  });
+
+  test.each([
+    // A clean gateway stop is 'end' (ChatResult.stopReason); only an unusual one is worth a clause.
+    ['a clean gateway stop adds no finish clause', 'not json', 'end', ['response 8 chars, stop_reason=end_turn, JSON error'], ['gateway finish', 'reasoning block']],
+    // parseLlmJson last tried the text without the reasoning block, so the error must point into the answer.
+    ['the error is located in the answer, not in the reasoning block', '<think>draft {"score": 0.1}</think>{"score": 0.8, "note": "bad\nline"}', 'end',
+      ['reasoning block stripped', 'at char 27 near'], ['draft']],
+  ])('diagnostic: %s', async (_name, text, gatewayStop, present, absent) => {
+    const judge: JudgeClient = {
+      create: async () => ({ content: [{ type: 'text', text }], stop_reason: 'end_turn', gateway_stop_reason: gatewayStop } as never),
+    };
+    const r = await judgeSignificance(judge, makeTranscript('diag2'), MODEL);
+    expect(r.unreliable).toBe('unparseable');
+    for (const p of present) expect(r.diagnostic).toContain(p);
+    for (const a of absent) expect(r.diagnostic).not.toContain(a);
   });
 });
 
