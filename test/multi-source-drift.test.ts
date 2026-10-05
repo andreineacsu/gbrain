@@ -17,13 +17,15 @@
  */
 
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
-import { mkdirSync, rmSync, writeFileSync } from 'fs';
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { execFileSync } from 'child_process';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { runSources } from '../src/commands/sources.ts';
 import { findMisroutedPages } from '../src/core/multi-source-drift.ts';
 import { writeSlugRootMode } from '../src/core/sync-anchor.ts';
+import { multiSourceDriftCheck } from '../src/commands/doctor/schema-pack-checks.ts';
 
 let engine: PGLiteEngine;
 const TMP_ROOTS: string[] = [];
@@ -173,7 +175,8 @@ describe('findMisroutedPages — heuristic correctness', () => {
     expect(result.sample[0].slug).toBe('topics/mdx-page');
   });
 
-  test('case 8 (#4712): a git-root-pinned source is skipped, not false-positived', async () => {
+  test('case 8 (#4712, #5862): a git-root-pinned source outside any git repository is skipped, and doctor says why', async () => {
+    // Not a git repository: the git-root prefix sync used cannot be derived.
     const root = makeTmpRoot('case8');
     seedFile(root, 'page.md');
 
@@ -194,6 +197,43 @@ describe('findMisroutedPages — heuristic correctness', () => {
     expect(result.count).toBe(0);
     expect(result.sample).toEqual([]);
     expect(result.git_root_skipped).toEqual(['src-case8']);
+    const check = multiSourceDriftCheck(result, 1, 'local');
+    expect(check).toMatchObject({ status: 'warn', details: { code: 'not_verified', verified: false } });
+    expect(check.message).toContain('git toplevel of local_path could not be resolved');
+    expect(check.message).not.toContain('#4712');
+  });
+
+  test('case 8b (#5862): a skipped git-root source keeps doctor at not verified when a sibling is checked clean', async () => {
+    const skippedRoot = makeTmpRoot('case8b-skipped');
+    seedFile(skippedRoot, 'page.md');
+    await runSources(engine, ['add', 'src-case8b-gr', '--no-federated']);
+    await engine.executeRaw(`UPDATE sources SET local_path = $1 WHERE id = $2`, [skippedRoot, 'src-case8b-gr']);
+    await writeSlugRootMode(engine, 'src-case8b-gr', 'git-root');
+    const cleanRoot = makeTmpRoot('case8b-clean');
+    seedFile(cleanRoot, 'topics/clean.md');
+    await runSources(engine, ['add', 'src-case8b-sr', '--no-federated']);
+    await engine.executeRaw(`UPDATE sources SET local_path = $1 WHERE id = $2`, [cleanRoot, 'src-case8b-sr']);
+
+    const result = await findMisroutedPages(engine, [
+      { id: 'src-case8b-gr', local_path: skippedRoot },
+      { id: 'src-case8b-sr', local_path: cleanRoot },
+    ]);
+    expect(result).toMatchObject({ count: 0, git_root_skipped: ['src-case8b-gr'], unreadable_sources: [] });
+    const check = multiSourceDriftCheck(result, 2, 'local');
+    expect(check).toMatchObject({ status: 'warn', details: { code: 'not_verified', verified: false } });
+    expect(check.message).toStartWith('No cross-source slug drift among checked sources.');
+    expect(check.message).toContain('src-case8b-gr');
+  });
+
+  test('case 8c (#5862): a git-root source whose local_path is missing reports root_unreadable, not a git-root skip', async () => {
+    await runSources(engine, ['add', 'src-case8c', '--no-federated']);
+    const missing = join(makeTmpRoot('case8c'), 'gone');
+    await engine.executeRaw(`UPDATE sources SET local_path = $1 WHERE id = $2`, [missing, 'src-case8c']);
+    await writeSlugRootMode(engine, 'src-case8c', 'git-root');
+
+    const result = await findMisroutedPages(engine, [{ id: 'src-case8c', local_path: missing }]);
+    expect(result.git_root_skipped).toEqual([]);
+    expect(result.unreadable_sources).toEqual([{ source_id: 'src-case8c', reason: 'root_unreadable', dirs: 1 }]);
   });
 
   test('case 9 (#4712): git-root skip does not mask real drift on a sibling source-root source', async () => {
@@ -220,4 +260,42 @@ describe('findMisroutedPages — heuristic correctness', () => {
     expect(result.sample[0]).toMatchObject({ slug: 'people/eve', intended_source: 'src-case9-sr' });
     expect(result.git_root_skipped).toEqual(['src-case9-gr']);
   });
+
+  // #5862: inside a git repository every pin is checkable. A 'git-root' pin
+  // means sync minted slugs from the git-root-relative path: no prefix when
+  // local_path is the repo root (what managed sync pins there), the subdir
+  // in slug spelling otherwise. Each row seeds a healthy page at the source,
+  // a misrouted one at default, and an unrelated default page at the
+  // local_path-relative slug that only the wrong slug shape would flag.
+  const GIT_REPO_CASES: Array<{ label: string; scope: string; pin: 'git-root' | 'source-root' | null; slugPrefix: string; viaSymlink?: boolean }> = [
+    { label: 'unpinned source at the repo root', scope: '', pin: null, slugPrefix: '' },
+    { label: 'git-root source at the repo root (empty prefix)', scope: '', pin: 'git-root', slugPrefix: '' },
+    { label: 'git-root source in a subdir (prefixed slugs)', scope: 'Team Notes', pin: 'git-root', slugPrefix: 'team-notes/' },
+    { label: 'git-root source whose local_path is a symlink into a subdir', scope: 'Team Notes', pin: 'git-root', slugPrefix: 'team-notes/', viaSymlink: true },
+    { label: 'source-root source in a subdir', scope: 'Team Notes', pin: 'source-root', slugPrefix: '' },
+  ];
+  for (const [i, c] of GIT_REPO_CASES.entries()) {
+    test(`case 10.${i} (#5862): ${c.label}: misroute detected, no false positive`, async () => {
+      const repo = makeTmpRoot(`case10-${i}`);
+      execFileSync('git', ['-C', repo, 'init', '-q'], { stdio: 'pipe' });
+      const root = c.scope ? join(repo, c.scope) : repo;
+      seedFile(root, 'people/alice.md');
+      seedFile(root, 'people/bob.md');
+      // Sync derives the prefix from the realpath, so a symlinked local_path must too.
+      const localPath = c.viaSymlink ? join(makeTmpRoot(`case10-${i}-link`), 'link') : root;
+      if (c.viaSymlink) symlinkSync(root, localPath);
+      const id = `src-case10-${i}`;
+      await runSources(engine, ['add', id, '--no-federated']);
+      await engine.executeRaw(`UPDATE sources SET local_path = $1 WHERE id = $2`, [localPath, id]);
+      if (c.pin) await writeSlugRootMode(engine, id, c.pin);
+      await engine.putPage(`${c.slugPrefix}people/alice`, { type: 'person', title: 'Alice', compiled_truth: '.' }, { sourceId: id });
+      await engine.putPage('people/alice', { type: 'person', title: 'Unrelated', compiled_truth: '.' });
+      await engine.putPage(`${c.slugPrefix}people/bob`, { type: 'person', title: 'Bob', compiled_truth: '.' });
+
+      const result = await findMisroutedPages(engine, [{ id, local_path: localPath }]);
+      expect(result.git_root_skipped).toEqual([]);
+      expect(result.count).toBe(1);
+      expect(result.sample).toEqual([{ slug: `${c.slugPrefix}people/bob`, intended_source: id, local_path: localPath }]);
+    });
+  }
 });

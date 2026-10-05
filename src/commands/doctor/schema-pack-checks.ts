@@ -208,18 +208,17 @@ export function multiSourceDriftAdvice(count: number, sampleStr: string): string
 }
 
 /**
- * #4712 — note appended when one or more sources were excluded from the
- * multi_source_drift walk because they're pinned to slug_root_mode='git-root'
- * (#4342). The check only derives local_path-relative ('source-root')
- * slugs; comparing a git-root-pinned source against that shape produced
- * false-positive drift (and dangerous delete advice naming an unrelated
- * default page). Skipped, not mismatched — this is disclosure of reduced
- * coverage, not a problem to fix.
+ * Note appended when one or more sources were excluded from the
+ * multi_source_drift walk: pinned to slug_root_mode='git-root' (#4342) with a
+ * local_path whose git toplevel could not be resolved, so the git-root prefix
+ * their slugs carry cannot be derived. Comparing them against
+ * local_path-relative slugs would produce false-positive drift (and delete
+ * advice naming an unrelated default page). Skipped, not mismatched.
  */
 export function multiSourceDriftGitRootSkipNote(skippedIds: string[]): string {
   return (
-    ` ${skippedIds.length} source(s) not checked (git-root-pinned, prefix-aware ` +
-    `matching not yet implemented — #4712): ${skippedIds.join(', ')}.`
+    ` ${skippedIds.length} source(s) not checked (pinned to git-root slugs, but the git toplevel ` +
+    `of local_path could not be resolved, so their slug prefix cannot be derived): ${skippedIds.join(', ')}.`
   );
 }
 
@@ -227,9 +226,9 @@ const DRIFT_DOCS = 'docs/guides/troubleshooting.md#not-verified-doctor-checks';
 
 /**
  * #5432: one multi_source_drift verdict for the local and remote doctor. A
- * truncated walk or an unreadable source root/subdirectory is "not
- * verified" (warn), never "no drift"; the walk bounds and unreadable sources
- * ride in details.
+ * truncated walk, an unreadable source root/subdirectory or a skipped
+ * git-root source is "not verified" (warn), never "no drift"; the walk
+ * bounds, unreadable and skipped sources ride in details.
  */
 export function multiSourceDriftCheck(
   result: MisroutedResult,
@@ -280,23 +279,21 @@ export function multiSourceDriftCheck(
       details: { ...details, code: 'not_verified', verified: false },
     };
   }
-  // #4712: if EVERY candidate source was skipped as git-root-pinned, no walk
-  // ran — 'ok' would misreport "verified clean" when nothing was checked.
-  const allSkipped = result.git_root_skipped.length > 0 && result.git_root_skipped.length >= candidateSources;
-  if (allSkipped) {
+  // A skipped source (git-root-pinned, git toplevel unresolvable) was not
+  // verified, so 'ok' would misreport "verified clean"; when EVERY candidate
+  // was skipped, no source was checked at all.
+  if (result.git_root_skipped.length > 0) {
+    const allSkipped = result.git_root_skipped.length >= candidateSources;
     return {
       name: 'multi_source_drift',
       status: 'warn',
-      message: `Multi-source drift check performed no verification${skipNote}`,
+      message: allSkipped
+        ? `Multi-source drift check performed no verification${skipNote}`
+        : `No cross-source slug drift among checked sources.${skipNote}`,
       details: { ...details, code: 'not_verified', verified: false },
     };
   }
-  return {
-    name: 'multi_source_drift',
-    status: 'ok',
-    message: skipNote ? `No cross-source slug drift detected among checked sources.${skipNote}` : 'No cross-source slug drift detected.',
-    details,
-  };
+  return { name: 'multi_source_drift', status: 'ok', message: 'No cross-source slug drift detected.', details };
 }
 
 /** #5432: the drift check itself failed (e.g. the sources query); report it instead of dropping the check. */
