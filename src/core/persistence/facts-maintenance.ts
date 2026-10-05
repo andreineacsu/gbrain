@@ -63,15 +63,22 @@ const ownerStatusFix = (sourceId: string): Action => readFix(`Shows source ${sou
 const embeddingsFix = (): Action => readFix('Reports the brain\'s embedding model, dimensions and vector columns, read-only.',
   { argv: ['gbrain', 'doctor', '--only', 'embeddings', '--json'] });
 
+/** The slug of a facts batch's completion request. */
+const MANAGED_FACTS_COMPLETE_SLUG = '__managed_facts_complete__';
+
 function managedFactRequestId(batchKey: string, slug: string): string {
   const hex = digest([batchKey, slug]);
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-8${hex.slice(13, 16)}-a${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
+function completionRequestIdFor(batchKey: string): string {
+  return managedFactRequestId(batchKey, MANAGED_FACTS_COMPLETE_SLUG);
+}
+
 async function validateManagedFactsCompletion(engine: BrainEngine, session: ManagedFactsSession, prior: WriteRequest): Promise<void> {
   await authorizeStoredRequest(engine, prior);
   const inputDigest = prior.intent?.inputDigest ?? prior.outcome?.input_digest;
-  if (prior.operation !== 'extract_facts' || prior.slug !== '__managed_facts_complete__'
+  if (prior.operation !== 'extract_facts' || prior.slug !== MANAGED_FACTS_COMPLETE_SLUG
     || prior.source_id !== session.authority.sourceId || prior.source_incarnation !== session.authority.sourceIncarnation
     || inputDigest !== undefined && inputDigest !== session.inputDigest) {
     throw opError('idempotency_conflict', 'This request ID already belongs to another operation or extraction input.',
@@ -224,7 +231,7 @@ export async function prepareManagedFactsSession(ctx: FactsBackstopCtx,
   const batchKey = digest(['managed-facts-v1', authority.principal, source.incarnation, seed]);
   const session: ManagedFactsSession = { authority, binding: writeThrough ? binding : null, config: ctx.operationContext?.config ?? ctx.config ?? { engine: engine.kind } as GBrainConfig,
     batchKey, inputDigest, origin, originalRequestId: ctx.persistenceRequestId ?? null,
-    completionRequestId: ctx.requestId ? requireUuid(ctx.requestId) : managedFactRequestId(batchKey, '__managed_facts_complete__') };
+    completionRequestId: ctx.requestId ? requireUuid(ctx.requestId) : completionRequestIdFor(batchKey) };
   const prior = await getWriteRequest(engine, authority.principal, session.completionRequestId);
   if (prior) await validateManagedFactsCompletion(engine, session, prior);
   return session;
@@ -287,7 +294,7 @@ async function admitManagedFactsBatch(engine: BrainEngine, session: ManagedFacts
     if (batch.embedded) await assertManagedFactsEmbedding(tx, session.config, batch.embedding, true);
     const children: string[] = [];
     const accepted: WriteRequest[] = [];
-    for (const input of [...inputs, { slug: '__managed_facts_complete__', pageId: null, intent: {
+    for (const input of [...inputs, { slug: MANAGED_FACTS_COMPLETE_SLUG, pageId: null, intent: {
       kind: 'managed_facts_complete', batchKey: batch.batchKey, inputDigest: session.inputDigest,
       origin: session.origin, originalRequestId: session.originalRequestId, children } as ManagedFactIntent }]) {
       if (abortSignal?.aborted) throw new DOMException('Fact extraction was aborted before admission.', 'AbortError');
