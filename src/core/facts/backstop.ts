@@ -136,6 +136,12 @@ export interface FactsBackstopCtx {
   sourceSlug?: string;
   /** #5888: when the source turn happened, for the capture-lane dedup window (default: now). */
   turnAt?: Date;
+  /**
+   * #6048: a caller without a request id (its batch replays by input digest)
+   * admits the retained facts of entity requests the canonical file check
+   * refused again, once those pages pass the check (persistence/facts-maintenance.ts).
+   */
+  retryClearedFileRefusals?: boolean;
 }
 
 /** Discriminated return shape based on FactsBackstopCtx.mode. */

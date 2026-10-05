@@ -255,6 +255,7 @@ jobs:
                 test/import-frontmatter-key-order-5158.test.ts
                 test/import-revision-concurrency.test.ts
                 test/managed-sweep-corpus-windows.test.ts
+                test/managed-sweep-file-refusal-retry.test.ts
                 test/managed-sync-bulk.test.ts
                 test/managed-sync-chunker-version.test.ts
                 test/managed-sync-group-completion.test.ts

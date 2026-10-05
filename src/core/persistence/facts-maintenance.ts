@@ -15,6 +15,9 @@ import { currentSubmissionAuthority } from '../minions/submission-authority.ts';
 import { authorizeStoredRequest, authorizeWrite, submissionAuthority } from './authority.ts';
 import { authorizePageVisibility } from './page-visibility.ts';
 import { initializeLocalPersistence } from './page-mutations.ts';
+import { prepareFileTarget } from './page-prepare.ts';
+import { loadActivePackForEngine } from '../schema-pack/engine-resolution.ts';
+import { resolveDefaultVisibility } from '../facts/visibility.ts';
 import { currentVerifiedLocalWriter, localHostId } from './identity.ts';
 import { getWorktreeBinding, managedPersistenceEnabled, probeWorktreeWriter, type WorktreeBinding } from './ownership.ts';
 import { authorizeFactsBackstop } from './effect-facts.ts';
@@ -52,7 +55,12 @@ export interface ManagedFactsSession {
   batchKey: string; inputDigest: string; origin: ManagedFactOrigin | null; originalRequestId: string | null;
   completionRequestId: string;
   embedding?: FactEmbeddingSignature | null;
+  /** #6048: the batch seed is the input digest and the caller retries file refusals whose page passes the file check again. */
+  retryFileRefusals?: true;
 }
+
+/** #6048: new attempts a batch gets for entity requests the canonical file check refused. */
+const FILE_REFUSAL_ATTEMPTS = 3;
 
 const receiptFix = (requestId: string): Action => readFix('Reads the fact request\'s durable receipt: its operation, state and outcome, read-only.',
   { argv: ['gbrain', 'write-request', '--', requestId], mcp: { tool: 'get_write_request', arguments: { request_id: requestId } } });
@@ -231,7 +239,8 @@ export async function prepareManagedFactsSession(ctx: FactsBackstopCtx,
   const batchKey = digest(['managed-facts-v1', authority.principal, source.incarnation, seed]);
   const session: ManagedFactsSession = { authority, binding: writeThrough ? binding : null, config: ctx.operationContext?.config ?? ctx.config ?? { engine: engine.kind } as GBrainConfig,
     batchKey, inputDigest, origin, originalRequestId: ctx.persistenceRequestId ?? null,
-    completionRequestId: ctx.requestId ? requireUuid(ctx.requestId) : completionRequestIdFor(batchKey) };
+    completionRequestId: ctx.requestId ? requireUuid(ctx.requestId) : completionRequestIdFor(batchKey),
+    ...(ctx.retryClearedFileRefusals && seed === inputDigest ? { retryFileRefusals: true as const } : {}) };
   const prior = await getWriteRequest(engine, authority.principal, session.completionRequestId);
   if (prior) await validateManagedFactsCompletion(engine, session, prior);
   return session;
@@ -281,7 +290,89 @@ async function acceptedManagedBatch(engine: BrainEngine, session: ManagedFactsSe
 
 export async function resumeManagedFacts(engine: BrainEngine, session: ManagedFactsSession): Promise<ManagedFactsResult | null> {
   const rows = await acceptedManagedBatch(engine, session, session.batchKey, session.completionRequestId);
-  return rows ? collectManagedFacts(engine, session, rows) : null;
+  if (!rows) return null;
+  return collectManagedFacts(engine, session, session.retryFileRefusals ? await retryClearedFileRefusals(engine, session, rows) : rows);
+}
+
+/**
+ * #6048: a caller whose batch seed is its input digest (the sweep) cannot give
+ * a refused extraction a new request id, so its stored terminal batch would
+ * replay the refusal on every run. When every entity request the batch did not
+ * commit was refused source_changed with its facts retained, and each of those
+ * pages passes the canonical file check now, the retained facts are admitted
+ * as the batch's next attempt; committed requests are kept, not admitted again.
+ * A page that still fails the check admits nothing, and a batch gets at most
+ * FILE_REFUSAL_ATTEMPTS new attempts. Returns the requests to collect: the kept
+ * ones and the last attempt's.
+ */
+async function retryClearedFileRefusals(engine: BrainEngine, session: ManagedFactsSession, rows: WriteRequest[]): Promise<WriteRequest[]> {
+  const kept: WriteRequest[] = [];
+  let batch = rows;
+  for (let attempt = 1; attempt <= FILE_REFUSAL_ATTEMPTS; attempt++) {
+    // Decided on the stored states: a request still publishing ends the walk,
+    // and collectManagedFacts waits for it once, as it does without a retry.
+    if (!batch.every(isTerminal)) break;
+    const entities = batch.filter(row => (row.intent?.kind ?? row.outcome?.kind) === 'managed_facts_entity');
+    const refused = entities.filter(row => row.state !== 'committed');
+    if (!refused.length || !refused.every(isRetainedFileRefusal)) break;
+    for (const row of refused) await settleManagedFact(engine, session, row);
+    const batchKey = digest([session.batchKey, 'file-refusal-attempt', attempt]);
+    const completionRequestId = completionRequestIdFor(batchKey);
+    const next = await acceptedManagedBatch(engine, session, batchKey, completionRequestId)
+      ?? (await canonicalFilesPass(engine, session, refused.map(row => row.slug))
+        ? await admitFileRefusalAttempt(engine, session, batchKey, completionRequestId, refused) : null);
+    if (!next) break;
+    kept.push(...entities.filter(row => row.state === 'committed'));
+    batch = next;
+  }
+  return [...kept, ...batch];
+}
+
+function isRetainedFileRefusal(row: WriteRequest): boolean {
+  return isTerminal(row) && row.error_code === 'source_changed' && !!(row.intent as ManagedFactIntent | null)?.facts?.length;
+}
+
+/** #6048: the file check publication runs before it writes a page, read-only; a refusal means the page still fails it. */
+async function canonicalFilesPass(engine: BrainEngine, session: ManagedFactsSession, slugs: string[]): Promise<boolean> {
+  const { sourceId, remote } = session.authority;
+  // The same pack fallback as preparePageMutation, so the check parses the file as publication does.
+  const activePack = (await loadActivePackForEngine(engine, { remote, sourceId }).catch(() => null))?.manifest;
+  for (const slug of new Set(slugs)) {
+    const snapshot = await engine.readPageSnapshot(slug, { sourceId });
+    if (!snapshot) return false;
+    try {
+      await prepareFileTarget(engine, { source_id: sourceId, worktree_id: session.binding?.worktree_id ?? null, slug }, snapshot, null, undefined, { activePack, remote });
+    } catch (error) {
+      // Still refused: the stored outcome stands, and the next run checks again.
+      if (error instanceof OperationError) return false;
+      throw error;
+    }
+  }
+  return true;
+}
+
+/**
+ * #6048: the refused requests' retained facts, admitted as the batch's next
+ * attempt against each page's current revision, never wider than the brain's
+ * current default visibility.
+ */
+async function admitFileRefusalAttempt(engine: BrainEngine, session: ManagedFactsSession, batchKey: string, completionRequestId: string,
+  refused: WriteRequest[]): Promise<WriteRequest[]> {
+  const narrow = await resolveDefaultVisibility(engine) === 'private';
+  const inputs: ManagedFactsBatchInput[] = [];
+  for (const row of refused) {
+    await authorizeWrite(engine, session.authority, 'extract_facts', row.slug);
+    const snapshot = await engine.readPageSnapshot(row.slug, { sourceId: session.authority.sourceId, includeDeleted: true });
+    const prior = row.intent as ManagedFactIntent;
+    const intent: ManagedFactIntent = { ...prior, batchKey,
+      facts: narrow ? prior.facts!.map(fact => ({ ...fact, visibility: 'private' as const })) : prior.facts };
+    delete intent.expected_revision;
+    if (snapshot) intent.expected_revision = snapshot.revision;
+    inputs.push({ slug: row.slug, pageId: snapshot?.page.id ?? null, intent });
+  }
+  const embedded = inputs.some(input => input.intent.facts!.some(fact => fact.embedding !== null));
+  return admitManagedFactsBatch(engine, session, { batchKey, completionRequestId, embedded,
+    embedding: (refused[0].intent as ManagedFactIntent).embedding }, inputs);
 }
 
 interface ManagedFactsBatchInput { slug: string; pageId: number | null; intent: ManagedFactIntent }
