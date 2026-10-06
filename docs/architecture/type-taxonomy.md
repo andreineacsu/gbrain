@@ -68,6 +68,10 @@ via mapping_rules (codex D9 security hardening).
 
 ## Migration flow
 
+Apply runs on a brain without managed persistence. A managed brain gets
+the preview only: the apply job is refused with
+`writer_coordinator_required` before any page changes.
+
 ```
 gbrain onboard --check                         # surfaces pack_upgrade_available
         ↓

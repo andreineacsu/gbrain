@@ -32,6 +32,8 @@ v0.41.22 ships **gbrain-base-v2** — a 15-type DRY/MECE taxonomy (14 canonical 
 
 This skill is the playbook for that migration.
 
+Apply runs on a brain without managed persistence. On a managed brain only the preview works: `gbrain doctor` reports `pack_upgrade_available` as information (not a warning), `gbrain onboard --check` lists no `unify-types` step, and an apply job is refused with `writer_coordinator_required` before any page changes. A coordinated retype for managed brains does not exist yet.
+
 ## brain_first: exempt
 
 This skill is ABOUT the brain's shape — it can't depend on the brain it's reshaping. No `gbrain search` lookup first; jump straight to onboard.
@@ -65,7 +67,7 @@ Then run onboard to see what would change:
 gbrain onboard --check
 ```
 
-Look for the `pack_upgrade_available` finding. If it's `ok`, there's no successor declared for the active pack — done.
+`gbrain onboard --check` prints remediation steps only: a pending upgrade appears as a manual `unify-types` step. When no such step is listed, `gbrain doctor` says why in its `pack_upgrade_available` row: either the active pack has no successor (done), or the brain is managed and the row is `[INFO]`, naming the successor. On a managed brain run Phase 2 for the preview, then stop, because Phase 3 is refused there.
 
 ### Phase 2: Preview
 
@@ -84,6 +86,8 @@ This invokes the `unify-types` handler in dry-run mode and prints:
 Review the output. If the proposed changes look wrong, **don't** proceed — file an issue or write a custom pack with adjusted mapping_rules.
 
 ### Phase 3: Apply
+
+Apply needs a brain without managed persistence. On a managed brain the job fails on its first attempt with `writer_coordinator_required`, retypes no page and leaves the active pack unflipped.
 
 The handler is PROTECTED (manual_only) — autopilot will never auto-fire it. Submit explicitly:
 
@@ -232,6 +236,7 @@ Follow the [agent operator protocol](../../docs/protocol/AGENT_OPERATOR_v1.md) f
 
 - A second unify submission is rejected because the `gbrain-unify` lock is held ("already in progress"): wait for the running job (`gbrain jobs get <id>`); do not resubmit.
 - A phase fails before `active_pack_flipped`: the pack did not change; resume from the checkpoint rather than restarting from scratch.
+- The apply job dies with `writer_coordinator_required`: the brain is managed, where the retype is not supported yet. Nothing changed. Do not resubmit; tell the user the preview is the only step available on this brain.
 - The run reports a cost line: retyping can call a model, so confirm the budget with the user before submitting on a large brain.
 
 ## Anti-Patterns

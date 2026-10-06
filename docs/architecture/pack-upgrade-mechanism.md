@@ -46,6 +46,9 @@ that tuple lights up the `pack_upgrade_available` onboard check.
 │    4. If successors.length > 0, emit OnboardCheckResult        │
 │       with RemediationStep targeting `unify-types` handler    │
 │       + protected: true (manual_only via render allowlist)     │
+│    5. On a managed brain the handler refuses the apply, so     │
+│       the check reports the successor as information and       │
+│       emits no step                                            │
 └──────────────────────────┬─────────────────────────────────────┘
                            ↓
 ┌────────────────────────────────────────────────────────────────┐
@@ -146,6 +149,14 @@ true` + `job: 'unify-types'`. `toOnboardRecommendation` in
 `src/core/onboard/render.ts` maps this to `manual_only` via the
 `MANUAL_ONLY_PROTECTED_JOBS` allowlist (which also contains
 `extract-takes-from-pages`).
+
+On a managed brain the check emits no step. `unify-types` apply is
+refused there with `writer_coordinator_required` (its retype runs
+outside the persistence coordinator), so the check reports the
+successor as `ok` + `severity: 'info'` and `gbrain onboard --check
+--explain` prints the dry-run preview without the apply command. The
+check and the handler ask the same `unifyTypesApplySupported`
+predicate.
 
 Rationale: pack upgrades change the brain's taxonomy. Taxonomy is a
 user judgment call — not autopilot's call. Even with `--auto-with-

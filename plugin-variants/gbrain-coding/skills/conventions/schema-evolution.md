@@ -126,7 +126,9 @@ gbrain-base@1.x — collapses 94 noisy types to 15 canonical via
 declarative mapping_rules. Run via `gbrain onboard --check --explain`
 (preview) → `gbrain jobs submit unify-types --params
 '{"target_pack":"gbrain-base-v2","apply":true}'` (apply — `apply`
-defaults to false, so a bare submit is a dry run). See
+defaults to false, so a bare submit is a dry run). On a managed brain
+the check reports the successor as information and only the preview
+runs: the apply is refused there. See
 `skills/schema-unify/SKILL.md` for the full playbook.
 
 Authoring a successor pack: declare
