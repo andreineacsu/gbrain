@@ -29,7 +29,7 @@ import type { PhaseResult, PhaseError } from '../cycle.ts';
 import { DEFAULT_PRIVATE_QUEUE_LEASE_MS, MinionQueue } from '../minions/queue.ts';
 import { isQueueQuotaExceededError } from '../minions/admission.ts';
 import { waitForCompletionRenewing, TimeoutError } from '../minions/wait-for-completion.ts';
-import type { MinionJobInput, MinionJobStatus, SubagentHandlerData } from '../minions/types.ts';
+import type { MinionJob, MinionJobInput, MinionJobStatus, SubagentHandlerData } from '../minions/types.ts';
 import { serializeMarkdown } from '../markdown.ts';
 import { truncateUtf8 } from '../text-safe.ts';
 import type { Page, PageType } from '../types.ts';
@@ -48,6 +48,10 @@ import { normalizeModelId } from '../model-id.ts';
 import { throwIfAborted } from '../abort-check.ts';
 import { resolveCycleDate } from './cycle-date.ts';
 import { dreamBreakerRefusal, loadDreamBreaker } from './dream-breaker.ts';
+import {
+  budgetCoversLastRun, LAST_RUN_RECHECK_MS, lastRunNeed, newReflectionCap, parseLastRun, recordLastRun,
+  selectReflectionBatch, type PatternsLastRun, type ReflectionBatch,
+} from './patterns-run-budget.ts';
 
 export interface PatternsPhaseOpts {
   brainDir: string;
@@ -157,7 +161,8 @@ export async function runPhasePatterns(
 
     const [source] = await managedPersistenceEnabled(engine)
       ? await engine.executeRaw<{ incarnation: string }>('SELECT incarnation FROM sources WHERE id=$1', [opts.sourceId ?? 'default']) : [];
-    const evidenceKey = source ? `${LAST_EVIDENCE_KEY}.${opts.sourceId ?? 'default'}.${source.incarnation}` : LAST_EVIDENCE_KEY;
+    const stateKey = (base: string) => source ? `${base}.${opts.sourceId ?? 'default'}.${source.incarnation}` : base;
+    const evidenceKey = stateKey(LAST_EVIDENCE_KEY);
 
     // Gather reflections within lookback window.
     const reflections = await gatherReflections(engine, config.lookbackDays, config.sourceSlugPrefix, opts.sourceId ?? 'default');
@@ -176,20 +181,20 @@ export async function runPhasePatterns(
     // the high-water mark). Absent/unparseable stamp fails open, same as
     // synthesize's checkCooldown; `--once` forces past it.
     const newestEvidenceMs = reflections[0].updatedAt.getTime();
-    if (!opts.once) {
-      const stampMs = Date.parse((await engine.getConfig(evidenceKey)) ?? '');
-      if (Number.isFinite(stampMs) && newestEvidenceMs <= stampMs) {
-        return skipped(
-          'no_new_evidence',
-          `${reflections.length} reflections in window, none newer than last completed run ` +
-          `(${new Date(stampMs).toISOString()}); pass --once to force`,
-        );
-      }
+    const stampMs = Date.parse((await engine.getConfig(evidenceKey)) ?? '');
+    if (!opts.once && Number.isFinite(stampMs) && newestEvidenceMs <= stampMs) {
+      return skipped(
+        'no_new_evidence',
+        `${reflections.length} reflections in window, none newer than last completed run ` +
+        `(${new Date(stampMs).toISOString()}); pass --once to force`,
+      );
     }
+    // #6177: the child gets in full only what no completed run has weighed yet (patterns-run-budget.ts).
+    const { batch, lastRun } = await planReflectionBatch(engine, config, reflections, stampMs, stateKey(LAST_RUN_KEY), opts.sourceId ?? 'default');
 
     if (opts.dryRun) {
       return ok(`dry-run: would detect patterns over ${reflections.length} reflections`, {
-        reflections_considered: reflections.length,
+        reflections_considered: reflections.length, new_reflections: batch.fresh.length,
         patterns_written: 0,
         dryRun: true,
       });
@@ -232,14 +237,9 @@ export async function runPhasePatterns(
     // the fixed config default. Checked after the cheap gates (disabled /
     // insufficient_evidence / no_provider) so a skip for budget reasons
     // only fires when the phase would otherwise have submitted.
-    const budgets = clampSubagentBudgets(config, opts.deadlineAtMs, Date.now());
-    if (budgets === null) {
-      return skipped(
-        'insufficient_cycle_budget',
-        `remaining cycle budget under ${Math.round(MIN_PATTERNS_SUBAGENT_BUDGET_MS / 1000)}s ` +
-        `(reserve ${Math.round(CYCLE_DEADLINE_RESERVE_MS / 1000)}s); next cycle retries with a fresh budget`,
-      );
-    }
+    const admitted = admitChildBudgets(config, opts.deadlineAtMs, lastRun);
+    if ('skip' in admitted) return admitted.skip;
+    const { budgets } = admitted;
 
     const queue = new MinionQueue(engine);
     // #2050: children drain inline on BOTH engines (see runSubagentsInline),
@@ -258,7 +258,7 @@ export async function runPhasePatterns(
     );
     const cycleDate = opts.cycleDate ?? await resolveCycleDate(engine);
     const data: SubagentHandlerData = {
-      prompt: buildPatternsPrompt(reflections, config.minEvidence, config.sourceSlugPrefix, config.outputSlugPrefix, cycleDate),
+      prompt: buildPatternsPrompt(batch, config.minEvidence, config.sourceSlugPrefix, config.outputSlugPrefix, cycleDate),
       model: config.model,
       max_turns: 30,
       // #4217/CDX-12: a patterns child whose every put_page failed must
@@ -276,7 +276,8 @@ export async function runPhasePatterns(
     };
     const submitOpts: Partial<MinionJobInput> = {
       ...(maintenance ? { idempotency_key: `dream:patterns:${digest({ source: maintenance.writer.sourceIncarnation,
-        authority: maintenance.writer, reflections: withoutSeats(reflections), model: config.model, output: config.outputSlugPrefix })}` } : {}),
+        authority: maintenance.writer, reflections: withoutSeats(reflections), fresh: batch.fresh.map(r => r.slug),
+        model: config.model, output: config.outputSlugPrefix })}` } : {}),
       max_stalled: 3,
       timeout_ms: budgets.timeoutMs,
       queue: childQueueName,
@@ -319,8 +320,9 @@ export async function runPhasePatterns(
     );
 
     let outcome: MinionJobStatus | 'timeout';
+    let child: MinionJob | null = null;
     try {
-      const final = await waitForCompletionRenewing(queue, job.id, {
+      child = await waitForCompletionRenewing(queue, job.id, {
         timeoutMs: budgets.waitTimeoutMs,
         pollMs: 5 * 1000,
         renew: renewPrivateQueueLease,
@@ -329,7 +331,7 @@ export async function runPhasePatterns(
       // #4077: on abort the wait returns its last snapshot instead of
       // throwing — unwind before treating it as an outcome.
       throwIfAborted(opts.signal, '[dream] patterns completion wait');
-      outcome = final.status;
+      outcome = child.status;
     } catch (e) {
       if (e instanceof TimeoutError) {
         outcome = 'timeout';
@@ -344,6 +346,7 @@ export async function runPhasePatterns(
         throw e;
       }
     }
+    await recordLastRun(engine, stateKey(LAST_RUN_KEY), child, batch.fresh.length);
 
     if (opts.yieldDuringPhase) {
       try { await opts.yieldDuringPhase(); } catch { /* best-effort */ }
@@ -361,12 +364,12 @@ export async function runPhasePatterns(
     throwIfAborted(opts.signal, '[dream] patterns output');
     const writtenRefs = await collectChildPutPageSlugs(engine, [job.id], cycleSourceId);
 
-    const quoteVerify = await stampPatternOutputs(engine, maintenance, writtenRefs, reflections, config, cycleSourceId, cycleDate, opts.signal);
+    const quoteVerify = await stampPatternOutputs(engine, maintenance, writtenRefs, batch.evidence, config, cycleSourceId, cycleDate, opts.signal);
     const reverseWriteCount = maintenance ? await verifyMaintenanceOutputs(engine, maintenance, writtenRefs)
       : await reverseWriteRefs(engine, opts.brainDir, writtenRefs, cycleSourceId, opts.signal);
 
     const details = {
-      reflections_considered: reflections.length,
+      reflections_considered: reflections.length, new_reflections: batch.fresh.length,
       patterns_written: writtenRefs.length, ...(quoteVerify ? { quote_verify: quoteVerify } : {}),
       reverse_write_count: reverseWriteCount,
       child_outcome: outcome,
@@ -409,8 +412,9 @@ export async function runPhasePatterns(
     // child — fail/warn/timeout above must retry next tick. A reflection
     // edited between gather and here has updated_at > stamp, so the next run
     // still fires. Zero writes stamps too: the model saw this evidence and
-    // named nothing; re-running it is exactly the spend bug.
-    await engine.setConfig(evidenceKey, new Date(newestEvidenceMs).toISOString());
+    // named nothing; re-running it is exactly the spend bug. #6177: only what
+    // this run weighed (selectReflectionBatch), so a backlog's rest stays new.
+    await engine.setConfig(evidenceKey, new Date(batch.newestMs).toISOString());
 
     return ok(`${writtenRefs.length} pattern page(s) written/updated (${outcome})`, details);
   } catch (e) {
@@ -437,6 +441,50 @@ export async function runPhasePatterns(
     }
     void start;
   }
+}
+
+// ── Cycle budget ─────────────────────────────────────────────────────
+
+/** Where the skip summary sends an operator whose runs outgrow the cycle budget. */
+const RUN_BUDGET_GUIDE = 'docs/guides/troubleshooting.md#dream-patterns-runs-outgrow-the-cycle-budget';
+
+/** Read the last run and the oldest unweighed reflections, and pick this run's batch. */
+async function planReflectionBatch(engine: BrainEngine, config: PatternsConfig, window: ReflectionRef[], stampMs: number,
+  lastRunKey: string, sourceId: string): Promise<{ batch: ReflectionBatch; lastRun: PatternsLastRun | null }> {
+  const lastRun = parseLastRun(await engine.getConfig(lastRunKey));
+  const cap = newReflectionCap(config.maxNewReflections, lastRun);
+  // Twice the cap leaves room for reflections sharing the boundary timestamp.
+  const unweighed = await gatherReflections(engine, config.lookbackDays, config.sourceSlugPrefix, sourceId, { stampMs, limit: 2 * cap });
+  return { batch: selectReflectionBatch(window, unweighed, stampMs, cap), lastRun };
+}
+
+/**
+ * Clamp the child budgets to the cycle and admit the submission only when
+ * they cover the last run. Direct runs (no deadline) take the configured
+ * budgets unchecked; the run time they measure feeds the next cycle's check.
+ */
+function admitChildBudgets(config: PatternsConfig, deadlineAtMs: number | null | undefined, lastRun: PatternsLastRun | null):
+  { budgets: { timeoutMs: number; waitTimeoutMs: number } } | { skip: PhaseResult } {
+  const now = Date.now();
+  const budgets = clampSubagentBudgets(config, deadlineAtMs, now);
+  if (budgets === null) {
+    return { skip: skipped(
+      'insufficient_cycle_budget',
+      `remaining cycle budget under ${Math.round(MIN_PATTERNS_SUBAGENT_BUDGET_MS / 1000)}s ` +
+      `(reserve ${Math.round(CYCLE_DEADLINE_RESERVE_MS / 1000)}s); next cycle retries with a fresh budget`,
+    ) };
+  }
+  if (deadlineAtMs != null && lastRun && !budgetCoversLastRun(budgets.timeoutMs, lastRun, now)) {
+    const limitedBy = budgets.timeoutMs < config.subagentTimeoutMs ? 'the time left in this job' : 'dream.patterns.subagent_timeout_ms';
+    return { skip: skipped(
+      'insufficient_cycle_budget',
+      `child budget ${Math.round(budgets.timeoutMs / 1000)}s (limited by ${limitedBy}) does not cover ${lastRunNeed(lastRun)}; ` +
+      `a later cycle retries, and after ${LAST_RUN_RECHECK_MS / 3_600_000}h the record no longer holds it back. ` +
+      `To give runs this long room, see ${RUN_BUDGET_GUIDE}, or run gbrain dream --phase patterns`,
+      { budget_ms: budgets.timeoutMs, last_run_ms: lastRun.ms, last_run_timed_out: lastRun.timed_out },
+    ) };
+  }
+  return { budgets };
 }
 
 // ── Config ────────────────────────────────────────────────────────────
@@ -467,10 +515,14 @@ interface PatternsConfig {
   subagentTimeoutMs: number;
   /** #1594-family: waitForCompletion timeout, config `dream.patterns.subagent_wait_timeout_ms`. */
   subagentWaitTimeoutMs: number;
+  /** New reflections one run weighs in full, config `dream.patterns.max_new_reflections`. */
+  maxNewReflections: number;
 }
 
 const DEFAULT_PATTERNS_SUBAGENT_TIMEOUT_MS = 30 * 60 * 1000;
 const DEFAULT_PATTERNS_SUBAGENT_WAIT_TIMEOUT_MS = 35 * 60 * 1000;
+/** Bounds a backlog run (first run, or after failed runs); a steady hourly run sees a few new reflections. */
+const DEFAULT_PATTERNS_MAX_NEW_REFLECTIONS = 25;
 
 async function getNumberConfig(engine: BrainEngine, key: string, fallback: number): Promise<number> {
   const raw = await engine.getConfig(key);
@@ -497,6 +549,7 @@ async function loadPatternsConfig(engine: BrainEngine): Promise<PatternsConfig> 
   const enabled = enabledStr === null ? true : enabledStr === 'true';
   const lookbackStr = await engine.getConfig('dream.patterns.lookback_days');
   const minEvidenceStr = await engine.getConfig('dream.patterns.min_evidence');
+  const maxNewStr = await engine.getConfig('dream.patterns.max_new_reflections');
   // v0.28: unified model resolution
   const { resolveModel } = await import('../model-config.ts');
   const model = await resolveModel(engine, {
@@ -522,6 +575,9 @@ async function loadPatternsConfig(engine: BrainEngine): Promise<PatternsConfig> 
     subagentWaitTimeoutMs: await getNumberConfig(
       engine, 'dream.patterns.subagent_wait_timeout_ms', DEFAULT_PATTERNS_SUBAGENT_WAIT_TIMEOUT_MS,
     ),
+    maxNewReflections: maxNewStr
+      ? Math.max(1, parseInt(maxNewStr, 10) || DEFAULT_PATTERNS_MAX_NEW_REFLECTIONS)
+      : DEFAULT_PATTERNS_MAX_NEW_REFLECTIONS,
   };
 }
 
@@ -531,6 +587,8 @@ async function loadPatternsConfig(engine: BrainEngine): Promise<PatternsConfig> 
  *  reflection `updated_at` the last completed run consumed. Same class as
  *  `dream.synthesize.last_completion_ts`; `dream.` is already a known prefix. */
 const LAST_EVIDENCE_KEY = 'dream.patterns.last_evidence_ts';
+/** State row (not a user knob): `PatternsLastRun` JSON, input to the next run's cap and cycle budget check. */
+const LAST_RUN_KEY = 'dream.patterns.last_run';
 
 export interface ReflectionRef {
   slug: string;
@@ -553,11 +611,17 @@ function sharedSeat(reflections: ReflectionRef[]): string | undefined {
   return seats.size === 1 ? (reflections[0]?.seat ?? undefined) : undefined;
 }
 
+/**
+ * The reflections within the lookback window, newest first: the newest 100, or
+ * with `unweighed` the oldest `limit` newer than the evidence watermark
+ * (`stampMs`, NaN for none), which may lie past those 100.
+ */
 async function gatherReflections(
   engine: BrainEngine,
   lookbackDays: number,
   sourceSlugPrefix = 'wiki/personal/reflections',
   sourceId = 'default',
+  unweighed?: { stampMs: number; limit: number },
 ): Promise<ReflectionRef[]> {
   const since = new Date(Date.now() - lookbackDays * 24 * 60 * 60 * 1000).toISOString();
   // Reflections live under the configured source slug prefix (bound as a
@@ -570,11 +634,13 @@ async function gatherReflections(
       WHERE slug LIKE $2
         AND source_id = $3 AND deleted_at IS NULL AND COALESCE(frontmatter->>'visibility','') <> 'private'
         AND updated_at >= $1::timestamptz
-      ORDER BY updated_at DESC
-      LIMIT 100`,
-    [since, `${sourceSlugPrefix}/%`, sourceId],
+      ${unweighed ? 'AND updated_at > $4::timestamptz ORDER BY updated_at ASC LIMIT $5' : 'ORDER BY updated_at DESC LIMIT 100'}`,
+    unweighed
+      ? [since, `${sourceSlugPrefix}/%`, sourceId,
+        Number.isFinite(unweighed.stampMs) ? new Date(unweighed.stampMs).toISOString() : '-infinity', unweighed.limit]
+      : [since, `${sourceSlugPrefix}/%`, sourceId],
   );
-  return rows.map(r => ({
+  const refs = rows.map(r => ({
     slug: r.slug,
     title: r.title ?? r.slug,
     // Both engines hand timestamptz back as Date; wrap so a string-returning
@@ -587,20 +653,27 @@ async function gatherReflections(
     excerpt: truncateUtf8(r.compiled_truth ?? '', 600),
     seat: r.seat ?? null,
   }));
+  // The database compares microseconds; the watermark holds milliseconds, so
+  // the reflection that set it can come back. Keep the millisecond reading.
+  return unweighed ? refs.filter(r => !(r.updatedAt.getTime() <= unweighed.stampMs)).reverse() : refs;
 }
 
 // ── Prompt ────────────────────────────────────────────────────────────
 
 function buildPatternsPrompt(
-  reflections: ReflectionRef[],
+  batch: ReflectionBatch,
   minEvidence: number,
   sourceSlugPrefix = 'wiki/personal/reflections',
   outputSlugPrefix = 'wiki/personal/patterns',
   today: string,
 ): string {
-  const corpus = reflections
+  const corpus = batch.fresh
     .map((r, i) => `### ${i + 1}. [[${r.slug}]] — ${r.title}\n${r.excerpt}`)
     .join('\n\n---\n\n');
+  const earlier = batch.earlier.length === 0 ? '' : `
+
+EARLIER REFLECTIONS (weighed by previous runs)
+${batch.earlier.map(r => `- [[${r.slug}]]: ${r.title}`).join('\n')}`;
 
   return `You are surfacing recurring themes across the user's recent reflections.
 
@@ -608,6 +681,7 @@ OUTPUT POLICY
 - Only name a pattern if it appears in at least ${minEvidence} DISTINCT reflections.
 - Each pattern page MUST cite the reflections that constitute its evidence (use [[${sourceSlugPrefix}/...]] wikilinks).
 - Use \`search\` to check whether a similar pattern page already exists; if yes, update it (use the same slug). If no, create a new one.
+- Work from the NEW REFLECTIONS: add each one to the pattern pages it supports; a new pattern needs at least one new reflection among its evidence. Previous runs already weighed the EARLIER REFLECTIONS, so the pattern pages cite them where they fit; they are listed by title only, so read one with \`get_page\` before you cite it as evidence.
 - Pattern slug format: \`${outputSlugPrefix}/<topic-slug>\` (lowercase alphanumeric + hyphens; no underscores, no extension, no date).
 - A "pattern" is a recurring theme, anxiety, decision pattern, relationship dynamic, or self-knowledge motif. NOT a single insight. NOT a list of unrelated topics.
 
@@ -618,10 +692,10 @@ DO NOT WRITE
 
 CONTEXT
 - Today: ${today}
-- Reflections in scope: ${reflections.length}
+- New reflections: ${batch.fresh.length}; earlier reflections listed: ${batch.earlier.length}
 
-REFLECTIONS
-${corpus}
+NEW REFLECTIONS
+${corpus}${earlier}
 
 When done, briefly list the pattern slugs you wrote/updated in your final message.`;
 }
@@ -802,13 +876,13 @@ function ok(summary: string, details: Record<string, unknown> = {}): PhaseResult
   return { phase: 'patterns', status: 'ok', duration_ms: 0, summary, details };
 }
 
-function skipped(reason: string, summary: string): PhaseResult {
+function skipped(reason: string, summary: string, extra: Record<string, unknown> = {}): PhaseResult {
   return {
     phase: 'patterns',
     status: 'skipped',
     duration_ms: 0,
     summary,
-    details: { reason },
+    details: { reason, ...extra },
   };
 }
 

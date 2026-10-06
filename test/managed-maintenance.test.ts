@@ -605,3 +605,43 @@ test('managed patterns scopes evidence and publishes through the real admitted s
     } finally { __setChatTransportForTests(null); }
   });
 }, 90_000);
+
+test('#6177: managed patterns drains a capped backlog through separate children (the key digests the batch)', async () => {
+  await fixture(async (engine, sourceId, root) => {
+    for (let i = 0; i < 3; i++) await seed(engine, sourceId, `wiki/personal/reflections/backlog-${i}`);
+    // Distinct, ordered update times, so the cap splits the backlog the same way on every run.
+    for (let i = 0; i < 3; i++) {
+      await engine.executeRaw("UPDATE pages SET updated_at = now() - ($3::int * interval '1 minute') WHERE source_id = $1 AND slug = $2",
+        [sourceId, `wiki/personal/reflections/backlog-${i}`, 30 - i]);
+    }
+    await engine.setConfig('dream.patterns.enabled', 'true');
+    await engine.setConfig('dream.patterns.max_new_reflections', '2');
+    await engine.setConfig('models.dream.patterns', 'anthropic:claude-sonnet-4-6');
+    await engine.setConfig('agent.use_gateway_loop', 'true');
+    await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+    let calls = 0;
+    // Each child writes a new pattern page, then finishes: two model calls per child.
+    __setChatTransportForTests(async opts => {
+      calls++;
+      const write = calls % 2 === 1;
+      return { text: write ? '' : 'Saved the pattern.', blocks: write ? [{ type: 'tool-call', toolCallId: `backlog-write-${calls}`, toolName: 'brain_put_page', input: {
+        slug: `wiki/personal/patterns/backlog-${calls}`, content: `---\ntitle: Backlog pattern\ntype: note\n---\nA recurring theme, run ${calls}, in [[wiki/personal/reflections/backlog-0]].`,
+      } }] : [{ type: 'text', text: 'Saved the pattern.' }], stopReason: write ? 'tool_calls' : 'end',
+      usage: { input_tokens: 100, output_tokens: 100, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      model: opts.model!, providerId: 'anthropic' };
+    });
+    try {
+      await withEnv({ ANTHROPIC_API_KEY: 'sk-test-maintenance' }, async () => {
+        const first = await runPhasePatterns(engine, { brainDir: root, sourceId, dryRun: false });
+        expect(first).toMatchObject({ status: 'ok', details: { new_reflections: 2, child_outcome: 'completed' } });
+        const second = await runPhasePatterns(engine, { brainDir: root, sourceId, dryRun: false });
+        expect(second).toMatchObject({ status: 'ok', details: { new_reflections: 1, child_outcome: 'completed' } });
+        expect(second.details.job_id).not.toBe(first.details.job_id);
+        expect(calls).toBe(4);
+      });
+    } finally {
+      __setChatTransportForTests(null);
+      await engine.setConfig('dream.patterns.max_new_reflections', '');
+    }
+  });
+}, 90_000);

@@ -156,14 +156,20 @@ export function makeAutopilotGlobalMaintenanceHandler(engine: BrainEngine): Mini
       reports.push(report);
       progress.running_phase = undefined;
       progress.running_job = undefined;
-      if (report.status === 'skipped' || report.reason === 'aborted' || report.reason === 'lock_stolen') {
+      // #6177: a phase that found too little of this job's budget left runs
+      // first in the next job, with the whole budget. As the first phase of a
+      // job it had that already, so the pass moves on instead of looping.
+      const shortOfBudget = i > start && report.phases.some((result) => result.phase === phase
+        && result.status === 'skipped' && result.details.reason === 'insufficient_cycle_budget');
+      if (shortOfBudget || report.status === 'skipped' || report.reason === 'aborted' || report.reason === 'lock_stolen') {
         // A phase cut off by the job deadline would be cut off again next run.
         if (report.reason === 'aborted' && deadline !== null && Date.now() >= phaseDeadline!) {
           recordTimeout(phase);
           progress.pass_failed = true;
         }
+        if (shortOfBudget) ran.push(...report.phases);
         deferred = phases.slice(i);
-        stopReason = report.reason ?? report.status;
+        stopReason = shortOfBudget ? 'deadline' : report.reason ?? report.status;
         progress.next_phase = phase;
         break;
       }

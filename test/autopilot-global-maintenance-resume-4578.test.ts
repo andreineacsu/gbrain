@@ -73,6 +73,30 @@ describe('autopilot-global-maintenance resumes across jobs (#4578)', () => {
     expect(progress.running_phase).toBeUndefined();
   }, 60_000);
 
+  test('a phase short of budget mid-job runs first in the next job; short again there, the pass moves on (#6177)', async () => {
+    for (let i = 0; i < 3; i++) {
+      await engine.executeRaw(`INSERT INTO pages (slug, type, title, compiled_truth) VALUES ($1, 'note', $2, $3)`,
+        [`wiki/personal/reflections/2026-10-06-r${i}`, `Reflection ${i}`, `Recurring theme fixture ${i}.`]);
+    }
+    // The last patterns run needed 25 minutes; every job below has 20 left.
+    await engine.setConfig('dream.patterns.last_run', JSON.stringify({ ms: 25 * 60_000, timed_out: false, new_reflections: 3, at: new Date().toISOString() }));
+    const runPhases = (id: number) => withEnv({ ANTHROPIC_API_KEY: 'sk-ant-test' }, () => makeAutopilotGlobalMaintenanceHandler(engine)(
+      { id, attempts_made: 0, signal: undefined, deadlineAtMs: Date.now() + 20 * 60_000,
+        data: { phases: ['orphans', 'patterns', 'purge'], repoPath } } as never) as Promise<any>);
+    const phaseNames = (result: any) => result.report.phases.map((p: { phase: string }) => p.phase);
+
+    const first = await runPhases(7101);
+    expect(phaseNames(first)).toEqual(['orphans', 'patterns']);
+    expect(first.report.phases[1]).toMatchObject({ status: 'skipped', details: { reason: 'insufficient_cycle_budget' } });
+    expect(first.report.deferred_phases).toEqual(['patterns', 'purge']);
+    expect((await readGlobalMaintenanceProgress(engine)).next_phase).toBe('patterns');
+
+    const second = await runPhases(7102);
+    expect(phaseNames(second)).toEqual(['patterns', 'purge']);
+    expect(second.report.deferred_phases).toBeUndefined();
+    expect((await readGlobalMaintenanceProgress(engine)).next_phase).toBeUndefined();
+  }, 60_000);
+
   test('the job deadline follows env > config > the autopilot default', async () => {
     expect(await resolveGlobalMaintenanceTimeoutMs(engine, 1_800_000)).toBe(1_800_000);
     await engine.setConfig('autopilot.global_maintenance_timeout_ms', '7200000');
