@@ -18,8 +18,9 @@
 
 import type { BrainEngine } from '../engine.ts';
 import { loadActivePackForEngine } from '../schema-pack/engine-resolution.ts';
+import { ALWAYS_LINKABLE_TYPES } from './linkable-types.ts';
 
-export const ALWAYS_LINKABLE_TYPES = ['person', 'company', 'organization', 'entity'] as const;
+export { ALWAYS_LINKABLE_TYPES };
 const EXCLUDED_LINKABLE_ALIASES: ReadonlySet<string> = new Set(['product']);
 
 export interface PackTypes {
