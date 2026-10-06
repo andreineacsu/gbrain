@@ -769,8 +769,8 @@ async function runCorpusIngestPass(
         mode: 'inline',
         remote: false,
         abortSignal: signal,
-        // #5888: the file's write time anchors the capture dedup window, not the (possibly late) sweep.
-        turnAt: await stat(full).then(st => st.mtime, () => undefined),
+        // #5888/#6159: the file's write time anchors the capture dedup window and dates the facts, not the (possibly late) sweep.
+        turnAt: windows.corpusFileTime(name, fileStat.mtime_ms, log),
         ...(wbMeta && wbCfg.mode === 'salient' ? { notabilityFilter: 'medium-and-up' as const } : {}),
         // visibility deliberately unset → resolveDefaultVisibility [ENG-8]
       };

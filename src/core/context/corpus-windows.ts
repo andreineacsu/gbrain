@@ -286,6 +286,28 @@ export function sameCorpusFileStat(a: CorpusFileStat | null, b: CorpusFileStat):
   return !!a && a.size === b.size && a.mtime_ms === b.mtime_ms && a.ino === b.ino;
 }
 
+/** No harness session predates this; an earlier write time is an unset clock (epoch, archive extraction). */
+const OLDEST_SESSION_TIME_MS = Date.UTC(2000, 0, 1);
+/** Write times this far past the clock are not a session time. */
+const FUTURE_FILE_TIME_SLACK_MS = 60_000;
+
+/**
+ * #6159: when a corpus file's session happened, read from its write time (the
+ * hook writes the file at session end, compaction or turn time; a resumed
+ * session rewrites it), taken from the stat the caller already holds, the one
+ * `.progress` records. Undefined, with the reason logged, when that time is not
+ * a valid time, before 2000 or in the future: its facts are then dated when
+ * they are extracted.
+ */
+export function corpusFileTime(name: string, mtimeMs: number, log: (msg: string) => void, now = Date.now()): Date | undefined {
+  const reason = !Number.isFinite(mtimeMs) ? 'not a valid time'
+    : mtimeMs < OLDEST_SESSION_TIME_MS ? 'before 2000'
+      : mtimeMs > now + FUTURE_FILE_TIME_SLACK_MS ? 'in the future' : null;
+  if (!reason) return new Date(mtimeMs);
+  log(`[sweep] ${name}: write time ${Number.isFinite(mtimeMs) ? new Date(mtimeMs).toISOString() : String(mtimeMs)} is ${reason}; its facts are dated when extracted`);
+  return undefined;
+}
+
 async function acquireLock(lockPath: string): Promise<boolean> {
   for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt++) {
     try {

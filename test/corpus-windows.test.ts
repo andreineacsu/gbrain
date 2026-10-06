@@ -6,8 +6,11 @@
  * a split turn resumes from its continuation offset without losing or
  * repeating a character (including astral and multi-byte text); progress
  * advances only under the matching generation and lease; the per-sweep
- * total knob validates its input. The sweep-level behavior (multi-sweep
- * convergence, rewrites, races, harvest) lives in sweep-corpus-windows.test.ts.
+ * total knob validates its input; a corpus file's write time within a minute
+ * of the clock is its session time, and one past that or not a valid time is
+ * refused with the reason logged (#6159). The sweep-level behavior (multi-sweep convergence,
+ * rewrites, races, harvest) lives in sweep-corpus-windows.test.ts, the fact
+ * dates in sweep-corpus-fact-time.test.ts.
  */
 import { afterAll, describe, expect, test } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -17,6 +20,7 @@ import {
   CORPUS_WINDOWS_PER_SWEEP_TOTAL,
   __resetCorpusWindowsWarningForTests,
   corpusFileStat,
+  corpusFileTime,
   parseCorpusTurns,
   planCorpusWindows,
   readCorpusProgress,
@@ -208,5 +212,21 @@ describe('resolveCorpusWindowsPerSweepTotal (GBRAIN_CORPUS_WINDOWS_PER_SWEEP)', 
     expect(resolveCorpusWindowsPerSweepTotal({ GBRAIN_CORPUS_WINDOWS_PER_SWEEP: '1.5' }, warn)).toBe(32);
     expect(warnings.length).toBe(1);
     expect(warnings[0]).toContain('GBRAIN_CORPUS_WINDOWS_PER_SWEEP');
+  });
+});
+
+describe('corpusFileTime (#6159)', () => {
+  const now = Date.UTC(2026, 9, 6, 12, 0, 0);
+  test.each([
+    { name: 'a write time 30 s past the clock is still the session time', at: now + 30_000, expected: now + 30_000, log: null },
+    { name: 'a write time 61 s past the clock is refused', at: now + 61_000, expected: undefined,
+      log: /^\[sweep\] session\.txt: write time 2026-10-06T12:01:01\.000Z is in the future; its facts are dated when extracted$/ },
+    { name: 'a write time that is not a number is refused with its own reason', at: Number.NaN, expected: undefined,
+      log: /^\[sweep\] session\.txt: write time NaN is not a valid time; its facts are dated when extracted$/ },
+  ])('$name', ({ at, expected, log }) => {
+    const logs: string[] = [];
+    const t = corpusFileTime('session.txt', at, m => logs.push(m), now);
+    expect(t?.getTime()).toBe(expected);
+    if (log) { expect(logs).toHaveLength(1); expect(logs[0]).toMatch(log); } else expect(logs).toEqual([]);
   });
 });

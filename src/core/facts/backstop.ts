@@ -125,8 +125,9 @@ export interface FactsBackstopCtx {
   model?: string;
   /**
    * #4206: caller-supplied event time. Fallback ONLY — a valid_from the
-   * extractor derives from the turn itself wins; absent both, now(). Lets
-   * historical imports (old transcripts) avoid import-time stamping.
+   * extractor derives from the turn itself wins; absent both, turnAt, then
+   * now() (factEventTime). Lets historical imports (old transcripts) avoid
+   * import-time stamping.
    */
   validFrom?: Date;
   /**
@@ -135,8 +136,24 @@ export interface FactsBackstopCtx {
    * context_pack / delta projections surface the provenance.
    */
   sourceSlug?: string;
-  /** #5888: when the source turn happened, for the capture-lane dedup window (default: now). */
+  /**
+   * #5888: when the source turn happened, for the capture-lane dedup window
+   * (default: now). #6159: also the facts' date when neither the extractor
+   * nor validFrom gives one, and the extractor's observation date when
+   * validFrom is unset, so a late sweep dates a session by its own time.
+   * Unlike validFrom it stays out of the managed batch's input digest: a sweep
+   * window already tried keeps its batch identity.
+   */
   turnAt?: Date;
+}
+
+/**
+ * The date a captured fact carries (#4206, #6159): the extractor's own date,
+ * then the caller's event time, then when the source turn happened. Undefined
+ * leaves each writer's default, the extraction time.
+ */
+export function factEventTime(fact: { valid_from?: Date }, ctx: Pick<FactsBackstopCtx, 'validFrom' | 'turnAt'>): Date | undefined {
+  return fact.valid_from ?? ctx.validFrom ?? ctx.turnAt;
 }
 
 /** Discriminated return shape based on FactsBackstopCtx.mode. */
@@ -636,7 +653,7 @@ async function runPipelineBodyInner(
     engine: ctx.engine,
     abortSignal,
     model: ctx.model,
-    notabilityAdmission, observationDate: input.observationDate ?? observationDateFrom(ctx.validFrom ?? null),
+    notabilityAdmission, observationDate: input.observationDate ?? observationDateFrom(ctx.validFrom ?? ctx.turnAt ?? null),
     ...(managed ? { embedding: managed.embedding ?? null } : {}),
   });
   const outcome = managed ? await withAIInvocationPreflight(async call => {
@@ -808,7 +825,7 @@ async function runPipelineBodyInner(
       // #4206: caller event-time fallback + provenance context. #4819: a
       // DB-only row has no fence to name the page it came from, so the page
       // path's slug fills context when the caller passed no sourceSlug.
-      valid_from: f.valid_from ?? ctx.validFrom,
+      valid_from: factEventTime(f, ctx),
       context: annotateUnverifiedResolution(ctx.sourceSlug ?? input.pageSlug ?? null, resolutionSource, f.entity_inferred),
     };
     const result = await maintenanceTransaction(ctx.engine, tx => tx.insertFact(newFact, { source_id: ctx.sourceId })); // gbrain-allow-direct-insert: legacy DB-only fallback for unparented / thin-client facts (no entity page to fence onto)
@@ -841,8 +858,8 @@ async function runPipelineBodyInner(
       visibility,
       confidence: f.confidence,
       // #4206: extractor-derived date wins; then the caller's event time
-      // (historical imports); then import time.
-      validFrom: f.valid_from ?? ctx.validFrom ?? new Date(),
+      // (historical imports) or the turn time (#6159); then import time.
+      validFrom: factEventTime(f, ctx) ?? new Date(),
       embedding: f.embedding ?? null,
       embedding_model: f.embedding_model ?? null, attributedTo: f.attributed_to ?? undefined,
       sessionId: f.source_session ?? null,
@@ -895,7 +912,7 @@ async function runPipelineBodyInner(
           embedding: f.embedding ?? null,
           embedding_model: f.embedding_model ?? null, attributed_to: f.attributed_to ?? null,
           // #4206: caller event-time fallback + provenance context.
-          valid_from: f.valid_from ?? ctx.validFrom,
+          valid_from: factEventTime(f, ctx),
           context: ctx.sourceSlug ?? input.pageSlug ?? null,
         };
         const legacyResult = await maintenanceTransaction(ctx.engine, tx => tx.insertFact(newFact, { source_id: ctx.sourceId })); // gbrain-allow-direct-insert: stub-guard / unresolvable-target fallback for unprefixed or fallback-resolved entity slugs (no fenceable page or usable tree)
@@ -928,7 +945,7 @@ async function runPipelineBodyInner(
           embedding: f.embedding ?? null,
           embedding_model: f.embedding_model ?? null, attributed_to: f.attributed_to ?? null,
           // #4206: caller event-time fallback + provenance context.
-          valid_from: f.valid_from ?? ctx.validFrom,
+          valid_from: factEventTime(f, ctx),
           context: ctx.sourceSlug ?? input.pageSlug ?? null,
         };
         const legacyResult = await maintenanceTransaction(ctx.engine, tx => tx.insertFact(newFact, { source_id: ctx.sourceId })); // gbrain-allow-direct-insert: DB-only fallback when the fence lane declined the write (write_through opt-out race / localPath echo)

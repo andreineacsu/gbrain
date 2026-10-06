@@ -1,7 +1,7 @@
 import { isConnectorSourceKind } from './connector-identity.ts';
 import type { BrainEngine, NewFact } from '../engine.ts';
 import type { GBrainConfig } from '../config.ts';
-import type { FactsBackstopCtx } from '../facts/backstop.ts';
+import { factEventTime, type FactsBackstopCtx } from '../facts/backstop.ts';
 import { ENTITY_HINTS_CAP, type ExtractedFact, type FactEmbeddingSignature } from '../facts/extract.ts';
 import { readFactsEmbeddingDim } from '../embedding-dim-check.ts';
 import type { OperationContext } from '../ops/contract.ts';
@@ -290,7 +290,7 @@ export async function publishManagedFacts(engine: BrainEngine, session: ManagedF
     // #5836: an inferred subject carries its provenance note into the fence cell and the row.
     group.push({ ...fact, entity_slug: attributed, visibility, context: fact.entity_inferred ? appendContextNote(context, inferenceNote(fact.entity_inferred)) : context,
       embedding: fact.embedding ? Array.from(fact.embedding) : null,
-      valid_from: (fact.valid_from ?? ctx.validFrom ?? new Date()).toISOString(), valid_until: fact.valid_until?.toISOString() ?? null });
+      valid_from: (factEventTime(fact, ctx) ?? new Date()).toISOString(), valid_until: fact.valid_until?.toISOString() ?? null });
     groups.set(slug, group);
   }
   const inputs: Array<{ slug: string; pageId: number | null; intent: ManagedFactIntent }> = [];
