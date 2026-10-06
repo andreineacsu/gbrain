@@ -41,6 +41,10 @@ const RETRACTED: Claim[] = [
   { claim: 'post-upgrade [--execute', why: '`gbrain post-upgrade` has no --execute flag; `gbrain upgrade` runs it, `gbrain apply-migrations --yes` runs migrations by hand' },
   { claim: '`gbrain upgrade` is the whole fix', why: 'an upgrade can need follow-up steps (migrations, repair previews); docs name the verify step instead (agent operator wave G3)' },
   { claim: 'keychain and survives', why: '#4741: the empty-dir hermetic config does not keep the macOS keychain login across logout' },
+  { claim: 'nohup gbrain embed', why: '#6197: a detached paid backfill hides its exit-3 consent refusal; a long embed run goes through minion-orchestrator durable execution once the user approved the estimate' },
+  { claim: '`gbrain embed --stale` (runs in background)', why: '#6197: `embed --stale` runs in the foreground and, without a terminal, stops with exit 3 until the user approves the paid run' },
+  { claim: '`gbrain sync` to update the index', why: '#6197: a managed brain refuses a sync that pulls (`writer_coordinator_required`); the step after a write is `gbrain sync --no-pull`' },
+  { claim: 'over MCP, the sweep above', why: '#6197: no MCP tool runs link extraction; the stdio maintenance sweep or a host-side `gbrain sweep --once` does' },
 ];
 
 const files = execFileSync('git', ['ls-files', '-z', '*.md'], { cwd: ROOT, encoding: 'utf8' })

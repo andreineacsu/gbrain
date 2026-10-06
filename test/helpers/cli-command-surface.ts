@@ -12,6 +12,8 @@
  * CLI_FLAG_REGISTRY row). Limitations inherited from that validator: CLI_ONLY
  * flags are per top-level command, not per subcommand, and commands it exempts
  * (`call`, `config`, `jobs submit`, `eval brainbench`) are verb-checked only.
+ * Positionals are checked for `embed` alone (positionalRejection): its first
+ * bare word is a page slug, so a mistaken subcommand passes every flag check.
  *
  * Plain helper: no env mutation, no engine, no network.
  */
@@ -31,9 +33,18 @@ export function liveCliVerbs(): Set<string> {
   return valid;
 }
 
+/**
+ * Words that run the command after them (`nohup gbrain embed --stale &`,
+ * `time gbrain sync`): `gbrain` behind one is still at command position.
+ */
+const WRAPPER = '(?:nohup|time|sudo|exec)';
+const TRAILING_WRAPPER = new RegExp(`(?:^|\\s)${WRAPPER}$`);
+const INLINE_COMMAND = new RegExp(`\`((?:${WRAPPER}\\s+)*gbrain [^\`]+)\``, 'g');
+
 /** True when `gbrain` sits at command position (not mid-prose). */
 export function commandPosition(prefix: string): boolean {
-  const p = prefix.trimEnd();
+  let p = prefix.trimEnd();
+  while (TRAILING_WRAPPER.test(p)) p = p.replace(TRAILING_WRAPPER, '').trimEnd();
   return p === '' || /[|;&`(={[]$/.test(p) || /\$$/.test(p);
 }
 
@@ -48,7 +59,8 @@ export interface CodeLine { code: string; line: number; historical: boolean }
 
 /**
  * Fenced-block lines (backslash continuations joined) + inline code spans
- * that START with `gbrain `. Comment and ASCII-diagram lines are skipped.
+ * that START with `gbrain ` (or a wrapper word before it). Comment and
+ * ASCII-diagram lines are skipped.
  */
 export function codeRegions(text: string): CodeLine[] {
   const out: CodeLine[] = [];
@@ -76,7 +88,7 @@ export function codeRegions(text: string): CodeLine[] {
       continue;
     }
     const historical = l.includes(HISTORICAL_MARKER) || markedAbove(i);
-    for (const m of l.matchAll(/`(gbrain [^`]+)`/g)) out.push({ code: m[1]!, line: i + 1, historical });
+    for (const m of l.matchAll(INLINE_COMMAND)) out.push({ code: m[1]!, line: i + 1, historical });
   }
   return out;
 }
@@ -167,4 +179,28 @@ export function flagRejection(inv: Invocation): string | null {
   if (migrationError) return migrationError.message;
   const flag = validateCommandFlags(command, subArgs);
   return flag ? `unknown flag ${flag} for 'gbrain ${typed}'` : null;
+}
+
+/** Flags that select an embed run, so runEmbed never reads a positional as the page slug. */
+const EMBED_RUN_SELECTORS = ['--slugs', '--all', '--stale', '--facts', '--images', '--help', '-h'];
+
+/**
+ * `gbrain embed <word>`: without a run selector, runEmbed embeds the page
+ * whose slug is the first argument that is not a flag (src/commands/embed.ts),
+ * so a documented literal that is not slug-shaped is a subcommand the CLI
+ * does not have and fails with "Page not found" (`gbrain embed refresh`,
+ * #6197). Only a lowercase bare word counts: placeholders arrive here as `1`,
+ * an example slug carries a `/`, and a capitalized word is prose that follows
+ * the command inside a quoted prompt.
+ */
+export function positionalRejection(inv: Invocation): { token: string; reason: string } | null {
+  if (inv.verb !== 'embed') return null;
+  const args = inv.argv.slice(1);
+  if (EMBED_RUN_SELECTORS.some((flag) => args.includes(flag))) return null;
+  const slug = args.find((a) => !a.startsWith('--'));
+  if (slug === undefined || !/^[a-z][a-z0-9_-]*$/.test(slug)) return null;
+  return {
+    token: slug,
+    reason: `\`${slug}\` is read as a page slug, not a subcommand: use --stale or --all, or write the slug as <slug> or a namespaced example`,
+  };
 }

@@ -14,6 +14,8 @@
  * also pass the production argument pipeline
  * (parseGlobalFlags + validateCommandFlags, see test/helpers/
  * cli-command-surface.ts), so a documented flag the CLI rejects fails here.
+ * The same trees get the `embed` positional check (#6197): `gbrain embed
+ * refresh` names a page slug, not a subcommand, and passed every flag check.
  *
  * Escape hatches, in order of preference:
  *   1. Fix the doc to the current command.
@@ -36,7 +38,7 @@ import { readdirSync, readFileSync, statSync } from 'fs';
 import { dirname, join, relative } from 'path';
 import { CLI_ONLY } from '../src/cli.ts';
 import {
-  codeRegions, flagRejection, gbrainInvocations, HISTORICAL_MARKER, liveCliVerbs,
+  codeRegions, flagRejection, gbrainInvocations, HISTORICAL_MARKER, liveCliVerbs, positionalRejection,
 } from './helpers/cli-command-surface.ts';
 
 const ROOT = dirname(import.meta.dir);
@@ -90,7 +92,8 @@ function scanText(rel: string, text: string, valid: Set<string>): Violation[] {
       }
       const why = checkFlags ? flagRejection(inv) : null;
       const flag = why?.match(/(--[\w-]+)/)?.[1];
-      if (why) out.push({ file: rel, line, token: flag ?? inv.verb, message: `\`gbrain ${inv.verb}\` — ${why} — ${snippet}` });
+      const rejected = why ? { token: flag ?? inv.verb, reason: why } : checkFlags ? positionalRejection(inv) : null;
+      if (rejected) out.push({ file: rel, line, token: rejected.token, message: `\`gbrain ${inv.verb}\` — ${rejected.reason} — ${snippet}` });
     }
   }
   return out;
@@ -151,6 +154,24 @@ describe('#3502 — docs reference only real gbrain commands and flags', () => {
     ].join('\n');
     const found = scanText('docs/guides/x.md', doc, valid).map((v) => `${v.line}:${v.token}`);
     expect(found).toEqual(['2:notacommand', '3:--no-such-flag']);
+  });
+
+  test('scanner self-check: a literal `embed` word that is not a slug is caught, behind a wrapper too (#6197)', () => {
+    const valid = liveCliVerbs();
+    const doc = [
+      'Use nohup: `nohup gbrain embed refresh > /tmp/gbrain-embed.log 2>&1 &`',
+      '```bash',
+      'time gbrain embed status --dry-run',
+      'nohup gbrain embed --stale --no-such-flag > /tmp/gbrain-embed.log 2>&1 &',
+      'gbrain embed --stale --dry-run',
+      'gbrain embed <slug>',
+      'gbrain embed people/alice-example',
+      'gbrain embed --slugs people/alice-example people/charlie-example',
+      '```',
+      'Each time gbrain embed refresh is mentioned in prose it is not a command.',
+    ].join('\n');
+    const found = scanText('skills/x/SKILL.md', doc, valid).map((v) => `${v.line}:${v.token}`);
+    expect(found).toEqual(['1:refresh', '3:status', '4:--no-such-flag']);
   });
 
   test('the sanity anchors: install is dead, init/put/skillpack are live', () => {
