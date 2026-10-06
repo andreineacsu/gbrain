@@ -14,14 +14,16 @@
  * engine-shaped check gets a stub with just `getConfig`).
  */
 import { describe, test, expect, afterAll, spyOn } from 'bun:test';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 
 import { bootstrapDoctorChecks, type Check } from '../src/commands/doctor.ts';
 import { readBootId, readPidNs } from '../src/core/pglite-lock.ts';
 import { writeHarnessReceipt } from '../src/core/bootstrap/format.ts';
+import { buildClaudeHookCommand } from '../src/core/bootstrap/hooks.ts';
+import { CLAUDE_HOOK_EVENTS, GBRAIN_HARNESS_MARKER_VALUE, type ClaudeHookEvent } from '../src/core/bootstrap/host-specs.ts';
 import { LATEST_VERSION } from '../src/core/migrate.ts';
 import { VERSION } from '../src/version.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -272,6 +274,121 @@ describe('bootstrap_harness_health (#4043)', () => {
     expect(c?.status).toBe('warn');
     expect(c?.message).toMatch(/unreadable/);
   }, T);
+});
+
+// The receipt names the hook carrier; doctor counts the harness entries in it.
+describe('bootstrap_harness_health: harness hook entries (#6171)', () => {
+  const entry = (event: ClaudeHookEvent, marked: boolean) => ({
+    type: 'command',
+    command: buildClaudeHookCommand('/opt/fake/gbrain', event, { GBRAIN_SOURCE: 'default', GBRAIN_HOOK_LANE: 'harness' }),
+    timeout: 5,
+    ...(marked ? { _gbrain: GBRAIN_HARNESS_MARKER_VALUE } : {}),
+  });
+
+  /**
+   * A settings file with the user's own hooks, none of them harness entries
+   * (the lane command under an event that is not its own included), plus one
+   * harness entry per flag under each of `events`.
+   */
+  function writeCarrier(path: string, markedFlags: boolean[], events: readonly ClaudeHookEvent[] = CLAUDE_HOOK_EVENTS): void {
+    const hooks: Record<string, unknown[]> = {
+      Notification: [{ matcher: '', hooks: [{ type: 'command', command: 'say done' }] }],
+      SubagentStop: [{ hooks: [{ ...entry('Stop', false) }] }],
+      Stop: [
+        { hooks: [{ type: 'command', command: '/opt/fake/gbrain hook stop' }] },
+        { hooks: [{ type: 'command', command: 'echo GBRAIN_HOOK_LANE=harness' }] },
+        { hooks: [{ ...entry('SessionStart', false) }] },
+        { hooks: [{ ...entry('Stop', false), _gbrain: 'bootstrap-v1' }] },
+      ],
+    };
+    for (const event of events) {
+      hooks[event] = [...(hooks[event] ?? []), ...markedFlags.map((marked) => ({ hooks: [entry(event, marked)] }))];
+    }
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify({ permissions: { allow: ['Bash(ls:*)'] }, hooks }, null, 2));
+  }
+
+  const NO_CAPTURE = CLAUDE_HOOK_EVENTS.filter((event) => event !== 'Stop' && event !== 'SessionEnd');
+
+  // A marker-less entry alone is recognized by its command, so it is noted on
+  // the serve row; only an event holding two entries (both fire) warns, and
+  // its fix names the options the install used (`<proj>` is the project dir).
+  const cases: Array<{
+    name: string;
+    carrier: boolean[] | string | null;
+    warns: string | null;
+    notes?: boolean;
+    events?: readonly ClaudeHookEvent[];
+    project?: boolean;
+    rerun?: string;
+  }> = [
+    { name: 'one marked entry per event', carrier: [true], warns: null },
+    { name: 'no carrier file', carrier: null, warns: null },
+    { name: 'an empty carrier file', carrier: '', warns: null },
+    { name: 'a carrier that is not valid JSON', carrier: 'not json{{{', warns: null },
+    { name: 'entries without the marker', carrier: [false], warns: null, notes: true },
+    { name: 'a marker-less entry beside a marked one', carrier: [false, true], warns: '2 entries, 1 without the marker', rerun: '' },
+    { name: 'two marked entries', carrier: [true, true], warns: '2 entries, 0 without the marker', rerun: '' },
+    { name: 'two entries on a project install', carrier: [false, true], warns: '2 entries, 1 without the marker', project: true, rerun: ' with the project flag for <proj>' },
+    { name: 'two entries on a capture-off install', carrier: [false, true], warns: '2 entries, 1 without the marker', events: NO_CAPTURE, rerun: ' with the no-capture flag' },
+  ];
+  for (const c of cases) {
+    const outcome = c.warns ? 'warn naming the file, the events and the re-run' : `the serve row decides${c.notes ? ', with a note' : ''}`;
+    test(`${c.name} → ${outcome}`, async () => {
+      const { parent, home } = makeHome();
+      const project = join(parent, 'proj');
+      const carrier = c.project ? join(project, '.claude', 'settings.local.json') : join(parent, 'claude', 'settings.json');
+      if (typeof c.carrier === 'string') {
+        mkdirSync(dirname(carrier), { recursive: true });
+        writeFileSync(carrier, c.carrier);
+      } else if (c.carrier) {
+        writeCarrier(carrier, c.carrier, c.events);
+      }
+      const before = c.carrier === null ? null : readFileSync(carrier, 'utf8');
+      const receipt = harnessReceiptFixture([{ state: 'confirmed' }]) as Record<string, unknown>;
+      (receipt.targets as unknown[]).push({
+        host: 'claude-code', kind: 'hooks', state: 'confirmed', scope: c.project ? project : 'user', path: carrier, marker: GBRAIN_HARNESS_MARKER_VALUE,
+      });
+      writeHarnessReceipt(home, receipt as never);
+
+      const serve = spyOn(globalThis, 'fetch').mockImplementation((async () =>
+        new Response(JSON.stringify({ status: 'ok' }), { status: 200 })) as unknown as typeof fetch);
+      let rows: Check[];
+      try {
+        rows = (await run(parent)).filter((check) => check.name === 'bootstrap_harness_health');
+      } finally {
+        serve.mockRestore();
+      }
+
+      expect(rows).toHaveLength(1);
+      if (c.warns) {
+        const events = c.events ?? CLAUDE_HOOK_EVENTS;
+        const rerun = (c.rerun ?? '').replace('<proj>', project);
+        expect(rows[0].status).toBe('warn');
+        expect(rows[0].message).toContain(carrier);
+        for (const event of CLAUDE_HOOK_EVENTS) {
+          if (events.includes(event)) expect(rows[0].message).toContain(`${event} (${c.warns})`);
+          else expect(rows[0].message).not.toContain(`${event} (`);
+        }
+        expect(rows[0].message).not.toMatch(/Notification|SubagentStop/);
+        expect(rows[0].message).toContain(`re-run \`gbrain bootstrap harness\`${rerun} to converge.`);
+        expect(rows[0].details?.code).toBe('harness_hook_duplicates');
+        expect(rows[0].fix?.argv).toEqual([
+          'gbrain', 'bootstrap', 'harness',
+          ...(c.project ? ['--project', project] : []),
+          ...(c.events ? ['--no-capture'] : []),
+          '--yes',
+        ]);
+      } else {
+        expect(rows[0].status).toBe('ok');
+        expect(rows[0].message).toMatch(/serve healthy/);
+        const note = `${CLAUDE_HOOK_EVENTS.length} harness hook entries in ${carrier} lost the \`_gbrain\` marker`;
+        if (c.notes) expect(rows[0].message).toContain(note);
+        else expect(rows[0].message).not.toContain('lost the');
+      }
+      if (before !== null) expect(readFileSync(carrier, 'utf8')).toBe(before);
+    }, T);
+  }
 });
 
 // ── 1. hook heartbeat failure rate [B3] ─────────────────────────────────────

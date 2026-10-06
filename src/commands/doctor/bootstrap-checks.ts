@@ -10,11 +10,15 @@ import type { BrainEngine } from '../../core/engine.ts';
 import { LATEST_VERSION } from '../../core/migrate.ts';
 // Agent-bootstrap doctor group (plan B2/B4/ENG-4 + one-live-serve note).
 import { readHarnessReceiptState, readReceipt, type HarnessReceipt } from '../../core/bootstrap/format.ts';
+import { countClaudeHookEntries, type ClaudeHookEntryCount } from '../../core/bootstrap/hooks.ts';
+import { GBRAIN_HARNESS_MARKER_VALUE } from '../../core/bootstrap/host-specs.ts';
 import { probeLivePgliteHolder, resolveBrainDataDir } from '../../core/bootstrap/uninstall.ts';
 import { readRunbookStamp, hooksInstalled, listVerifyRuns } from '../../core/bootstrap/status.ts';
 import { resolveGbrainHome } from '../../core/gbrain-home.ts';
 import { VERSION as GBRAIN_BINARY_VERSION } from '../../version.ts';
 import type { Check } from '../doctor.ts';
+import type { Action } from '../../core/agent-output.ts';
+import { doctorVerify } from './check-fix.ts';
 
 /**
  * Agent-bootstrap check group (plan B2, B4, ENG-4, one-live-serve, C1 skew).
@@ -38,6 +42,90 @@ async function pushSupersededEnrollmentCheck(checks: Check[], engine: BrainEngin
     details: { code: 'shared_skills_epoch_superseded', fix: SKILLS_REFRESH_COMMAND, docs: SKILLS_EPOCH_DOCS, enrollments: superseded },
   });
   return true;
+}
+
+interface HarnessHookCarrier {
+  path: string;
+  /** The receipt target's scope: 'user', or the project dir the install wired. */
+  scope: string;
+  /** False after a capture-off install, which wires neither Stop nor SessionEnd (harness.ts hookEvents). */
+  capture: boolean;
+  /** Events whose harness entries are duplicated or lack the marker. */
+  events: ClaudeHookEntryCount[];
+}
+
+/** #6171: each hook carrier the receipt names, read with the same ownership rule install and removal use. */
+function harnessHookCarriers(hr: HarnessReceipt): HarnessHookCarrier[] {
+  return hr.targets
+    .filter((t) => t.host === 'claude-code' && t.kind === 'hooks' && t.path)
+    .map((t) => {
+      const counts = countClaudeHookEntries(t.path!, t.marker ?? GBRAIN_HARNESS_MARKER_VALUE);
+      return {
+        path: t.path!,
+        scope: t.scope,
+        capture: counts.some((c) => c.event === 'Stop' || c.event === 'SessionEnd'),
+        events: counts.filter((c) => c.entries > 1 || c.unmarked > 0),
+      };
+    });
+}
+
+/**
+ * #6171: the re-run that converges these carriers. A bare re-run over a project
+ * install is refused, and over a capture-off install it turns capture back on,
+ * so it carries the install's own project dirs and capture choice. The message
+ * names them in prose, flags without dashes, as in the removal-pending row below.
+ */
+function harnessRerunFix(carriers: HarnessHookCarrier[]): { action: Action; prose: string } {
+  const projects = carriers.filter((c) => c.scope !== 'user').map((c) => c.scope);
+  const captureOff = !carriers.some((c) => c.capture);
+  const prose = [
+    ...(projects.length > 0 ? [`the project flag for ${projects.join(', ')}`] : []),
+    ...(captureOff ? ['the no-capture flag'] : []),
+  ];
+  return {
+    prose: prose.length > 0 ? ` with ${prose.join(' and ')}` : '',
+    action: {
+      argv: ['gbrain', 'bootstrap', 'harness', ...projects.flatMap((p) => ['--project', p]), ...(captureOff ? ['--no-capture'] : []), '--yes'],
+      consent: ['persistent_install'], actor: 'agent', requires_exclusive: false,
+      why: 'Re-applies the harness wiring: each event keeps one marked gbrain hook entry and the duplicates are removed.',
+      user_message: 'gbrain hooks are registered more than once in your Claude Code settings, so they run twice. OK if I re-apply the harness wiring?',
+      verify: doctorVerify('bootstrap_harness_health'),
+    },
+  };
+}
+
+/** #6171: warn when an event holds more than one harness hook entry (each one fires); true when it pushed. */
+function pushHarnessHookDuplicatesCheck(checks: Check[], carriers: HarnessHookCarrier[]): boolean {
+  const duplicated = carriers
+    .map((c) => ({ path: c.path, events: c.events.filter((e) => e.entries > 1) }))
+    .filter((c) => c.events.length > 0);
+  if (duplicated.length === 0) return false;
+  const rerun = harnessRerunFix(carriers);
+  const carrierLine = (c: (typeof duplicated)[number]) =>
+    `${c.path}: ${c.events.map((e) => `${e.event} (${e.entries} entries, ${e.unmarked} without the marker)`).join(', ')}`;
+  checks.push({
+    name: 'bootstrap_harness_health',
+    status: 'warn',
+    message: `harness hooks fire more than once per event: ${duplicated.map(carrierLine).join('; ')}. ` +
+      `Each event should hold one gbrain entry. Fix: re-run \`gbrain bootstrap harness\`${rerun.prose} to converge.`,
+    fix: rerun.action,
+    details: { code: 'harness_hook_duplicates', carriers: duplicated },
+  });
+  return true;
+}
+
+/**
+ * #6171: names entries that only lost their `_gbrain` marker. Install and
+ * removal recognize them by their command and the next run re-marks them, so
+ * they are noted on the serve row, never warned: whatever drops the key may
+ * drop it again.
+ */
+function unmarkedHookNote(carriers: HarnessHookCarrier[]): string {
+  const withUnmarked = carriers.filter((c) => c.events.some((e) => e.unmarked > 0));
+  const unmarked = withUnmarked.reduce((n, c) => n + c.events.reduce((m, e) => m + e.unmarked, 0), 0);
+  if (unmarked === 0) return '';
+  return ` Note: ${unmarked} harness hook entr${unmarked === 1 ? 'y' : 'ies'} in ${withUnmarked.map((c) => c.path).join(', ')} ` +
+    'lost the `_gbrain` marker (recognized by command; nothing to repair).';
 }
 
 /** #5063: commits on the workspace's named branch that origin/<branch> lacks, counted whatever the push age (0 when unknown). */
@@ -149,6 +237,7 @@ export async function bootstrapDoctorChecks(engine: BrainEngine | null): Promise
     const hr = harnessState.receipt;
     const failed = hr.targets.filter((t) => t.state === 'failed');
     const pending = hr.targets.filter((t) => t.state === 'pending');
+    const hookCarriers = harnessHookCarriers(hr);
     if (failed.length > 0 || pending.length > 0) {
       checks.push({
         name: 'bootstrap_harness_health',
@@ -174,7 +263,8 @@ export async function bootstrapDoctorChecks(engine: BrainEngine | null): Promise
         status: 'fail',
         message: `harness removal pending: host wiring removed but the minted token (id ${hr.token.id}) is not yet revoked — stop the serve and re-run \`gbrain bootstrap harness\` with the remove flag, or run \`gbrain auth revoke\` with the id flag.`,
       });
-    } else if (!(await pushSupersededEnrollmentCheck(checks, engine, hr))) {
+    } else if (!(await pushSupersededEnrollmentCheck(checks, engine, hr)) && !pushHarnessHookDuplicatesCheck(checks, hookCarriers)) {
+      const hookNote = unmarkedHookNote(hookCarriers);
       try {
         const base = hr.url.replace(/\/mcp$/, '');
         const res = await fetch(`${base}/health`, { signal: AbortSignal.timeout(3000) });
@@ -199,6 +289,7 @@ export async function bootstrapDoctorChecks(engine: BrainEngine | null): Promise
           message: `harness wired to ${hr.url} but the serve is unreachable — start \`gbrain serve\` in http mode.`,
         });
       }
+      checks[checks.length - 1]!.message += hookNote; // the serve row pushed just above
     }
   } else if (harnessState.state !== 'absent') {
     checks.push({

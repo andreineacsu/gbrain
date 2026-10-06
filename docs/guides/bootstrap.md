@@ -267,7 +267,12 @@ mode wires them in one command, with no `agent.json` and no interview:
   unconverged rotation, or a half-removed install whose token still awaits
   revocation. With no install at all it says so and exits 0 (2 under
   `--json`, so machine callers can tell absence apart). `gbrain doctor`
-  carries a matching `bootstrap_harness_health` check. `--json` on the
+  carries a matching `bootstrap_harness_health` check, which also warns when
+  a settings file the install wired holds more than one gbrain hook entry for
+  an event (re-running `gbrain bootstrap harness` with the install's own
+  `--project` dirs and `--no-capture` choice leaves one marked entry per
+  event) and notes entries that only lost their `_gbrain` marker, which the
+  install and `--remove` still recognize by their command. `--json` on the
   install itself emits a single machine-readable document on stdout (prose
   goes to stderr).
 - The full flag surface lives in `gbrain bootstrap --help`: `--url`/`--port`

@@ -349,6 +349,48 @@ function isForeignGbrainMarked(entry: unknown, marker: string): boolean {
   return typeof v === 'string' && v !== marker;
 }
 
+export interface ClaudeHookEntryCount {
+  event: string;
+  /** Entries install and removal treat as this marker's (isOurs). */
+  entries: number;
+  /** Of those, entries with no marker key. */
+  unmarked: number;
+}
+
+/**
+ * Per-event count of the entries install and removal treat as `marker`'s in
+ * one settings file: the read side of isOurs, for doctor (#6171). Events
+ * with none are left out.
+ */
+export function countClaudeHookEntries(settingsPath: string, marker: string): ClaudeHookEntryCount[] {
+  let hooks: unknown;
+  try {
+    hooks = loadSettings(settingsPath).settings.hooks;
+  } catch {
+    // Unreadable or unparseable: nothing to count. The writers refuse such a
+    // file on their next run and name the fix there.
+    return [];
+  }
+  if (typeof hooks !== 'object' || hooks === null || Array.isArray(hooks)) return [];
+  const counts: ClaudeHookEntryCount[] = [];
+  for (const [event, groups] of Object.entries(hooks)) {
+    if (!Array.isArray(groups)) continue;
+    let entries = 0;
+    let unmarked = 0;
+    for (const group of groups) {
+      const groupHooks = (group as HookMatcherGroup | null)?.hooks;
+      if (!Array.isArray(groupHooks)) continue;
+      for (const entry of groupHooks) {
+        if (!isOurs(entry, event, marker)) continue;
+        entries++;
+        if (!(GBRAIN_HOOK_MARKER_KEY in (entry as Record<string, unknown>))) unmarked++;
+      }
+    }
+    if (entries > 0) counts.push({ event, entries, unmarked });
+  }
+  return counts;
+}
+
 /**
  * Strip our command entries (isOurs: the marker, or for the harness marker a
  * marker-less harness-lane command calling `event`'s own subcommand) from one
