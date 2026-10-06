@@ -8,8 +8,9 @@
  * entries are keyed by a `_gbrain` marker property on the command object
  * (host-specs.ts owns the marker + every other format assumption), removal
  * and dedupe match on the marker (surviving reordering and command-string
- * drift), and foreign hooks / permissions / every other settings key are
- * never touched. Writes are atomic (tmp + rename) with a `.bak` of the
+ * drift; a harness-lane entry that lost its marker is also matched by its
+ * command, see isMarkerlessHarnessEntry), and foreign hooks / permissions /
+ * every other settings key are never touched. Writes are atomic (tmp + rename) with a `.bak` of the
  * previous file; a parse-broken existing file ABORTS the write with
  * fix-and-re-run instructions (fail-closed, matching removal's stance — a
  * rewrite could drop permissions/allowlist entries gbrain cannot parse) [G5].
@@ -37,6 +38,7 @@ import {
   CLAUDE_HOOK_EVENTS,
   CLAUDE_HOOK_SUBCOMMAND,
   CLAUDE_SETTINGS_FILE_RELPATH,
+  GBRAIN_HARNESS_MARKER_VALUE,
   GBRAIN_HOOK_MARKER_KEY,
   GBRAIN_HOOK_MARKER_VALUE,
   type ClaudeHookEvent,
@@ -114,7 +116,7 @@ export interface WriteClaudeHooksOpts {
 export interface WriteClaudeHooksResult {
   settingsPath: string;
   installed: Array<{ event: ClaudeHookEvent; command: string }>;
-  /** Prior marker-carrying entries replaced (idempotent re-run dedupe). */
+  /** Prior entries of this marker replaced (idempotent re-run dedupe), incl. marker-less harness-lane ones. */
   removedPrior: number;
   /** `.bak` of the pre-write file (null when no file existed). */
   backupPath: string | null;
@@ -297,12 +299,30 @@ export function committedHookEvents(workspaceDir: string): Set<ClaudeHookEvent> 
   return carried;
 }
 
-function isOurs(entry: unknown, marker: string = GBRAIN_HOOK_MARKER_VALUE): boolean {
+const HARNESS_LANE_ASSIGNMENT = /(?:^|\s)GBRAIN_HOOK_LANE=harness\s/;
+const HOOK_SUBCOMMAND_CALL = new RegExp(`\\shook\\s+(?:${Object.values(CLAUDE_HOOK_SUBCOMMAND).join('|')})(?:\\s|$)`);
+
+/**
+ * Claude Code rewrites settings.json through its own schema and can drop the
+ * `_gbrain` key while keeping the hook entry (#6092). A harness entry stays
+ * recognizable by its command: the lane assignment plus a `hook <event>`
+ * call. Only entries with NO marker key qualify: another marker value
+ * belongs to another lane.
+ */
+function isMarkerlessHarnessEntry(entry: Record<string, unknown>): boolean {
   return (
-    typeof entry === 'object' &&
-    entry !== null &&
-    (entry as Record<string, unknown>)[GBRAIN_HOOK_MARKER_KEY] === marker
+    !(GBRAIN_HOOK_MARKER_KEY in entry) &&
+    typeof entry.command === 'string' &&
+    HARNESS_LANE_ASSIGNMENT.test(entry.command) &&
+    HOOK_SUBCOMMAND_CALL.test(entry.command)
   );
+}
+
+function isOurs(entry: unknown, marker: string = GBRAIN_HOOK_MARKER_VALUE): boolean {
+  if (typeof entry !== 'object' || entry === null) return false;
+  const e = entry as Record<string, unknown>;
+  if (e[GBRAIN_HOOK_MARKER_KEY] === marker) return true;
+  return marker === GBRAIN_HARNESS_MARKER_VALUE && isMarkerlessHarnessEntry(e);
 }
 
 /** True when the entry carries the gbrain marker KEY with any OTHER value. */
@@ -313,7 +333,8 @@ function isForeignGbrainMarked(entry: unknown, marker: string): boolean {
 }
 
 /**
- * Strip marker-carrying command entries from one event's matcher-group array.
+ * Strip our command entries (isOurs: the marker, or for the harness marker a
+ * marker-less harness-lane command) from one event's matcher-group array.
  * Groups EMPTIED by the removal are dropped; groups that were already empty
  * (foreign) survive untouched. Returns the surviving groups + removal count.
  * The group-drop rule is marker-independent: it fires only when THIS call's
@@ -646,7 +667,8 @@ export function writeCommittedClaudeHooks(
 }
 
 /**
- * Remove ONLY entries carrying the given marker [G5]. A parse-broken file is
+ * Remove ONLY entries carrying the given marker [G5], plus marker-less
+ * harness-lane entries for the harness marker. A parse-broken file is
  * left untouched (removal must never destroy what it cannot read) — the note
  * says so. Event arrays we emptied lose their key; an emptied hooks object
  * loses its key; foreign structure (including other-marker gbrain entries)

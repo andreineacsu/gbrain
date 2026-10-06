@@ -224,7 +224,8 @@ export const CLAUDE_HOOK_DEFAULT_TIMEOUT_SECS: Record<ClaudeHookEvent, number> =
  * Marker property carried by every hook command object bootstrap writes
  * [G5, CX2-17]. The structural JSON merger keys removal/dedupe on this —
  * NEVER on command-string equality (which breaks when the binary path or
- * env values change between runs).
+ * env values change between runs). One exception: a harness-lane entry that
+ * lost this key is matched by its command shape (hooks.ts isMarkerlessHarnessEntry).
  */
 export const GBRAIN_HOOK_MARKER_KEY = '_gbrain';
 export const GBRAIN_HOOK_MARKER_VALUE = 'bootstrap-v1';

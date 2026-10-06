@@ -201,6 +201,15 @@ function readJson(path: string): Record<string, unknown> {
   return JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
 }
 
+/** What a host-side rewrite of settings.json can leave (#6092): the hook entries without their `_gbrain` key. */
+function dropHarnessMarkers(path: string): void {
+  const settings = readJson(path);
+  for (const groups of Object.values(settings.hooks as Record<string, Array<{ hooks: Array<Record<string, unknown>> }>>)) {
+    for (const g of groups) for (const e of g.hooks) if (e._gbrain === GBRAIN_HARNESS_MARKER_VALUE) delete e._gbrain;
+  }
+  writeFileSync(path, JSON.stringify(settings, null, 2));
+}
+
 describe('parseHarnessArgs', () => {
   test('defaults + aliases: --local and --user-hooks are accepted no-ops', () => {
     const f = parseHarnessArgs(['--local', '--user-hooks']);
@@ -575,6 +584,25 @@ describe('--remove', () => {
     const f = makeFake();
     expect(await removeHarness(parseHarnessArgs(['--remove']), f.deps)).toBe(0);
     expect(f.out.join('\n')).toMatch(/nothing harness-installed/);
+  });
+
+  test('#6092 hooks whose _gbrain key the host dropped are still removed; the user\'s own hooks survive', async () => {
+    const f = makeFake();
+    const mine = {
+      hooks: {
+        SessionStart: [{ hooks: [{ type: 'command', command: 'echo mine' }] }],
+        Notification: [{ hooks: [{ type: 'command', command: 'say done' }] }],
+      },
+    };
+    writeFileSync(f.userSettings, JSON.stringify(mine, null, 2));
+    expect(await applyHarness(flags(['--harness', 'claude-code']), f.deps)).toBe(0);
+    dropHarnessMarkers(f.userSettings);
+
+    expect(await removeHarness(parseHarnessArgs(['--remove', '--yes']), f.deps)).toBe(0);
+    expect(readJson(f.userSettings)).toEqual(mine);
+    expect(f.out.join('\n')).toContain(`${CLAUDE_HOOK_EVENTS.length} harness hook entries removed`);
+    expect(f.out.join('\n')).not.toMatch(/no harness hook entries/);
+    expect(readHarnessReceiptState(f.home)).toEqual({ state: 'absent' });
   });
 });
 

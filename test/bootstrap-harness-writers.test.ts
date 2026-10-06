@@ -139,6 +139,82 @@ describe('two-marker coexistence [C6]', () => {
   });
 });
 
+describe('marker-less harness entries (#6092)', () => {
+  // Claude Code rewrites settings.json through its own schema and can drop the
+  // `_gbrain` key while keeping the hook entry; the command still names the
+  // harness lane. Every entry below must survive a harness removal.
+  const UNRELATED = {
+    permissions: { allow: ['Bash(ls:*)'] },
+    hooks: {
+      SessionStart: [{ hooks: [{ type: 'command', command: 'echo mine' }] }],
+      Stop: [
+        { hooks: [{ type: 'command', command: `${BIN} hook stop` }] },
+        { hooks: [{ type: 'command', command: 'echo GBRAIN_HOOK_LANE=harness' }] },
+      ],
+      PreCompact: [
+        {
+          hooks: [
+            {
+              type: 'command',
+              command: `env GBRAIN_HOOK_LANE=harness ${BIN} hook compact`,
+              [GBRAIN_HOOK_MARKER_KEY]: GBRAIN_HOOK_MARKER_VALUE,
+            },
+          ],
+        },
+      ],
+      Notification: [{ matcher: '', hooks: [{ type: 'command', command: 'say done' }] }],
+    },
+  };
+  const UNRELATED_ENTRIES = 5;
+  const UNRELATED_TEXT = `${JSON.stringify(UNRELATED, null, 2)}\n`;
+
+  function installThenDropMarkers(seat?: string): string {
+    const path = join(tmp(), 'settings.json');
+    writeFileSync(path, UNRELATED_TEXT);
+    writeClaudeHooksAt(path, {
+      gbrainBin: BIN,
+      env: { GBRAIN_SOURCE: 'default', GBRAIN_HOOK_LANE: 'harness', ...(seat ? { GBRAIN_SEAT: seat } : {}) },
+      marker: GBRAIN_HARNESS_MARKER_VALUE,
+    });
+    const settings = readJson(path);
+    for (const groups of Object.values(settings.hooks as Record<string, Array<{ hooks: Array<Record<string, unknown>> }>>)) {
+      for (const g of groups) {
+        for (const e of g.hooks) if (e[GBRAIN_HOOK_MARKER_KEY] === GBRAIN_HARNESS_MARKER_VALUE) delete e[GBRAIN_HOOK_MARKER_KEY];
+      }
+    }
+    writeFileSync(path, JSON.stringify(settings, null, 2));
+    expect(markerEntries(readJson(path), GBRAIN_HARNESS_MARKER_VALUE)).toBe(0);
+    return path;
+  }
+
+  function entryCount(settings: Record<string, unknown>): number {
+    return Object.values(settings.hooks as Record<string, Array<{ hooks: unknown[] }>>)
+      .flat()
+      .reduce((n, g) => n + g.hooks.length, 0);
+  }
+
+  test('removal finds them by the lane in their command; every other entry survives byte-for-byte', () => {
+    const path = installThenDropMarkers();
+    const r = removeClaudeHooksAt(path, GBRAIN_HARNESS_MARKER_VALUE);
+    expect(r.removed).toBe(CLAUDE_HOOK_EVENTS.length);
+    expect(readFileSync(path, 'utf8')).toBe(UNRELATED_TEXT);
+  });
+
+  test('a re-install replaces them: one entry per event, the installed seat carried over', () => {
+    const path = installThenDropMarkers('desk-1');
+    const r = writeClaudeHooksAt(path, {
+      gbrainBin: BIN,
+      env: { GBRAIN_SOURCE: 'default', GBRAIN_HOOK_LANE: 'harness' },
+      marker: GBRAIN_HARNESS_MARKER_VALUE,
+    });
+    expect(r.removedPrior).toBe(CLAUDE_HOOK_EVENTS.length);
+    const settings = readJson(path);
+    expect(markerEntries(settings, GBRAIN_HARNESS_MARKER_VALUE)).toBe(CLAUDE_HOOK_EVENTS.length);
+    expect(entryCount(settings)).toBe(CLAUDE_HOOK_EVENTS.length + UNRELATED_ENTRIES);
+    expect(r.installed.every((i) => i.command.includes('GBRAIN_SEAT=desk-1'))).toBe(true);
+  });
+});
+
 describe('broken JSON is fail-closed', () => {
   test('write throws and leaves the file untouched (never relocate a config we cannot read)', () => {
     const dir = tmp();
