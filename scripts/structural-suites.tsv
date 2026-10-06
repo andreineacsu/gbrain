@@ -9,7 +9,6 @@ test/agent-register.test.ts	resolvePreset	7	readFileSync
 test/agent-register.test.ts	structural guards	2	readFileSync
 test/ai/silent-drop-regression.test.ts	(file-level)	3	source-surface-helper
 test/apply-migrations.test.ts	failed migration prints phase detail (#921)	1	readFileSync
-test/apply-migrations.test.ts	resolveSchemaBehind (#1530)	5	readFileSync
 test/apply-migrations.test.ts	runApplyMigrations exit codes (v0.36.1.x #1062)	1	readFileSync
 test/archived-source-scoping.test.ts	#3880 structural pins — all-source local_path selections filter archived	2	readFileSync
 test/auto-link-targeted-probe-2544.test.ts	#2544 — auto-link behavior through put_page (targeted probe)	6	readFileSync

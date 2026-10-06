@@ -683,20 +683,17 @@ async function runLockedMigrations(
 
   const toRun: Migration[] = [...plan.partial, ...plan.pending, ...plan.pending_fresh_install, ...plan.applied.filter(migration => migration.reconcile)]
     .sort((left, right) => compareVersions(left.version, right.version));
+  // #6089: an applied reconcile migration re-runs on every run, so it is not
+  // pending work. With nothing else to run, a schema still behind fails the
+  // run before those re-checks; they run once the schema is current.
+  const nothingPending = plan.partial.length === 0 && plan.pending.length === 0 && plan.pending_fresh_install.length === 0;
+  if (nothingPending && schemaBehind) { fail('schema_behind', schemaBehindError(args)); return 1; }
   if (toRun.length === 0) {
-    if (schemaBehind) {
-      console.error(
-        'Orchestrator migrations are up to date, but schema migrations are behind. ' +
-        'Run `gbrain apply-migrations --yes` (or `--force-schema`) to apply them.',
-      );
-      fail('schema_behind', schemaBehindError(args));
-      return 1;
-    }
     console.log('All migrations up to date.');
     doc.status = 'up_to_date';
     return 0;
   }
-  if (!schemaBehind && plan.pending.length === 0 && plan.pending_fresh_install.length === 0 && plan.partial.length === 0) {
+  if (nothingPending) {
     console.log('All migrations up to date. This covers orchestrator checkpoints only; host publication and client activation are being rechecked.');
   }
 
@@ -825,8 +822,31 @@ async function runLockedMigrations(
     }
   }
 
-  if (!failed && schemaBehind) doc.schema_behind = true;
-  return failed ? 1 : undefined;
+  if (failed) return 1;
+  // #6089: a run that leaves the schema behind fails, whatever else it ran.
+  if (schemaBehind && await schemaStillBehind()) { fail('schema_behind', schemaBehindError(args)); return 1; }
+  return undefined;
+}
+
+/**
+ * Whether the schema is still behind once the orchestrators ran: the preflight
+ * read it before them, and an orchestrator may migrate it itself. A version
+ * that cannot be read counts as behind, so the run never claims success unverified.
+ */
+async function schemaStillBehind(): Promise<boolean> {
+  try {
+    const cfg = loadConfig();
+    if (!cfg) throw new Error('no brain is configured');
+    const { LATEST_VERSION } = await import('../core/migrate.ts');
+    const { eng, schemaVer } = await openAtSchemaVersion(cfg);
+    await eng.disconnect();
+    return schemaVer < LATEST_VERSION;
+  } catch (err) {
+    const { redactUrlsInText } = await import('../core/url-redact.ts');
+    const { redactConnectionInfo } = await import('../core/audit/redact-connection-info.ts');
+    console.error(`Could not read the schema version after the migrations ran: ${redactConnectionInfo(redactUrlsInText(err instanceof Error ? err.message : String(err)))}`);
+    return true;
+  }
 }
 
 /**
@@ -906,7 +926,7 @@ function requireDbError(dbProbe: DbProbeOutcome): OperationError {
 }
 
 function schemaBehindError(args: readonly string[]): OperationError {
-  return opError('migrations_pending', 'Orchestrator migrations are up to date, but schema migrations are behind; this run did not apply them.',
+  return opError('migrations_pending', 'Schema migrations are behind; this run did not apply them.',
     'Apply them with `gbrain apply-migrations --yes` (or `--force-schema`).',
     { fix: rerunFix(args, 'Applies the pending schema migrations (no consent effect; it migrates the brain\'s own schema).', true) });
 }

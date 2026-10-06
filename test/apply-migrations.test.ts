@@ -236,7 +236,8 @@ describe('failed migration prints phase detail (#921)', () => {
 
 // #1530: apply-migrations must not report "All migrations up to date" (exit 0)
 // while the SCHEMA is behind. --yes runs the schema migrations in the
-// pre-flight; interactive runs flag schemaBehind and exit 1.
+// pre-flight; interactive runs flag schemaBehind and exit 1. The exit status
+// itself is pinned on Postgres by test/e2e/apply-migrations-schema-behind.test.ts.
 describe('resolveSchemaBehind (#1530)', () => {
   test('schema up to date → false, migrations not run', async () => {
     let ran = false;
@@ -282,11 +283,5 @@ describe('resolveSchemaBehind (#1530)', () => {
       run: async () => { throw new Error('boom'); },
     });
     expect(behind).toBe(true);
-  });
-
-  test('up-to-date branch exits 1 when schemaBehind (source shape)', async () => {
-    const { readFileSync } = await import('fs');
-    const src = readFileSync('src/commands/apply-migrations.ts', 'utf8');
-    expect(src).toMatch(/if \(schemaBehind\)[\s\S]{0,300}return 1;[\s\S]{0,120}All migrations up to date/);
   });
 });
