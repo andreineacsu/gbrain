@@ -25,9 +25,9 @@ import { SLUG_WORD_CHARS, SLUG_VARIATION_SELECTORS_RE } from './cjk.ts';
 import { foldNonDecomposingLatin } from './latin-fold.ts';
 import { isIdentityEntity, sameEntityName } from './entities/resolve.ts';
 // #3190: pack-aware link typing. link-inference imports only manifest-v1
-// (zod) + redos-guard (node:vm) — no cycle back into this module.
+// (zod), redos-guard (node:vm) and type-usage (no imports): no cycle back into this module.
 import type { SchemaPackManifest } from './schema-pack/manifest-v1.ts';
-import { inferLinkTypeFromPack, frontmatterLinkTypeFromPack, ownsAttendanceInference } from './schema-pack/link-inference.ts';
+import { inferLinkTypeFromPack, frontmatterLinkTypeFromPack, ownsAttendanceInference, employmentFits } from './schema-pack/link-inference.ts';
 import { PageRegexBudget } from './schema-pack/redos-guard.ts';
 
 /**
@@ -97,7 +97,9 @@ export { parseInlineCitationTimelineEntries, type InlineCitationTimelineCandidat
 // 2026-10-05T03: typed relation lines (core/line-grammar.ts) state their link's type; a per-edge verb that
 // belongs to another link in the window no longer types this one; "joined [X] as <role>" reads as works_at.
 // Re-extract so existing pages pick these up.
-export const LINK_EXTRACTOR_VERSION_TS = '2026-10-05T03:00:00Z';
+// 2026-10-06T12: #6191: employment wording no longer types a link works_at when neither end can be the employer
+// (person -> person, any page -> a meeting or other temporal-primitive page), so those re-derive as mentions.
+export const LINK_EXTRACTOR_VERSION_TS = '2026-10-06T12:00:00Z';
 
 // ─── Entity references ──────────────────────────────────────────
 
@@ -733,7 +735,7 @@ export async function extractPageLinks(
     }
     const suppressPrior = idx !== undefined && idx >= 0 && inSuppressedRange(suppressedRanges, idx);
     const legacy = inferLinkType(pageType, ctx, suppressPrior ? undefined : content, targetSlug,
-      opts.targetType ? targetType ?? null : undefined, bodyReference && idx !== undefined && idx >= 0 ? excerptAnchor(content, idx, 240) : undefined);
+      opts.targetType ? targetType ?? null : undefined, bodyReference && idx !== undefined && idx >= 0 ? excerptAnchor(content, idx, 240) : undefined, pack);
     if (pack?.link_types.some(lt => lt.name === legacy && (lt.inference?.page_type || lt.inference?.target_type))) return { linkType: 'mentions' };
     return { linkType: legacy };
   };
@@ -1260,7 +1262,7 @@ const coordinated = (between: string) => {
   return !lead.trim() && gaps.length > 0 && gaps.every(gap => CONNECTOR_RE.test(gap));
 };
 const GLOBAL_VERB_RULES = VERB_RULES.map(([re, verb]) => [new RegExp(re.source, `${re.flags.replace('g', '')}g`), verb] as const);
-function attachedVerb(context: string, targetSlug?: string, anchor?: number): string | null | undefined {
+function attachedVerb(context: string, targetSlug?: string, anchor?: number, skip?: string): string | null | undefined {
   const fromAnchor = targetSlug && anchor !== undefined ? context.indexOf(targetSlug, anchor) : -1;
   const at = fromAnchor >= 0 ? fromAnchor : targetSlug ? context.indexOf(targetSlug) : -1;
   if (at < 0) return undefined;
@@ -1269,6 +1271,7 @@ function attachedVerb(context: string, targetSlug?: string, anchor?: number): st
   const close = context.slice(at).search(/\)|\]\]/);
   const linkEnd = close >= 0 ? at + close + (context[at + close] === ')' ? 1 : 2) : at + targetSlug!.length;
   for (const [re, verb] of GLOBAL_VERB_RULES) {
+    if (verb === skip) continue;
     for (const m of context.matchAll(re)) {
       const start = m.index ?? 0; const end = start + m[0].length;
       if (end <= linkStart && LINK_MARK_RE.test(context.slice(end, linkStart))
@@ -1296,7 +1299,7 @@ function attachedVerb(context: string, targetSlug?: string, anchor?: number): st
  * lists portfolio companies without repeating the investment verb each time
  * ("Her current board seats reflect her portfolio: [Co A], [Co B], [Co C]").
  */
-export function inferLinkType(pageType: PageType, context: string, globalContext?: string, targetSlug?: string, targetType?: string | null, anchor?: number): string {
+export function inferLinkType(pageType: PageType, context: string, globalContext?: string, targetSlug?: string, targetType?: string | null, anchor?: number, pack?: Pick<LinkExtractionPack, 'page_types'> | null): string {
   if (pageType === 'media') {
     return 'mentions';
   }
@@ -1312,9 +1315,11 @@ export function inferLinkType(pageType: PageType, context: string, globalContext
   // Per-edge verb rules, precedence founded > invested_in > advises > works_at
   // (then the Chinese rules), over the verbs that belong to this link: in
   // "works at [A] and also advises [B]", A is works_at and B advises.
-  const attached = attachedVerb(context, targetSlug, anchor);
+  // #6191: employment wording types a link only when one end can be the employer (employmentFits).
+  const skip = employmentFits(pageType, targetType, pack) ? undefined : 'works_at';
+  const attached = attachedVerb(context, targetSlug, anchor, skip);
   if (attached) return attached;
-  if (attached === undefined) for (const [re, verb] of VERB_RULES) if (re.test(context)) return verb;
+  if (attached === undefined) for (const [re, verb] of VERB_RULES) if (verb !== skip && re.test(context)) return verb;
   // Page-role prior: only fires for person -> company links. Concept pages
   // about VC topics naturally contain "venture capital" in their text, but
   // their company refs are mentions, not investments. Partner pages mentioning
@@ -1327,7 +1332,7 @@ export function inferLinkType(pageType: PageType, context: string, globalContext
   if (pageType === 'person' && globalContext && targetSlug?.startsWith('companies/')) {
     if (PARTNER_ROLE_RE.test(globalContext)) return 'invested_in';
     if (ADVISOR_ROLE_RE.test(globalContext)) return 'advises';
-    if (EMPLOYEE_ROLE_RE.test(globalContext)) return 'works_at';
+    if (!skip && EMPLOYEE_ROLE_RE.test(globalContext)) return 'works_at';
   }
   return 'mentions';
 }

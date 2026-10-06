@@ -562,7 +562,7 @@ export async function extractLinksFromFile(
         && hasAttendanceEvidence(attendanceRanges, position);
       if (!inferred) {
         inferred = guessedPageType === 'meeting' ? (canonicalAttendance ? 'attended' : 'mentions')
-          : inferLinkType(guessedPageType, evidence, scanContent, target, targetType);
+          : inferLinkType(guessedPageType, evidence, scanContent, target, targetType, undefined, pack);
         if (inferred === 'mentions' && !pack && !parsed.typeExplicit) inferred = inferTypeByDir(fileDir, dirname(target), fm);
         if (!canonicalAttendance && pack?.link_types.some(lt => lt.name === inferred && (lt.inference?.page_type || lt.inference?.target_type))) inferred = 'mentions';
       }

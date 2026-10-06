@@ -32,9 +32,9 @@
 //      invested_in / advises / works_at + page-role priors.
 //
 // Callers that want pack-aware behavior wrap their inference call:
-//   const packVerb = inferLinkTypeFromPack(pack, pageType, context, budget);
+//   const packVerb = inferLinkTypeFromPack(pack, pageType, context, budget, targetType);
 //   if (packVerb) return packVerb;
-//   return inferLinkType(pageType, context, globalContext, targetSlug);
+//   return inferLinkType(pageType, context, globalContext, targetSlug, targetType, anchor, pack);
 //
 // Pack-driven verbs WIN over legacy inference because users opt into
 // them deliberately; legacy fall-through covers the gbrain-base
@@ -42,6 +42,38 @@
 
 import type { SchemaPackManifest } from './manifest-v1.ts';
 import { PageRegexBudget, runRegexBounded } from './redos-guard.ts';
+import { classifyStoredType } from './type-usage.ts';
+
+/**
+ * #6191: can employment wording type a link from a page of `pageType` to a
+ * target of `targetType` as `works_at`? The rule reads what the link points
+ * at. A dated record is never an employer or an employee, so a target that is
+ * a meeting, or any type the pack declares with the `temporal` primitive
+ * (deal, email, conversation), is refused. A person target is refused unless
+ * the page can be the employer: graph reads flip the row an employer's page
+ * stores toward one of its people (search/read-enrichment.ts), while a person
+ * or a dated record naming a person has no employer on either end. Aliases
+ * resolve to their canonical type. A target of unknown type and every other
+ * pairing keep the verb, a dated page naming an organization included: a path
+ * no pack prefix maps is typed `concept`, so an organization filed there keeps
+ * its employment edges.
+ */
+export function employmentFits(
+  pageType: string,
+  targetType: string | null | undefined,
+  pack?: Partial<Pick<SchemaPackManifest, 'page_types'>> | null,
+): boolean {
+  if (!targetType) return true;
+  const types = pack?.page_types ?? [];
+  const side = (type: string): 'person' | 'temporal' | 'other' => {
+    const cls = classifyStoredType(type, { page_types: types });
+    const canonical = cls.kind === 'alias_of' ? cls.canonical : type;
+    if (canonical === 'person') return 'person';
+    return canonical === 'meeting' || types.find(t => t.name === canonical)?.primitive === 'temporal' ? 'temporal' : 'other';
+  };
+  const target = side(targetType);
+  return target === 'other' || (target === 'person' && side(pageType) === 'other');
+}
 
 /**
  * Try to resolve a link verb from the active pack's declared

@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test';
+import { join } from 'path';
 import { inferLinkTypeFromPack } from '../src/core/schema-pack/link-inference.ts';
 import { parseSchemaPackManifest } from '../src/core/schema-pack/manifest-v1.ts';
+import { loadPackFromFile } from '../src/core/schema-pack/loader.ts';
 import { extractPageLinks, inferLinkType } from '../src/core/link-extraction.ts';
 import { extractLinksFromFile, resolveCandidateSources } from '../src/commands/extract.ts';
 
@@ -100,5 +102,84 @@ describe('conjunctive link inference', () => {
     const wrong = await extractLinksFromFile(body, 'rivals/rival-example.md', slugs,
       { pack, pageTypes: new Map([['organizations/company-example', 'decision']]) });
     expect(wrong[0].link_type).toBe('mentions');
+  });
+});
+
+// #6191: employment wording near a link types it works_at only when one end of the link can be the employer.
+describe('works_at needs an end that can employ', () => {
+  const bundled = (name: string) => loadPackFromFile(join(import.meta.dir, `../src/core/schema-pack/base/${name}.yaml`));
+  const v1 = bundled('gbrain-base');
+  const v2 = bundled('gbrain-base-v2');
+  const english = (slug: string) => `Alice is the head of platform and an engineer at [Target](${slug})`;
+  const chinese = (slug: string) => `她任职于 [Target](${slug})`;
+  const unlinked = () => 'Alice is the head of platform and an engineer at Target'; // the link is not in the window
+
+  test.each([
+    ['person page -> meeting', english, 'person', 'meetings/2026-04-03', 'meeting', null, 'mentions'],
+    ['person page -> person', english, 'person', 'people/bob-example', 'person', null, 'mentions'],
+    ['person page -> company', english, 'person', 'companies/acme-example', 'company', null, 'works_at'],
+    ['company page -> person (graph reads flip it)', english, 'company', 'people/bob-example', 'person', null, 'works_at'],
+    ['company page -> meeting', english, 'company', 'meetings/2026-04-03', 'meeting', null, 'mentions'],
+    ['concept page -> person', english, 'concept', 'people/bob-example', 'person', null, 'works_at'],
+    ['target of unknown type', english, 'person', 'people/bob-example', null, null, 'works_at'],
+    ['target whose type nobody supplied', english, 'person', 'meetings/2026-04-03', undefined, null, 'works_at'],
+    ['person page -> a pack type with the temporal primitive', english, 'person', 'deals/acme-seed', 'deal', v2, 'mentions'],
+    ['person page -> an alias of a temporal type', english, 'person', 'emails/thread-1', 'email-thread', v2, 'mentions'],
+    ['person page -> an alias of person', english, 'person', 'people/bob-example', 'founder', v2, 'mentions'],
+    ['an alias-of-person page -> person', english, 'founder', 'people/bob-example', 'person', v2, 'mentions'],
+    ['a temporal page -> person', english, 'email', 'people/bob-example', 'person', v2, 'mentions'],
+    ['person page -> another entity type', english, 'person', 'accounts/acme-example', 'account', v2, 'works_at'],
+    ['person page -> the type an unmapped path defaults to', english, 'person', 'funds/fund-a', 'concept', v2, 'works_at'],
+    ['person page -> a type the pack does not declare', english, 'person', 'funds/fund-a', 'fund', v2, 'works_at'],
+    ['person page -> meeting, Chinese wording', chinese, 'person', 'meetings/2026-04-03', 'meeting', null, 'mentions'],
+    ['person page -> company, Chinese wording', chinese, 'person', 'companies/acme-example', 'company', null, 'works_at'],
+    ['person page -> person, link outside the window', unlinked, 'person', 'people/bob-example', 'person', null, 'mentions'],
+    ['person page -> company, link outside the window', unlinked, 'person', 'companies/acme-example', 'company', null, 'works_at'],
+  ] as const)('%s', (_label, wording, pageType, slug, targetType, pack, expected) => {
+    expect(inferLinkType(pageType as never, wording(slug), undefined, slug, targetType, undefined, pack)).toBe(expected);
+  });
+
+  // The page-role prior types a companies/ link from the page's bio alone; it follows the same rule.
+  test.each([
+    ['a meeting filed under a company', 'companies/acme-example/meetings/2026-q1', 'meeting', 'mentions'],
+    ['a person filed under a company', 'companies/acme-example/people/bob-example', 'person', 'mentions'],
+    ['the company', 'companies/acme-example', 'company', 'works_at'],
+  ] as const)('page-role prior toward %s', (_label, slug, targetType, expected) => {
+    expect(inferLinkType('person', `See [Target](${slug})`, 'Alice is a senior engineer at Acme.', slug, targetType)).toBe(expected);
+  });
+
+  const types: Record<string, string> = {
+    'meetings/2026-04-03': 'meeting', 'people/bob-example': 'person', 'companies/acme-example': 'company', 'deals/acme-seed': 'deal',
+  };
+  const page = (meeting: string, person: string, company: string, deal: string) => [
+    `Acme client call with its VP of Sales: [Quarterly](${meeting}).`,
+    `Discussed the Head of Platform role with [Bob](${person}).`,
+    `Alice is an engineer at [Acme](${company}).`,
+    `Bob is a director at [Seed](${deal}).`,
+  ].join('\n\n');
+  const packs = [['no pack', null], ['gbrain-base', v1], ['gbrain-base-v2', v2]] as const;
+  // The same four links on a person's page and on a company's page: only the person target differs by page,
+  // and only the deal differs by pack (a deal is a dated record where a pack says so).
+  const pages = [
+    ['people/alice-example', 'person', 'mentions'],
+    ['companies/widget-co', 'company', 'works_at'],
+  ] as const;
+  const cases = packs.flatMap(([name, pack]) => pages.map(([slug, pageType, person]) => [name, slug, pack, pageType, {
+    'meetings/2026-04-03': 'mentions', 'people/bob-example': person, 'companies/acme-example': 'works_at',
+    'deals/acme-seed': pack ? 'mentions' : 'works_at',
+  }] as const));
+
+  test.each(cases)('page extraction with %s on %s', async (_name, slug, pack, pageType, expected) => {
+    const { candidates } = await extractPageLinks(slug,
+      page('meetings/2026-04-03', 'people/bob-example', 'companies/acme-example', 'deals/acme-seed'), {}, pageType,
+      { resolve: async () => null }, { pack, skipFrontmatter: true, targetType: target => types[target] });
+    expect(Object.fromEntries(candidates.map(c => [c.targetSlug, c.linkType]))).toEqual(expected);
+  });
+
+  test.each(cases)('filesystem extraction with %s on %s', async (_name, slug, pack, _pageType, expected) => {
+    const links = await extractLinksFromFile(
+      page('../meetings/2026-04-03.md', '../people/bob-example.md', '../companies/acme-example.md', '../deals/acme-seed.md'),
+      `${slug}.md`, new Set(Object.keys(types)), { pack });
+    expect(Object.fromEntries(links.map(l => [l.to_slug, l.link_type]))).toEqual(expected);
   });
 });
