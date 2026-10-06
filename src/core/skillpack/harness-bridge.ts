@@ -56,6 +56,7 @@ import {
   recordBridgeWrites,
   removeBridgeSlugs,
   findBridgeEntry,
+  type BridgeEntry,
   type BridgeMode,
   type BridgeWriteRecord,
 } from './bridge-state.ts';
@@ -412,6 +413,13 @@ export interface BridgeApplyResult {
  *  remove skips it (shared files outlive any one slug), the reference lens
  *  reads it so shared-dep drift classifies three-way like everything else. */
 export const SHARED_DEP_LEDGER_KEY = '_shared';
+
+/** The skill slugs a ledger entry owns: every `written` key except the
+ *  shared-dep pseudo-slug, in ledger order. Callers that need skill slugs
+ *  read them here, not from `Object.keys(entry.written)`. */
+export function ownedBridgeSlugs(entry: BridgeEntry | null | undefined): string[] {
+  return entry ? Object.keys(entry.written).filter(s => s !== SHARED_DEP_LEDGER_KEY) : [];
+}
 
 /** Record wrote_new hashes into bridge-state (used by both the success path
  *  and the mid-run-failure partial path — an fs error must not orphan the
@@ -918,7 +926,7 @@ export function removeHarnessBridge(opts: {
   // The shared-dep ledger key never enumerates as a removable slug: shared
   // files belong to every installed skill at once, so removing one slug (or
   // even all of them) leaves the conventions in place.
-  const owned = entry ? Object.keys(entry.written).filter(s => s !== SHARED_DEP_LEDGER_KEY) : [];
+  const owned = ownedBridgeSlugs(entry);
   const requested = opts.slugs === null ? owned : [...opts.slugs].filter(s => s !== SHARED_DEP_LEDGER_KEY);
   const notOwned = requested.filter(s => !owned.includes(s));
   const toRemove = requested.filter(s => owned.includes(s));

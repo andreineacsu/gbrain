@@ -30,6 +30,7 @@ import {
   assertDestNotSymlink,
   assertTargetsConfined,
   bridgeTargetPath,
+  ownedBridgeSlugs,
   planHarnessBridge,
   removeHarnessBridge,
   renderSkillStub,
@@ -303,6 +304,9 @@ describe('remove', () => {
     expect(existsSync(join(dest, 'conventions', 'style.md'))).toBe(true); // shared, hash-tracked but never slug-removed
     const entry = findBridgeEntry(loadBridgeState({ statePath }), { harness: 'claude-code', dest })!;
     expect(Object.keys(entry.written).sort()).toEqual(['_shared', 'beta']);
+    // The reserved key is a ledger record, never one of the entry's skills.
+    expect(ownedBridgeSlugs(entry)).toEqual(['beta']);
+    expect(ownedBridgeSlugs(undefined)).toEqual([]);
   });
 
   test('a user-edited owned file is KEPT on remove (it became yours)', () => {

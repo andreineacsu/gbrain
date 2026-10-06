@@ -35,6 +35,7 @@ import {
   runHarnessReference,
   runHarnessReferenceApply,
   removeHarnessBridge,
+  ownedBridgeSlugs,
   verifySlugsServable,
   assertDestNotSymlink,
   type BridgeHarness,
@@ -704,9 +705,7 @@ export function collectBridgesStatus(gbrainRoot: string): BridgesStatusEntry[] {
   const state = loadBridgeState();
   const out: BridgesStatusEntry[] = [];
   for (const entry of state.entries) {
-    const slugs = Object.keys(entry.written)
-      .filter(s => s !== '_shared')
-      .sort();
+    const slugs = ownedBridgeSlugs(entry).sort();
     let identical = 0;
     let differs = 0;
     let missing = 0;
