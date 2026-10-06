@@ -14,7 +14,7 @@
 
 import { VERSION } from '../version.ts';
 import type { BrainEngine } from '../core/engine.ts';
-import { gbrainPath, loadConfig } from '../core/config.ts';
+import { gbrainPath, loadConfig, type GBrainConfig } from '../core/config.ts';
 import { LiveServeLockError, PgliteBusyError, peekLock } from '../core/pglite-lock.ts';
 import {
   acquireMigrationOrchestrationLock,
@@ -596,18 +596,16 @@ async function runLockedMigrations(
   // recovery path.
   if (cli.forceSchema || cli.forceAll) {
     try {
-      const { loadConfig: lc, toEngineConfig } = await import('../core/config.ts');
-      const { createEngine } = await import('../core/engine-factory.ts');
+      const { loadConfig: lc } = await import('../core/config.ts');
       const cfg = lc();
       if (!cfg) {
         console.error('No brain configured for --force-schema.');
         fail('failed', opError('no_brain', 'No brain configured for --force-schema.', 'Create a brain first: `gbrain init` (`gbrain init --help` lists the options).'));
         return 2;
       }
-      const eng = await createEngine(toEngineConfig(cfg));
-      await eng.connect(toEngineConfig(cfg));
+      const { eng, schemaVer } = await openAtSchemaVersion(cfg);
       console.log('Running schema migrations from current config.version...');
-      const result = await migrateSchema(eng, parseInt(await eng.getConfig('version') || '1', 10));
+      const result = await migrateSchema(eng, schemaVer);
       console.log(`Applied ${result.applied} schema migration(s); now at v${result.current}.`);
       doc.schema = result;
       await eng.disconnect();
@@ -850,8 +848,7 @@ async function preflightSchema(
   // sure the run does NOT report "All migrations up to date" with exit 0.
   try {
     const { LATEST_VERSION } = await import('../core/migrate.ts');
-    const { loadConfig: lc, toEngineConfig } = await import('../core/config.ts');
-    const { createEngine } = await import('../core/engine-factory.ts');
+    const { loadConfig: lc } = await import('../core/config.ts');
     const cfg = lc();
     if (cfg) {
       // v0.36.x #1100: skip the pre-flight warning on PGLite. The probe
@@ -865,10 +862,7 @@ async function preflightSchema(
       if (skipPreflight) {
         dbProbe = { status: 'skipped', reason: 'pglite manages schema in-process' };
       } else {
-        const eng = await createEngine(toEngineConfig(cfg));
-        await eng.connect(toEngineConfig(cfg));
-        const verStr = await eng.getConfig('version');
-        const schemaVer = parseInt(verStr || '1', 10);
+        const { eng, schemaVer } = await openAtSchemaVersion(cfg);
         dbProbe = { status: 'connected', schemaVer, latest: LATEST_VERSION };
         schemaBehind = await resolveSchemaBehind({
           schemaVer,
@@ -894,6 +888,15 @@ async function preflightSchema(
     };
   }
   return { schemaBehind, dbProbe };
+}
+
+/** Connects the configured brain and reads its schema version; the caller disconnects `eng`. */
+async function openAtSchemaVersion(cfg: GBrainConfig): Promise<{ eng: BrainEngine; schemaVer: number }> {
+  const { toEngineConfig } = await import('../core/config.ts');
+  const { createEngine } = await import('../core/engine-factory.ts');
+  const eng = await createEngine(toEngineConfig(cfg));
+  await eng.connect(toEngineConfig(cfg));
+  return { eng, schemaVer: parseInt(await eng.getConfig('version') || '1', 10) };
 }
 
 function requireDbError(dbProbe: DbProbeOutcome): OperationError {
