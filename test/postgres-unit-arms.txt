@@ -46,6 +46,7 @@ test/managed-sync-bulk.test.ts
 test/managed-sync-chunker-version.test.ts
 test/managed-sync-drain.test.ts
 test/managed-sync-group-completion.test.ts
+test/managed-sync-group-head-6075.test.ts
 test/managed-sync-images-5493.test.ts
 test/managed-sync-lanes.test.ts
 test/pack-relation-direction-engine.test.ts

@@ -8,7 +8,7 @@ import type { RegistryCode } from '../error-registry.ts';
 import { currentSourceFilesystemSignal } from '../minions/source-filesystem.ts';
 import { throwIfAborted } from '../abort-check.ts';
 import { digest, sha256 } from './digest.ts';
-import { getWriteRequest, admitWriteInTransaction, receiptFor } from './journal.ts';
+import { getWriteRequest, admitWriteInTransaction, intentDigest, receiptFor } from './journal.ts';
 import { retryWriteAdmission } from './admission-retry.ts';
 import { assertPersistenceAccepting, awaitWrite, foregroundWriteCompletions, startPersistenceConsumer, type WriteWait } from './service.ts';
 import { assertSyncEntryOrigin, discoverManagedSync, resolveManagedSyncContext, readSyncContent, readSyncFile, syncGit, type SyncDiscovery } from './sync-discovery.ts';
@@ -541,6 +541,15 @@ async function groupStep(engine: BrainEngine, cursor: Cursor, key: string, bulk:
   let rows = await engine.executeRaw<WriteRequest>('SELECT * FROM persistence_requests WHERE principal_kind=$1 AND principal_id=$2 AND request_id=ANY($3::uuid[])',
     [principal.kind, principal.id, members.map(member => member.requestId)]);
   if (rows.length < members.length) {
+    // #6075: formGroup adds `group` (and `lane`) to the frozen head under its request ID, so a pass without bulk that froze
+    // the head earlier can admit it on the single path without them. The single path then takes that request, and the
+    // followers, never admitted (a group admits in one transaction), are frozen again. Any other intent stays a conflict.
+    const head = members[0]!, { group: _group, lane: _lane, ...single } = head.intent;
+    const prior = rows.find(row => row.request_id === head.requestId);
+    if (prior && prior.digest === intentDigest({ operation: 'submit_job', sourceId: cursor.sourceId, slug: head.slug, callerIntent: single })) {
+      const next: Cursor = { ...cursor, pending: { ...head, intent: single } }; delete next.group;
+      return { cursor: await saveCursor(engine, key, cursor, next) };
+    }
     const admitted = await admitGroup(engine, members, cursor, async tx => {
       const [held] = await tx.executeRaw<{ request_id: string | null }>(`SELECT completed_keys->0->'pending'->>'requestId' AS request_id FROM op_checkpoints WHERE op=$1 AND fingerprint=$2 FOR SHARE`, [OP, key]);
       return held?.request_id === members[0]!.requestId;
