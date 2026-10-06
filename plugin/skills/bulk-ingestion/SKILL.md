@@ -298,7 +298,7 @@ manifest has no atomic claim). Respect the routing policy in
 idempotent-worker contract in [MANIFEST-PATTERN.md](MANIFEST-PATTERN.md):
 claim by `id`, check status before processing, checkpoint every N items,
 and NEVER mark an item done without verifying its output artifact exists on
-disk. After the bulk run: `gbrain sync` to index everything, then
+disk. After the bulk run: `gbrain sync --no-pull` to index everything, then
 `gbrain check-backlinks check` to catch propagation gaps.
 
 ## Phase 10: MONITOR

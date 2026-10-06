@@ -180,8 +180,15 @@ the write path:
   `gbrain call put_page`) auto-link inline and return
   `auto_links: { created, removed, errors }`.
 - **MCP callers (stdio AND HTTP)** return `auto_links: { skipped: "remote", hint }`
-  and `auto_timeline: { skipped: "remote" }`. Body wikilinks are saved as text.
-  A stdio `gbrain serve` reconciles the edges asynchronously with its
+  and `auto_timeline: { skipped: "remote" }`: nothing is extracted inline.
+  Plain mentions are linked after the commit instead. A queued `links` effect
+  (`auto_links.mention_links: "queued"` in the response, listed by
+  `get_write_request` with `added`/`removed` counts) adds untyped `mentions`
+  edges for body wikilinks, markdown links and page-path mentions whose target
+  already exists in the same source and is visible to the writer.
+  `gbrain config set mcp.remote_auto_links off` disables it.
+  Typed and frontmatter edges are not part of that effect.
+  A stdio `gbrain serve` reconciles them asynchronously with its
   maintenance sweep (startup + 10-minute idle ticks).
   `gbrain serve --http` does not self-sweep — reconcile on demand with
   `gbrain sweep --once` (delegates to the live serve over IPC) or

@@ -351,18 +351,24 @@ person on the `Attendees:` line and in `attendees:` frontmatter (Phase 5) gets a
 page are not recorded as attendance; a pack that overrides attendance, such as
 the older `gbrain-base`, sets its own rule and direction. Leave attendance to
 auto-link rather than `gbrain link` or `add_link`: a hand-written `attended`
-edge can point the wrong way. Over MCP, `put_page` skips auto-link: a stdio
-`gbrain serve` reconciles the page on its maintenance sweep, and behind
-`gbrain serve --http` you run `gbrain sweep --once` or
-`gbrain extract links --source db`.
+edge can point the wrong way. Over MCP, `put_page` does not run auto-link
+inline. Its queued `links` effect adds plain `mentions` edges to pages that
+already exist, never `attended`: attendance waits for link extraction, which no
+MCP tool runs. A stdio `gbrain serve` runs it on its maintenance sweep, and
+behind `gbrain serve --http` someone with a shell on the brain host runs
+`gbrain sweep --once` or `gbrain extract links --source db`.
 
 A missing `attended` edge has one of two causes. Either the attendee record
 breaks a Phase 5 rule, or it names a person whose page did not exist when the
 meeting page was written; auto-link then reports an error and writes none of
 the page's links. This skill creates new people pages in Phase 7, after the
-meeting page, so once Phase 7 is done run `gbrain extract --stale` (over MCP,
-the sweep above) to link the page. You DO still need `gbrain timeline-add` for
-dated events (auto-link only handles links, not timeline entries).
+meeting page, so once Phase 7 is done run `gbrain extract --stale` to link the
+page. An MCP-only agent cannot run that command: on a stdio server wait for the
+next maintenance sweep, and behind `gbrain serve --http` ask the user to run
+`gbrain sweep --once` on the brain host. Then read the meeting page's
+backlinks (`get_backlinks`) to confirm the `attended` edges. You DO still need
+`gbrain timeline-add` for dated events (auto-link only handles links, not
+timeline entries).
 
 ### Phase 8: Entity propagation + timeline merge (MANDATORY)
 
@@ -384,7 +390,9 @@ itself, chain into `skills/signal-detector/SKILL.md` after ingestion.
 
 ### Phase 9: Sync
 
-`gbrain sync` to update the index.
+`gbrain sync --no-pull` to index what this run wrote. `--no-pull` is the form
+every brain accepts: a managed brain refuses a sync that pulls, and takes
+upstream commits through `gbrain sources refresh <source-id>` instead.
 
 ## Verify before declaring done (HARD GATE)
 

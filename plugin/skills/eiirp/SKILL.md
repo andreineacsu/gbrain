@@ -315,8 +315,8 @@ For each entity mentioned:
 - If not: create with enrichment.
 
 ### 4c. Commit and verify
-After ALL pages are written, run `gbrain sync` (or commit + push in the
-brain repo). Verify every link resolves.
+After ALL pages are written, run `gbrain sync --no-pull` (or commit + push in
+the brain repo). Verify every link resolves.
 
 ## Phase 5: SKILL GRAPH AUDIT — DRY + MECE on capabilities
 

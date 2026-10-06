@@ -115,7 +115,8 @@ A media item is NOT fully ingested until entity propagation is complete.
 
 ### Phase 5: Sync
 
-`gbrain sync` to update the index.
+`gbrain sync --no-pull` to index the new pages (a managed brain refuses a sync
+that pulls).
 
 ## Output Format
 

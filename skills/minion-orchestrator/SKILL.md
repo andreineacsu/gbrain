@@ -361,6 +361,33 @@ insurance, so keep the operation in the foreground and stay with it;
 backgrounding here recreates the exact failure the ladder exists to
 prevent.
 
+### Paid operations: approval before submission
+
+A shell job, a cron entry and an agent's own shell have no terminal. A paid
+command there (`embed --stale`, `enrich`, `reindex-code`) runs nothing and
+exits 3 with a `confirmation_required` payload, unless its command line carries
+the user's approval or the user preapproved runs of that size
+(`docs/operations/spend-controls.md`). Before routing one through the ladder:
+
+1. Preview in the foreground. `gbrain embed --stale --dry-run` calls no
+   provider and needs no approval.
+2. Ask the user. The consent payload's `user_message` is written for this and
+   carries the cost estimate.
+3. Submit with the approval on the command itself. Embedding has its own job,
+   so it needs no shell lane:
+
+   ```
+   gbrain jobs submit embed --params '{"stale":true}' --yes
+   ```
+
+   In a shell job the flag goes inside `cmd`
+   (`"cmd":"gbrain embed --stale --yes"`). `--max-usd N` in place of `--yes`
+   holds the run to a cap the user named.
+
+A job whose error starts with `exit 3` was refused, not broken, and nothing
+ran. Ask the user and resubmit with their approval: `gbrain jobs retry <id>`
+replays the same unapproved command.
+
 ### The deadman pattern
 
 A one-shot, self-deleting scheduled check that fires at
@@ -436,6 +463,9 @@ anchors for `--timeout-ms`, not promises.
 | `sync --all` | 5-20 min | 1200000 |
 | `integrity auto` | 10-30 min | 1800000 |
 | `dream` | 5-15 min | 900000 |
+
+`embed --stale` bills the embedding provider: submit it only with the approval
+described under "Paid operations" above.
 
 ### Appendix: content-addressed stage checkpoints
 

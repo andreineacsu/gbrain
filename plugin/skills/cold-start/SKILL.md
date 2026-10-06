@@ -223,7 +223,10 @@ gbrain search "<topic from the imported data>"
 
 - Run link extraction: `gbrain extract links --source db`
 - Run timeline extraction: `gbrain extract timeline --source db`
-- Start embeddings: `gbrain embed --stale` (runs in background)
+- Embed the imported pages: preview with `gbrain embed --stale --dry-run`,
+  then, once the user agrees to the cost, `gbrain embed --stale --yes`. It runs
+  in the foreground; on a paid provider, without a terminal and without that
+  agreement, it exits 3 and embeds nothing.
 
 > **Track progress:**
 > ```bash

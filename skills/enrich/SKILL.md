@@ -274,15 +274,18 @@ Active items, pending decisions, things to track.
 - Update related project/deal pages if relevant context surfaced
 - Check index files if the brain uses them
 
-**Note (v0.10.1):** Links between brain pages are auto-created on every
-`put_page` call (auto-link post-hook). Step 7 focuses on content
+**Note (v0.10.1):** A trusted local write links brain pages inline (auto-link
+post-hook) and its put_page response carries
+`auto_links: { created, removed, errors }`, so Step 7 focuses on content
 cross-references (updating related pages' compiled truth with new signal
-from this enrichment), not on creating links. On a trusted local write the
-put_page response carries `auto_links: { created, removed, errors }`; MCP
-writes (stdio and HTTP) return `auto_links: { skipped: "remote", hint }`
-instead — edges are reconciled by the serve maintenance sweep or
-`gbrain sweep --once`, and `add_link` covers an edge you need immediately.
-Timeline entries still need explicit `gbrain timeline-add` calls.
+from this enrichment), not on creating links. MCP writes (stdio and HTTP)
+return `auto_links: { skipped: "remote", hint }` instead. Plain mentions of
+pages that already exist are still linked after the commit: a queued `links`
+effect adds untyped `mentions` edges, and the response says
+`mention_links: "queued"`. Typed edges (`works_at`, `founded`, `invested_in`)
+are not part of that effect: the serve maintenance sweep or
+`gbrain sweep --once` reconciles them, and `add_link` covers one you need
+immediately. Timeline entries still need explicit `gbrain timeline-add` calls.
 
 ## Bulk Enrichment Rules
 

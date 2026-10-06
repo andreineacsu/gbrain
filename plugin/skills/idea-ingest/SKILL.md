@@ -87,7 +87,7 @@ Format: `- **YYYY-MM-DD** | Referenced in [page title](path) — brief context`
    - Connections — does this involve known people/companies?
    - Don't just summarize. Tell the user things they wouldn't have noticed.
 
-6. **Sync.** `gbrain sync` to update the index.
+6. **Sync.** `gbrain sync --no-pull` to index the new pages (a managed brain refuses a sync that pulls).
 
 ## Output Format
 

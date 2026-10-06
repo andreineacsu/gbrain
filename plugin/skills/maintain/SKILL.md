@@ -388,9 +388,17 @@ and configuration improvements.
 
 ### Embedding freshness
 Chunks without embeddings, or chunks embedded with an old model.
-- For large embedding refreshes (>1000 chunks), use nohup:
-  `nohup gbrain embed refresh > /tmp/gbrain-embed.log 2>&1 &`
-- Then check progress: `tail -1 /tmp/gbrain-embed.log`
+- Preview first: `gbrain embed --stale --dry-run` counts the chunks a backfill
+  would embed. It calls no provider and needs no approval.
+- On a paid embedding provider the backfill needs the user's agreement.
+  Without a terminal and without that agreement, `gbrain embed --stale` embeds
+  nothing and exits 3 with a consent payload: relay its `user_message` (it
+  carries the cost estimate) and wait.
+- Once the user agrees: `gbrain embed --stale --yes` (capped at 1.5x the
+  estimate), or `gbrain embed --stale --max-usd N` for a cap they name.
+- Read the exit status of every run. A backgrounded shell with redirected
+  output hides the exit 3, so route a refresh that will run past ~2 minutes
+  through durable execution in `skills/minion-orchestrator/SKILL.md`.
 
 ### Security (RLS verification)
 Run `gbrain doctor --json` and check the RLS status.
@@ -446,10 +454,14 @@ staleness.
 ### Weekly maintenance
 
 Run `gbrain embed --stale` to refresh embeddings for pages that have changed since
-their last embedding. For large brains (>5000 pages), run this with nohup:
-```bash
-nohup gbrain embed --stale > /tmp/gbrain-embed.log 2>&1 &
-```
+their last embedding. A scheduled run has no terminal, so on a paid embedding
+provider it runs only under approval the user already gave: a per-run
+preapproval they set on the brain host
+(`gbrain config set consent.preapprove.paid.max_usd_per_run <usd>`) or a
+`--max-usd N` cap they agreed to. Without one it exits 3 and embeds nothing:
+put the consent `user_message` in the heartbeat report and wait for the user.
+Never add `--yes` on your own. For large brains (>5000 pages), submit the run
+through durable execution in `skills/minion-orchestrator/SKILL.md`.
 
 ### Monthly backup check
 

@@ -122,7 +122,7 @@ Is there a wrong fact with high confidence? Note its fact id.
 
 - **BRAIN_ERROR:** Edit the page file in the brain repo. Include
   `[Source: user correction, YYYY-MM-DD]` on the corrected line. Commit, then
-  `gbrain sync` so the DB reflects the fix. (Editing the DB row without the
+  `gbrain sync --no-pull` so the DB reflects the fix. (Editing the DB row without the
   repo file — or vice versa — leaves the two out of agreement until the next
   sync overwrites one of them.)
 - **MEMORY_ERROR:** Edit the memory file. Add a correction note with date.
