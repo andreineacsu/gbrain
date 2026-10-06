@@ -318,6 +318,43 @@ describe('remaining CLI gaps (coverage audit)', () => {
     const oc = run(['reference', '--harness', 'openclaw'], env);
     expect(oc.code).toBe(2);
   }, 180_000);
+
+  test('reference --harness with no slug diffs the installed skills, never the shared-dep ledger key', () => {
+    const { home, gbrainHome } = homes();
+    const dest = mkdtempSync(join(tmpdir(), 'gb-harness-dest-'));
+    cleanups.push(dest);
+    const env = { HOME: home, GBRAIN_HOME: gbrainHome };
+    const ledgerKeys = () => {
+      const state = JSON.parse(readFileSync(join(gbrainHome, '.gbrain', 'skillpack-bridge-state.json'), 'utf-8'));
+      return Object.keys(state.entries[0]?.written ?? {}).sort();
+    };
+    const lens = (...slug: string[]) => {
+      const r = run(['reference', '--harness', 'claude-code', '--dest', dest, ...slug, '--json'], env);
+      expect(r.code, r.stderr).toBe(0);
+      return JSON.parse(r.stdout);
+    };
+
+    expect(run(['scaffold', '--harness', 'claude-code', '--skill', 'query', '--dest', dest], env).code).toBe(0);
+    // Shared-dep files (conventions/) are hash-tracked under a reserved key
+    // that sits next to the real slugs in the ledger.
+    expect(ledgerKeys()).toEqual(['_shared', 'query']);
+
+    // One installed skill: the no-slug lens is that skill's lens.
+    const installed = lens();
+    expect(installed.summary.identical).toBeGreaterThan(0);
+    expect(installed.summary.differs).toBe(0);
+    expect(installed.summary.missing).toBe(0);
+    expect(installed).toEqual(lens('query'));
+
+    // A full remove keeps the shared files and their ledger key. With no
+    // installed skill left the lens falls back to the persona default, as it
+    // does for a dest that has no ledger entry.
+    expect(run(['remove', '--harness', 'claude-code', '--dest', dest], env).code).toBe(0);
+    expect(ledgerKeys()).toEqual(['_shared']);
+    const emptied = lens();
+    expect(emptied.summary.missing).toBeGreaterThan(0);
+    expect(emptied.files.some((f: { slug: string | null; status: string }) => f.slug === 'query' && f.status === 'missing')).toBe(true);
+  }, 240_000);
 });
 
 describe('review-driven CLI hardening', () => {

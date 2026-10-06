@@ -549,12 +549,13 @@ export async function cmdReferenceHarness(args: string[]): Promise<void> {
   try {
     const state = loadBridgeState();
     const entry = findBridgeEntry(state, { harness: a.harness, dest });
+    const installed = ownedBridgeSlugs(entry).sort();
     const slugs = positional
       ? [positional]
       : a.skills.length > 0
         ? a.skills
-        : entry && Object.keys(entry.written).length > 0
-          ? Object.keys(entry.written).sort()
+        : installed.length > 0
+          ? installed
           : resolveSlugs(gbrainRoot, a).slugs;
 
     if (a.applyCleanHunks) {
