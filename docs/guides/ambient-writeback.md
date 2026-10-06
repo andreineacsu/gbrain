@@ -75,11 +75,23 @@ bank remains harmless — the target serve's own DB gate decides.
    operating contract — one claim per `remember` call, `entity` whenever a
    person/company/project is the subject, concise provenance (harness +
    session id + date), durable facts without `ttl`, transient facts with the
-   configured TTL, the skip-list, and the visibility rule. stdio resolves it
+   configured TTL, the skip-list, and the visibility rule. Claude Code reads
+   only the first 2,048 characters of a server's instructions, and that
+   section starts after the whole operating contract, so the contract's
+   memory-loop clause also carries a one-line summary in place of its
+   explicit-save item and "Automatic capture is opt-in.": the mode, what to
+   `remember` unasked, the visibility to pass on every save (for a private
+   posture, that remote sessions cannot read those facts back), and the
+   transient TTL with examples. The rule that facts saved with `remember` are
+   read back with `recall` moves up beside it, and the scope clause excepts
+   automatic capture. A client that reads only those characters gets the
+   summary, the read-back rule, `context_pack` and the page-writing guidance;
+   on the full tool surface the end of the answering guidance and the error
+   protocol then fall past the cap. The full section follows the contract. stdio resolves it
    at boot (restart to flip — same posture as `mcp.strict_params`); the HTTP
    transports resolve per request (restart-free, with a last-known-good
-   bundle riding out config blips). The section only renders when the
-   caller can actually invoke `remember` — OAuth tokens without write scope,
+   bundle riding out config blips). The section and the summary only render
+   when the caller can actually invoke `remember` — OAuth tokens without write scope,
    slug-bound clients whose fence denies it, and clamped surfaces that drop
    it all get the base instructions instead (never orders to make calls
    dispatch will deny); `extract_facts` is only named when the transport's
@@ -102,7 +114,8 @@ bank remains harmless — the target serve's own DB gate decides.
    rolled-back registration. Registrar mode
    (`--url` to a non-loopback serve) never installs instruction blocks: the
    local setting speaks for the local brain, and the remote brain's own MCP
-   instructions carry the contract when *its* operator enables writeback.
+   instructions carry the contract when *its* operator enables writeback
+   (the summary line sits inside the 2,048 characters Claude Code reads).
 3. **The Claude Code Stop-hook backstop.** After each assistant turn, the
    hook gates the user's message through a deterministic, zero-LLM filter
    (min length — CJK-aware, pasted blocks removed, ack/greeting lexicon,
