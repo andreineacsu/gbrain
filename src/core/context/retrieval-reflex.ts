@@ -345,38 +345,12 @@ export async function resolveEntitiesToPointers(
     }
   }
 
-  // Arm 2 — exact title OR slug-suffix. This is the recall fix: a bare "Alice
-  // Example" slugifies to alice-example, but the real page is people/alice-example,
-  // so a plain slug = ANY() misses. Match lower(title) exactly or the slug suffix.
+  // Arm 2 — exact title OR slug-suffix, with the surname predicate on the
+  // same statement when armed (see fetchTitleSlugRows).
   let rows: PageRow[] = [];
   const useSurnameArm = surnamePatterns.length > 0;
   try {
-    // The surname predicate rides the SAME query when armed: person pages
-    // whose lower(title) ends with " <token>". Patterns are pre-escaped for
-    // LIKE (backslash default escape); type='person' kills the company-tail
-    // class ("Labs", "Systems" as pseudo-surnames).
-    rows = useSurnameArm
-      ? await engine.executeRaw<PageRow>(
-          `SELECT p.slug, p.source_id, p.title, p.type, p.frontmatter, p.compiled_truth
-             FROM pages p
-            WHERE p.deleted_at IS NULL ${privacySql}
-              AND p.source_id = ANY($1::text[])
-              AND ( lower(p.title) = ANY($2::text[])
-                 OR p.slug = ANY($3::text[])
-                 OR p.slug LIKE ANY($4::text[])
-                 OR (lower(p.title) LIKE ANY($5::text[]) AND p.type = 'person') )`,
-          [sourceIds, titlesLc, exactSlugs, slugSuffixes, surnamePatterns],
-        )
-      : await engine.executeRaw<PageRow>(
-          `SELECT p.slug, p.source_id, p.title, p.type, p.frontmatter, p.compiled_truth
-             FROM pages p
-            WHERE p.deleted_at IS NULL ${privacySql}
-              AND p.source_id = ANY($1::text[])
-              AND ( lower(p.title) = ANY($2::text[])
-             OR p.slug = ANY($3::text[])
-             OR p.slug LIKE ANY($4::text[]) )`,
-          [sourceIds, titlesLc, exactSlugs, slugSuffixes],
-        );
+    rows = await fetchTitleSlugRows(engine, { sourceIds, privacySql, titlesLc, exactSlugs, slugSuffixes, surnamePatterns });
   } catch {
     rows = [];
   }
@@ -525,6 +499,52 @@ export async function resolveEntitiesToPointers(
 
   if (!pointers.length) return null;
   return { pointers, text: renderPointerBlock(pointers) };
+}
+
+/** Inputs of the arm-2 statement; every list is bound as text[], never interpolated. */
+interface TitleSlugProbe {
+  sourceIds: string[];
+  privacySql: string;
+  titlesLc: string[];
+  exactSlugs: string[];
+  slugSuffixes: string[];
+  surnamePatterns: string[];
+}
+
+/**
+ * Arm 2 — exact title OR slug-suffix. This is the recall fix: a bare "Alice
+ * Example" slugifies to alice-example, but the real page is people/alice-example,
+ * so a plain slug = ANY() misses. Match lower(title) exactly or the slug suffix.
+ *
+ * The surname predicate rides the SAME query when armed: person pages
+ * whose lower(title) ends with " <token>". Patterns are pre-escaped for
+ * LIKE (backslash default escape); type='person' kills the company-tail
+ * class ("Labs", "Systems" as pseudo-surnames).
+ */
+function fetchTitleSlugRows(engine: BrainEngine, q: TitleSlugProbe): Promise<PageRow[]> {
+  const { sourceIds, privacySql, titlesLc, exactSlugs, slugSuffixes, surnamePatterns } = q;
+  return surnamePatterns.length > 0
+    ? engine.executeRaw<PageRow>(
+        `SELECT p.slug, p.source_id, p.title, p.type, p.frontmatter, p.compiled_truth
+           FROM pages p
+          WHERE p.deleted_at IS NULL ${privacySql}
+            AND p.source_id = ANY($1::text[])
+            AND ( lower(p.title) = ANY($2::text[])
+               OR p.slug = ANY($3::text[])
+               OR p.slug LIKE ANY($4::text[])
+               OR (lower(p.title) LIKE ANY($5::text[]) AND p.type = 'person') )`,
+        [sourceIds, titlesLc, exactSlugs, slugSuffixes, surnamePatterns],
+      )
+    : engine.executeRaw<PageRow>(
+        `SELECT p.slug, p.source_id, p.title, p.type, p.frontmatter, p.compiled_truth
+           FROM pages p
+          WHERE p.deleted_at IS NULL ${privacySql}
+            AND p.source_id = ANY($1::text[])
+            AND ( lower(p.title) = ANY($2::text[])
+           OR p.slug = ANY($3::text[])
+           OR p.slug LIKE ANY($4::text[]) )`,
+        [sourceIds, titlesLc, exactSlugs, slugSuffixes],
+      );
 }
 
 /** Recover a display label: prefer the matched candidate surface, else the page title. */
