@@ -179,6 +179,22 @@ bundled `gbrain-base` and `gbrain-base-v2` packs mark their `founded`,
 were extracted before v0.60.36.0 re-derives them with
 `gbrain extract links --source db`.
 
+Employment wording near a markdown link types it `works_at` only when one end
+of the link can be the employer. A target that is a `meeting`, or any type the
+active pack declares with `primitive: temporal` (a deal, an email, a
+conversation), keeps `mentions`. So does a `person` target (or an alias of it)
+on a page that is itself a person or a temporal type. A person named on any
+other page keeps the verb, because graph reads flip the row an employer's page
+stores toward its people. A target of unknown type and every other pairing
+keep the verb too: a path no `path_prefixes` entry maps is typed `concept`, so
+an organization filed in an unmapped directory keeps its employment edges. A
+pack whose own `works_at` rule carries a `target_type` and a `regex` decides
+the verb itself. NER body mentions (`gbrain extract ner`) follow the same
+rule: a person mentioned near employment wording on a person or temporal page
+gets no `works_at` row. Pages extracted under the older rule re-derive their
+markdown links on the next `gbrain extract --stale` sweep; NER rows already
+stored are left as they are.
+
 ## How the agent uses the active pack
 
 Every read + write path consults the active pack at runtime:
