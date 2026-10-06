@@ -19,6 +19,7 @@ import { join, resolve } from 'node:path';
 import { PostgresEngine } from '../../src/core/postgres-engine.ts';
 import { LATEST_VERSION } from '../../src/core/migrate.ts';
 import { assertSafeE2eDatabaseUrl } from '../helpers/db-guard.ts';
+import { collect, spawnDriver } from '../helpers/apply-migrations-lock-driver.ts';
 
 const DATABASE_URL = process.env.DATABASE_URL;
 const REPO = resolve(import.meta.dir, '..', '..');
@@ -37,8 +38,9 @@ type Schema = 'current' | 'behind' | 'failing';
 /**
  * `migrates-schema`: the pending orchestrator brings the schema to head itself.
  * `hides-config`: it renames the config table, so the schema version cannot be read again.
+ * `fails`: it reports status failed.
  */
-type Pending = 'none' | 'leaves-schema' | 'migrates-schema' | 'hides-config';
+type Pending = 'none' | 'leaves-schema' | 'migrates-schema' | 'hides-config' | 'fails';
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { while (cleanups.length) await cleanups.pop()!(); });
@@ -103,7 +105,7 @@ mock.module(${JSON.stringify(MODULES.registry)}, () => ({
         else await engine.executeRaw('ALTER TABLE config RENAME TO config_hidden');
         await engine.disconnect();
       }
-      return { version: spec.version, status: 'complete', phases: [] };
+      return { version: spec.version, status: spec.effect === 'fails' ? 'failed' : 'complete', phases: [] };
     },
   })),
 }));
@@ -111,15 +113,7 @@ const { runApplyMigrations } = await import(${JSON.stringify(MODULES.applyMigrat
 await runApplyMigrations(${JSON.stringify(args)});
 process.exit(0);
 `);
-  const child = Bun.spawn([process.execPath, '--no-env-file', driver], {
-    cwd: home,
-    env: { HOME: home, GBRAIN_HOME: home, PATH: process.env.PATH ?? '/usr/bin:/bin', GBRAIN_SKIP_REFERENCE_SWEEP: '1' },
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
-  ]);
+  const { stdout, stderr, code } = await collect(spawnDriver(home, driver));
   const ran = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n') : [];
   const last = stdout.trim().split('\n').at(-1) ?? '';
   return { code, output: stderr + stdout, document: last.startsWith('{') ? JSON.parse(last) : null, ran };
@@ -127,7 +121,7 @@ process.exit(0);
 
 const CASES: Array<{
   name: string; schema: Schema; pending: Pending; args: string[];
-  code: number; error?: string; ran: string[]; version?: number; output?: string;
+  code: number; error?: string; ran: string[]; version?: number; message?: string;
 }> = [
   { name: 'only the reconcile re-check left, no --yes: fails before the re-check',
     schema: 'behind', pending: 'none', args: ['--json'], code: 1, error: 'migrations_pending', ran: [], version: LATEST_VERSION - 1 },
@@ -143,17 +137,19 @@ const CASES: Array<{
     schema: 'behind', pending: 'migrates-schema', args: ['--json'], code: 0, ran: [RECONCILE, PENDING], version: LATEST_VERSION },
   { name: 'a pending migration after which the schema version cannot be read: fails closed',
     schema: 'behind', pending: 'hides-config', args: ['--json'], code: 1, error: 'migrations_pending', ran: [RECONCILE, PENDING],
-    output: 'Could not read the schema version after the migrations ran' },
+    message: 'Could not confirm the schema version after the migrations ran' },
+  { name: 'a pending migration that fails: reports the orchestrator failure, not the schema',
+    schema: 'behind', pending: 'fails', args: ['--json'], code: 1, error: 'migration_failed', ran: [RECONCILE, PENDING], version: LATEST_VERSION - 1 },
 ];
 
 describe.skipIf(!DATABASE_URL)('apply-migrations never exits 0 with the schema left behind (#6089, Postgres)', () => {
-  test.each(CASES)('$name', async ({ schema, pending, args, code, error, ran, version, output }) => {
+  test.each(CASES)('$name', async ({ schema, pending, args, code, error, ran, version, message }) => {
     const databaseUrl = await brainDatabase(schema);
     const run = await runApply(databaseUrl, schema, pending, args);
     expect(run.code, run.output).toBe(code);
     if (error) expect(run.document).toMatchObject({ error });
     else expect(run.document?.error).toBeUndefined();
-    if (output) expect(run.output).toContain(output);
+    if (message) expect(run.document?.message).toContain(message);
     expect(run.ran).toEqual(ran);
     if (version !== undefined) {
       expect(await withEngine(databaseUrl, async engine => parseInt((await engine.getConfig('version')) ?? '0', 10))).toBe(version);
