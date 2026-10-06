@@ -85,8 +85,15 @@ interface GroupsResult {
     counterparty: string;
     loop_count: number;
     loops: Array<Record<string, unknown>>;
+    loops_omitted: number;
     context?: unknown;
   }>;
+  no_counterparty: {
+    loop_count: number;
+    by_type: Record<string, number>;
+    loops: Array<Record<string, unknown>>;
+    loops_omitted: number;
+  };
   count: number;
   stale: boolean;
   sources: Array<{ id: string; stale: boolean }>;
@@ -267,6 +274,131 @@ describe('open_loops grouped', () => {
     expect(json).not.toContain('"quote"');
     expect(json).not.toContain('"deep_link"');
     expect(json).not.toContain('Can you review the plan?');
+  });
+});
+
+describe('open_loops grouped: loops with no counterparty and the per-group cap (#5871)', () => {
+  /** A loop naming no counterparty, the way the extractor writes a pending decision. */
+  function noCounterparty(n: number, over: Partial<OpenLoopUpsert> = {}): OpenLoopUpsert {
+    return loop({
+      dedupKey: `commit:nocp${n}`,
+      loopType: 'decision_pending',
+      counterpartyEmail: null,
+      summary: `Pending decision ${n}`,
+      evidence: [{ quote: `Which option for item ${n}?` }],
+      threadId: null,
+      detector: 'llm_extract',
+      ...over,
+    });
+  }
+
+  /** 9 loops with no counterparty outnumber alice (2 loops) and bob (1 loop). */
+  async function seedOutnumbered(): Promise<void> {
+    for (let n = 0; n < 8; n++) await upsertOpenLoop(engine, noCounterparty(n));
+    await upsertOpenLoop(engine, noCounterparty(8, { loopType: 'commitment_owed_by_me' }));
+    for (const threadId of ['18c2f4a9b3d21e01', '18c2f4a9b3d21e02']) {
+      await upsertOpenLoop(engine, loop({ threadId, counterpartyEmail: 'alice@example.com' }));
+    }
+    await upsertOpenLoop(engine, loop({ threadId: '18c2f4a9b3d21e03', counterpartyEmail: 'bob@example.com' }));
+  }
+
+  test.each([
+    ['trusted local', false],
+    ['remote', true],
+  ])('%s: they stay out of the counterparty ranking and return as no_counterparty', async (_label, remote) => {
+    await seedOutnumbered();
+    const res = (await openLoopsOp.handler(ctx({ remote }), {})) as GroupsResult;
+    expect(res.groups.map((g) => [g.counterparty, g.loop_count])).toEqual([
+      ['alice@example.com', 2],
+      ['bob@example.com', 1],
+    ]);
+    expect(res.count).toBe(12);
+    expect(res.no_counterparty.loop_count).toBe(9);
+    expect(res.no_counterparty.by_type).toEqual({ decision_pending: 8, commitment_owed_by_me: 1 });
+    expect(res.no_counterparty.loops).toHaveLength(5);
+    expect(res.no_counterparty.loops_omitted).toBe(4);
+    // Same redaction as a counterparty's loops.
+    expect('quote' in res.no_counterparty.loops[0]).toBe(!remote);
+
+    // `limit` counts counterparties only.
+    const top1 = (await openLoopsOp.handler(ctx({ remote }), { limit: 1 })) as GroupsResult;
+    expect(top1.groups.map((g) => g.counterparty)).toEqual(['alice@example.com']);
+    expect(top1.no_counterparty.loop_count).toBe(9);
+  });
+
+  test('the digest counts people only and lists them in a trailing section', async () => {
+    await seedOutnumbered();
+    const text = ((await openLoopsOp.handler(ctx(), {})) as GroupsResult).text!;
+    expect(text.split('\n')[0]).toBe('2 people are waiting on you:');
+    expect(text).not.toContain('## unknown');
+    const section = text.indexOf('## No counterparty (9 open: 8 decision_pending, 1 commitment_owed_by_me)');
+    expect(section).toBeGreaterThan(text.indexOf('## bob@example.com (1 open)'));
+    expect(text.slice(section).split('\n').at(-1)).toBe('  +4 more');
+    // 3 loops of real counterparties + 5 of the 9 without one.
+    expect(text.match(/^- \[/gm)).toHaveLength(8);
+  });
+
+  test('only loops with no counterparty: the section alone, never "You are clean"', async () => {
+    for (let n = 0; n < 2; n++) await upsertOpenLoop(engine, noCounterparty(n));
+    const res = (await openLoopsOp.handler(ctx(), {})) as GroupsResult;
+    expect(res.groups).toEqual([]);
+    expect(res.no_counterparty.loops_omitted).toBe(0);
+    expect(res.text!.split('\n')[0]).toBe('## No counterparty (2 open: 2 decision_pending)');
+    expect(res.text!).not.toContain('You are clean');
+    expect(res.text!).not.toContain('waiting on you');
+    expect(res.text!).not.toContain(' more');
+  });
+
+  test('a counterparty shows at most 5 loops, due-dated first, and counts the rest', async () => {
+    const T = Date.parse('2026-10-01T12:00:00Z');
+    const H = 3_600_000;
+    const promise = (key: string, over: Partial<OpenLoopUpsert>): OpenLoopUpsert =>
+      loop({
+        dedupKey: `commit:${key}`,
+        loopType: 'commitment_owed_by_me',
+        counterpartyEmail: 'alice@example.com',
+        detector: 'llm_extract',
+        ...over,
+      });
+    // Promise 0 is the most recently active; the due-dated one is the least.
+    for (let n = 0; n < 7; n++) {
+      await upsertOpenLoop(
+        engine,
+        promise(`cap${n}`, { summary: `Promise ${n}`, lastActivityAt: new Date(T - n * H).toISOString() }),
+      );
+    }
+    await upsertOpenLoop(
+      engine,
+      promise('capdue', {
+        summary: 'Promise due',
+        dueAt: new Date(T + 24 * H).toISOString(),
+        lastActivityAt: new Date(T - 30 * H).toISOString(),
+      }),
+    );
+    // bob sits exactly at the cap: nothing omitted, no "+N more" line.
+    for (let n = 0; n < 5; n++) {
+      await upsertOpenLoop(engine, loop({ threadId: `18c2f4a9b3d21e1${n}`, counterpartyEmail: 'bob@example.com' }));
+    }
+
+    const res = (await openLoopsOp.handler(ctx(), { as_of: new Date(T).toISOString() })) as GroupsResult;
+    const alice = res.groups.find((g) => g.counterparty === 'alice@example.com')!;
+    expect(alice.loop_count).toBe(8);
+    expect(alice.loops.map((l) => l.summary)).toEqual([
+      'Promise due',
+      'Promise 0',
+      'Promise 1',
+      'Promise 2',
+      'Promise 3',
+    ]);
+    expect(alice.loops_omitted).toBe(3);
+    const bob = res.groups.find((g) => g.counterparty === 'bob@example.com')!;
+    expect(bob.loop_count).toBe(5);
+    expect(bob.loops).toHaveLength(5);
+    expect(bob.loops_omitted).toBe(0);
+
+    expect(res.text!).toContain('## alice@example.com (8 open)');
+    expect(res.text!.match(/^ {2}\+\d+ more.*$/gm)).toEqual(['  +3 more']);
+    expect(res.text!).not.toContain('Promise 4');
   });
 });
 

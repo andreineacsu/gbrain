@@ -238,8 +238,39 @@ interface CounterpartyGroup {
   loop_count: number;
   oldest_opened_at: string;
   nearest_due_at: string | null;
+  /** At most LOOPS_PER_GROUP of the group's loops; `loop_count` is the total. */
   loops: LoopView[];
+  loops_omitted: number;
   context?: unknown;
+}
+
+/**
+ * Open loops that name no counterparty: the extractor's pending decisions
+ * never carry one, and a commitment can lack one too. They are not a person,
+ * so they stay out of the counterparty ranking and are reported beside it.
+ */
+interface NoCounterpartyLoops {
+  loop_count: number;
+  by_type: Partial<Record<LoopType, number>>;
+  loops: LoopView[];
+  loops_omitted: number;
+}
+
+/** Loops shown per group, in the text digest and in the JSON alike. */
+const LOOPS_PER_GROUP = 5;
+
+/** The loops a group shows: due-dated first (soonest), then the fetch order
+ *  (most recently active). `loops_omitted` counts the rest. */
+function shownLoops(
+  rows: OpenLoopRow[],
+  view: (l: OpenLoopRow) => LoopView,
+): Pick<CounterpartyGroup, 'loops' | 'loops_omitted'> {
+  const dueMs = (l: OpenLoopRow): number => (l.due_at ? Date.parse(l.due_at) : Number.MAX_SAFE_INTEGER);
+  const ordered = [...rows].sort((a, b) => dueMs(a) - dueMs(b));
+  return {
+    loops: ordered.slice(0, LOOPS_PER_GROUP).map(view),
+    loops_omitted: Math.max(0, rows.length - LOOPS_PER_GROUP),
+  };
 }
 
 function rankGroups(groups: CounterpartyGroup[], backlinks: Map<string, number>, nowMs: number): CounterpartyGroup[] {
@@ -257,9 +288,9 @@ function rankGroups(groups: CounterpartyGroup[], backlinks: Map<string, number>,
   return [...groups].sort((a, b) => score(b) - score(a) || a.counterparty.localeCompare(b.counterparty));
 }
 
-function renderText(groups: CounterpartyGroup[], stale: boolean, noGoogleSources: boolean,
-  coverage: { completeness: 'complete' | 'partial'; held: HeldItemView[] }, nowMs: number,
-  partialStaleSources: string[]): string {
+function renderText(groups: CounterpartyGroup[], noCounterparty: NoCounterpartyLoops, stale: boolean,
+  noGoogleSources: boolean, coverage: { completeness: 'complete' | 'partial'; held: HeldItemView[] },
+  nowMs: number, partialStaleSources: string[]): string {
   const lines: string[] = [];
   const { held } = coverage;
   if (stale) lines.push('⚠ google sources have not synced recently — this may be out of date.');
@@ -270,12 +301,13 @@ function renderText(groups: CounterpartyGroup[], stale: boolean, noGoogleSources
   }
   const partial = coverage.completeness === 'partial';
   const what = held.length ? `${held.length} held item(s) could not be imported:` : 'the held-item state could not be read.';
-  if (partial && groups.length === 0) {
+  const noLoops = groups.length === 0 && noCounterparty.loop_count === 0;
+  if (partial && noLoops) {
     lines.push(`No open loops found, but coverage is partial: ${what}`, ...partialLines(held));
     return lines.join('\n');
   }
   if (partial) lines.push(`⚠ Coverage is partial: ${what}`, ...partialLines(held), '');
-  if (groups.length === 0) {
+  if (noLoops) {
     if (noGoogleSources) {
       // Trust-critical copy: on a brain whose email arrives some other way
       // (a gateway, an agent-authored collector), "You are clean" would be a
@@ -290,19 +322,35 @@ function renderText(groups: CounterpartyGroup[], stale: boolean, noGoogleSources
     lines.push('No open loops — no unanswered threads older than 24h and no tracked promises. You are clean.');
     return lines.join('\n');
   }
-  lines.push(`${groups.length} ${groups.length === 1 ? 'person is' : 'people are'} waiting on you:`);
+  const loopLines = (l: LoopView): string[] => {
+    const due = l.due_at ? ` — due ${l.due_at.slice(0, 10)}` : '';
+    // Age renders at READ time from last_activity_at — stored summaries
+    // deliberately carry no age (it would freeze at detection time).
+    const ageDays = Math.max(0, Math.floor((nowMs - Date.parse(l.last_activity_at)) / 86_400_000));
+    const age = Number.isFinite(ageDays) ? ` (${ageDays}d)` : '';
+    return [
+      `- [${l.loop_type}] ${l.summary}${age}${due}`,
+      ...(l.quote ? [`  > "${l.quote}"`] : []),
+      ...(l.deep_link ? [`  ${l.deep_link}`] : []),
+    ];
+  };
+  if (groups.length > 0) {
+    lines.push(`${groups.length} ${groups.length === 1 ? 'person is' : 'people are'} waiting on you:`);
+  }
   for (const g of groups) {
     lines.push('', `## ${g.counterparty} (${g.loop_count} open)`);
-    for (const l of g.loops) {
-      const due = l.due_at ? ` — due ${l.due_at.slice(0, 10)}` : '';
-      // Age renders at READ time from last_activity_at — stored summaries
-      // deliberately carry no age (it would freeze at detection time).
-      const ageDays = Math.max(0, Math.floor((nowMs - Date.parse(l.last_activity_at)) / 86_400_000));
-      const age = Number.isFinite(ageDays) ? ` (${ageDays}d)` : '';
-      lines.push(`- [${l.loop_type}] ${l.summary}${age}${due}`);
-      if (l.quote) lines.push(`  > "${l.quote}"`);
-      if (l.deep_link) lines.push(`  ${l.deep_link}`);
-    }
+    for (const l of g.loops) lines.push(...loopLines(l));
+    if (g.loops_omitted > 0) lines.push(`  +${g.loops_omitted} more`);
+  }
+  if (noCounterparty.loop_count > 0) {
+    // Most common type first in the breakdown.
+    const types = Object.entries(noCounterparty.by_type).sort(([a, x], [b, y]) => y - x || a.localeCompare(b));
+    if (lines.length > 0 && lines[lines.length - 1] !== '') lines.push('');
+    lines.push(
+      `## No counterparty (${noCounterparty.loop_count} open: ${types.map(([type, n]) => `${n} ${type}`).join(', ')})`,
+    );
+    for (const l of noCounterparty.loops) lines.push(...loopLines(l));
+    if (noCounterparty.loops_omitted > 0) lines.push(`  +${noCounterparty.loops_omitted} more`);
   }
   return lines.join('\n');
 }
@@ -314,7 +362,11 @@ const open_loops: Operation = {
   outputRedaction: 'retrieval',
   description:
     'The open-loop engine\'s killer output: who is waiting on you, what you promised, and the context ' +
-    'needed to respond. Grouped by counterparty (default, ranked) or flat. Loops come from the ' +
+    'needed to respond. Grouped by counterparty (default, ranked) or flat. A group carries its total ' +
+    '`loop_count` and at most 5 loops (due soonest first, then most recently active); `loops_omitted` ' +
+    'counts the rest. Loops that name no counterparty (pending decisions, mostly) are not ranked as a ' +
+    'person: they come back in `no_counterparty` (`loop_count`, `by_type`, the same 5-loop cap), and ' +
+    'the flat view with `loop_type` lists more of them, up to `limit`. Loops come from the ' +
     'deterministic Gmail thread-state detector and the LLM commitment extractor. Remote callers get ' +
     'redacted evidence (no verbatim quotes); trusted local callers also get quotes, Gmail deep links, ' +
     'entity-card context, and a pre-rendered text digest. Carries google-source freshness (stale flag) and ' +
@@ -416,8 +468,17 @@ const open_loops: Operation = {
     }
 
     const byKey = new Map<string, CounterpartyGroup>();
+    const rowsOf = new Map<CounterpartyGroup, OpenLoopRow[]>();
+    // #5871: a loop naming no counterparty is not a person. Under one shared
+    // key those loops would outgrow every real counterparty on loop count
+    // and rank first, so they are collected apart from the groups.
+    const noCounterpartyRows: OpenLoopRow[] = [];
     for (const l of loops) {
-      const key = l.counterparty_slug ?? l.counterparty_email ?? 'unknown';
+      const key = l.counterparty_slug ?? l.counterparty_email;
+      if (key === null) {
+        noCounterpartyRows.push(l);
+        continue;
+      }
       let g = byKey.get(key);
       if (!g) {
         g = {
@@ -429,13 +490,15 @@ const open_loops: Operation = {
           oldest_opened_at: l.opened_at,
           nearest_due_at: null,
           loops: [],
+          loops_omitted: 0,
         };
         byKey.set(key, g);
+        rowsOf.set(g, []);
       }
       g.loop_count++;
       if (l.opened_at < g.oldest_opened_at) g.oldest_opened_at = l.opened_at;
       if (l.due_at && (!g.nearest_due_at || l.due_at < g.nearest_due_at)) g.nearest_due_at = l.due_at;
-      g.loops.push(loopView(l, trusted, deepLinks));
+      rowsOf.get(g)?.push(l);
     }
 
     const backlinks = new Map<string, number>();
@@ -466,6 +529,15 @@ const open_loops: Operation = {
 
     const limit = Math.min(Math.max((p.limit as number | undefined) ?? 3, 1), 50);
     const groups = rankGroups([...byKey.values()], backlinks, nowMs).slice(0, limit);
+    const view = (l: OpenLoopRow): LoopView => loopView(l, trusted, deepLinks);
+    for (const g of groups) Object.assign(g, shownLoops(rowsOf.get(g) ?? [], view));
+    const byType: Partial<Record<LoopType, number>> = {};
+    for (const l of noCounterpartyRows) byType[l.loop_type] = (byType[l.loop_type] ?? 0) + 1;
+    const noCounterparty: NoCounterpartyLoops = {
+      loop_count: noCounterpartyRows.length,
+      by_type: byType,
+      ...shownLoops(noCounterpartyRows, view),
+    };
 
     // Entity-card context (zero-LLM, trusted local only).
     if (trusted && (p.include_context as boolean | undefined) !== false) {
@@ -485,6 +557,7 @@ const open_loops: Operation = {
 
     return {
       groups,
+      no_counterparty: noCounterparty,
       count: loops.length,
       truncated,
       stale: freshness.stale,
@@ -495,7 +568,7 @@ const open_loops: Operation = {
       no_google_sources: noGoogleSources,
       redacted: !trusted,
       as_of: new Date(nowMs).toISOString(),
-      ...(trusted ? { text: renderText(groups, freshness.stale, noGoogleSources, coverage, nowMs, partialStaleSources) } : {}),
+      ...(trusted ? { text: renderText(groups, noCounterparty, freshness.stale, noGoogleSources, coverage, nowMs, partialStaleSources) } : {}),
     };
   },
 };

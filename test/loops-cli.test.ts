@@ -186,6 +186,63 @@ describe('runWaiting', () => {
     expect(r.verdict).toBe(0);
   });
 
+  /** A loop naming no counterparty, the way the extractor writes a pending decision. */
+  function pendingDecision(n: number): OpenLoopUpsert {
+    return loop({
+      dedupKey: `commit:dec${n}`,
+      loopType: 'decision_pending',
+      counterpartyEmail: null,
+      summary: `Pending decision ${n}`,
+      threadId: null,
+      detector: 'llm_extract',
+    });
+  }
+
+  test('#5871: each counterparty shows at most 5 loops and loops with no counterparty follow the people; --json carries the same', async () => {
+    for (let n = 0; n < 7; n++) {
+      await upsertOpenLoop(
+        engine,
+        loop({ dedupKey: `commit:bob${n}`, loopType: 'commitment_owed_by_me', detector: 'llm_extract', summary: `Promise ${n}` }),
+      );
+    }
+    for (let n = 0; n < 6; n++) await upsertOpenLoop(engine, pendingDecision(n));
+
+    const text = await captured(() => runWaiting(engine, []));
+    expect(text.out.split('\n')[0]).toBe('1 person is waiting on you:');
+    expect(text.out).toContain('## bob@example.com (7 open)');
+    expect(text.out).toContain('  +2 more\n');
+    expect(text.out).toContain('## No counterparty (6 open: 6 decision_pending)');
+    expect(text.out).toContain('  +1 more\n');
+    expect(text.out).not.toContain('unknown');
+    expect(text.out.match(/^- \[/gm)).toHaveLength(10);
+    expect(text.verdict).toBe(0);
+
+    const json = await captured(() => runWaiting(engine, ['--json']));
+    const env = JSON.parse(json.out) as {
+      count: number;
+      groups: Array<{ counterparty: string; loop_count: number; loops: unknown[]; loops_omitted: number }>;
+      no_counterparty: { loop_count: number; by_type: Record<string, number>; loops: unknown[]; loops_omitted: number };
+    };
+    expect(env.count).toBe(13);
+    expect(env.groups.map((g) => [g.counterparty, g.loop_count, g.loops.length, g.loops_omitted])).toEqual([
+      ['bob@example.com', 7, 5, 2],
+    ]);
+    expect(env.no_counterparty.loop_count).toBe(6);
+    expect(env.no_counterparty.by_type).toEqual({ decision_pending: 6 });
+    expect(env.no_counterparty.loops).toHaveLength(5);
+    expect(env.no_counterparty.loops_omitted).toBe(1);
+  });
+
+  test('#5871: only loops with no counterparty → the section and the management hint print, not "You are clean"', async () => {
+    await upsertOpenLoop(engine, pendingDecision(0));
+    const r = await captured(() => runWaiting(engine, []));
+    expect(r.out.split('\n')[0]).toBe('## No counterparty (1 open: 1 decision_pending)');
+    expect(r.out).not.toContain('You are clean');
+    expect(r.out).not.toContain('waiting on you');
+    expect(r.out).toContain('gbrain loops done <id>');
+    expect(r.verdict).toBe(0);
+  });
+
   test('fresh source, zero loops → "You are clean", no management hint', async () => {
     const r = await captured(() => runWaiting(engine, []));
     expect(r.out).toContain('You are clean');

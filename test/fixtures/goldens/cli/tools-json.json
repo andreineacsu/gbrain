@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 205173,
-    "stdoutSha256": "cc60b726a258b932cc425079c3011b4a1f0b376ea6c258273e54d019ab75e9cc",
+    "stdoutBytes": 205555,
+    "stdoutSha256": "46d9be8d36d736cf8128e0c9959c936027e9eb246a87f478dcddac364e4b72dd",
     "toolNames": [
       "remember",
       "entity",
@@ -6316,7 +6316,7 @@
         "scope": "admin"
       },
       {
-        "description": "The open-loop engine's killer output: who is waiting on you, what you promised, and the context needed to respond. Grouped by counterparty (default, ranked) or flat. Loops come from the deterministic Gmail thread-state detector and the LLM commitment extractor. Remote callers get redacted evidence (no verbatim quotes); trusted local callers also get quotes, Gmail deep links, entity-card context, and a pre-rendered text digest. Carries google-source freshness (stale flag) and completeness: when it is \"partial\", some mail in the window is held after repeated import failures; present the answer as partial and name the held items and their retry command.",
+        "description": "The open-loop engine's killer output: who is waiting on you, what you promised, and the context needed to respond. Grouped by counterparty (default, ranked) or flat. A group carries its total `loop_count` and at most 5 loops (due soonest first, then most recently active); `loops_omitted` counts the rest. Loops that name no counterparty (pending decisions, mostly) are not ranked as a person: they come back in `no_counterparty` (`loop_count`, `by_type`, the same 5-loop cap), and the flat view with `loop_type` lists more of them, up to `limit`. Loops come from the deterministic Gmail thread-state detector and the LLM commitment extractor. Remote callers get redacted evidence (no verbatim quotes); trusted local callers also get quotes, Gmail deep links, entity-card context, and a pre-rendered text digest. Carries google-source freshness (stale flag) and completeness: when it is \"partial\", some mail in the window is held after repeated import failures; present the answer as partial and name the held items and their retry command.",
         "idempotent": true,
         "local_only": false,
         "mutating": false,

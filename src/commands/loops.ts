@@ -62,8 +62,12 @@ interface WaitingResult {
       deep_link?: string;
       page_slug: string | null;
     }>;
+    /** Loops of this counterparty beyond the ones in `loops`. */
+    loops_omitted: number;
     context?: { summary?: string; last_touched?: { last_timeline_date?: string | null } };
   }>;
+  /** Loops naming no counterparty: reported after the people, never ranked as one. */
+  no_counterparty: { loop_count: number; by_type: Record<string, number>; loops_omitted: number };
   count: number;
   stale: boolean;
   sources: Array<{ id: string; last_sync_at: string | null; stale: boolean }>;
@@ -131,7 +135,7 @@ export async function runWaiting(engine: BrainEngine, args: string[]): Promise<v
     return;
   }
   process.stdout.write((result.text ?? 'No open loops.') + '\n');
-  if (result.groups.length > 0) {
+  if (result.groups.length > 0 || result.no_counterparty.loop_count > 0) {
     process.stdout.write(
       `\n(close: gbrain loops done <id> · mute a sender: gbrain loops mute sender <email> · details: gbrain loops list)\n`,
     );
