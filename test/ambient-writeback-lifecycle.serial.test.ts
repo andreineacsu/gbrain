@@ -176,6 +176,7 @@ describe('ambient writeback — hermetic 5-step lifecycle', () => {
       await s1.start();
       const instructions = String(s1.initialize?.instructions ?? '');
       expect(instructions).toContain('Ambient memory writeback');
+      expect(instructions).toContain('Automatic capture is ON (mode: salient');
       expect(instructions).toContain('mode: salient');
       expect(instructions).toContain('ttl: "3d"');
       expect(instructions).toContain('not the public internet');
@@ -307,10 +308,13 @@ describe('ambient writeback — hermetic 5-step lifecycle', () => {
       };
 
       const rwInstructions = await initWith(rwToken);
+      // #6170: the cap-safe summary and the full section both arrive; 'not the public internet' is section-only.
+      expect(rwInstructions).toContain('Automatic capture is ON (mode: salient');
       expect(rwInstructions).toContain('Ambient memory writeback');
-      expect(rwInstructions).toContain('mode: salient');
+      expect(rwInstructions).toContain('not the public internet');
 
       const roInstructions = await initWith(roToken);
+      expect(roInstructions).not.toContain('Automatic capture is ON');
       expect(roInstructions).not.toContain('Ambient memory writeback');
       expect(roInstructions).toContain('GBrain agent operating contract');
     } finally {

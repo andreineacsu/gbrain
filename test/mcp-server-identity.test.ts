@@ -10,7 +10,7 @@
 
 import { describe, expect, test } from 'bun:test';
 import { GBRAIN_MCP_INSTRUCTIONS, resolveMcpInstructions, buildMcpInstructions } from '../src/mcp/instructions.ts';
-import { buildAmbientWritebackSection } from '../src/core/facts/writeback-instructions.ts';
+import { buildAmbientWritebackSection, buildAmbientWritebackSummary } from '../src/core/facts/writeback-instructions.ts';
 
 describe('resolveMcpInstructions', () => {
   test('appends the configured deployment identity under the canonical contract', () => {
@@ -58,8 +58,9 @@ describe('resolveMcpInstructions', () => {
 
 // The merge of the ambient-writeback section (#4788) and the deployment
 // identity (#4748) fixed the composition order: contract → writeback section
-// → identity. Both extensions are append-only; each is byte-identical to the
-// layer below it when unset.
+// → identity. The identity is append-only; writeback appends its section and
+// also puts its summary into the contract's memory-loop clause (#6170). Each
+// is byte-identical to the layer below it when unset.
 describe('resolveMcpInstructions — three-way composition with the ambient-writeback section', () => {
   const WRITEBACK = { mode: 'salient' as const, transientTtl: '3d', visibility: 'world' as const, extractFactsAvailable: true };
 
@@ -67,7 +68,7 @@ describe('resolveMcpInstructions — three-way composition with the ambient-writ
     const out = resolveMcpInstructions({ mcp: { instructions: 'Team wiki brain' } }, {}, { writeback: WRITEBACK });
     const base = buildMcpInstructions({ writeback: WRITEBACK });
     expect(out).toBe(`${base}\n\nDeployment identity:\nTeam wiki brain`);
-    expect(out.startsWith(GBRAIN_MCP_INSTRUCTIONS + '\n\n')).toBe(true);
+    expect(out.indexOf(buildAmbientWritebackSummary(WRITEBACK))).toBeLessThan(out.indexOf(buildAmbientWritebackSection(WRITEBACK)));
     expect(out.indexOf(buildAmbientWritebackSection(WRITEBACK))).toBeLessThan(out.indexOf('Deployment identity:'));
   });
 

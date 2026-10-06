@@ -1,11 +1,12 @@
 /**
  * Ambient memory writeback — the canonical instruction section (F1 leaf).
  *
- * ONE builder feeds every activation surface: the MCP initialize
+ * ONE module feeds every activation surface: the MCP initialize
  * `instructions` field on all three transports (src/mcp/instructions.ts
- * composes it under the base operating contract) and the managed bootstrap
- * instruction blocks (src/core/bootstrap/instructions-block.ts). Single
- * source ⇒ the surfaces structurally cannot drift.
+ * composes the section under the base operating contract and the summary
+ * into its memory-loop clause) and the managed bootstrap instruction blocks
+ * (src/core/bootstrap/instructions-block.ts). Single source ⇒ the surfaces
+ * structurally cannot drift.
  *
  * Discipline inherited from src/mcp/instructions.ts: pure source text, no
  * filesystem or dynamic loading — compiled binaries and remote-only installs
@@ -34,9 +35,13 @@ export interface AmbientWritebackOpts {
   extractFactsAvailable: boolean | 'unknown';
 }
 
+/** Shared by the section and the summary, so the copy a capped client acts on cannot drift from the section. */
+const SALIENT_KINDS = 'preferences, corrections, decisions, commitments, relationships, and project-state changes';
+const TRANSIENT_KINDS = 'health, location, travel, mood, near-term schedule';
+
 export function buildAmbientWritebackSection(opts: AmbientWritebackOpts): string {
   const candidatePolicy = opts.mode === 'salient'
-    ? 'Save the durable, notable ones: preferences, corrections, decisions, commitments, relationships, and project-state changes.'
+    ? `Save the durable, notable ones: ${SALIENT_KINDS}.`
     : 'Save every direct factual statement the user makes — still excluding operational chatter, assistant-generated content, secrets or credentials, and quoted third-party material.';
   const multiFact = opts.extractFactsAvailable === true
     ? 'For a raw turn carrying several facts, submit the turn text once through extract_facts instead of many remember calls.'
@@ -57,10 +62,33 @@ export function buildAmbientWritebackSection(opts: AmbientWritebackOpts): string
 3. ${multiFact}
 4. Include concise provenance on every save: harness name, session or thread id when available, and the date (e.g. "codex session 8f3a, 2026-09-01").
 5. Durable facts (preferences, corrections, decisions, commitments, relationships, project state): omit ttl — they never expire.
-6. Transient facts (current health, location, travel, mood, near-term schedule): ${transientLine}
+6. Transient facts (current ${TRANSIENT_KINDS}): ${transientLine}
 7. Skip: greetings, acknowledgements, questions that carry no new facts, tool output, quoted third-party material, and pasted or imported text — unless the user explicitly asks you to remember it.
 8. Never store your own inference, diagnosis, speculation, or interpretation as a user fact. Never store raw transcripts.
 9. ${visibilityLine}
 10. Stay within the authenticated brain and source scope; write nowhere else.
 11. Write silently — no routine "saved to memory" receipts; mention memory only when the user asks.`;
+}
+
+/**
+ * The cap-safe summary of the section (#6170). Claude Code reads only the
+ * first 2,048 characters of a server's MCP instructions, and the section
+ * starts after the whole operating contract, so the MCP composition puts this
+ * line into the contract's memory-loop clause in place of its explicit-save
+ * item and "Automatic capture is opt-in.". It carries what changes a client's
+ * saves when the section never arrives: what to save unprompted, the
+ * visibility to pass (private included, with its remote read-back
+ * consequence, so a cut-off client never widens) and the transient TTL.
+ * Every character here pushes later contract clauses past the cap, so it
+ * stays short. The managed harness blocks have no cap and carry only the
+ * section.
+ */
+export function buildAmbientWritebackSummary(opts: AmbientWritebackOpts): string {
+  const what = opts.mode === 'salient'
+    ? `the user's durable ${SALIENT_KINDS}`
+    : 'every direct factual statement the user makes, never chatter, assistant-generated content, secrets or quoted third-party material';
+  const visibility = opts.visibility === 'world'
+    ? 'visibility: "world"'
+    : 'visibility: "private" (omitting it widens to world; remote sessions, you included, cannot recall or forget it)';
+  return `Automatic capture is ON (mode: ${opts.mode}; full rules below): unasked, \`remember\` ${what}, one claim each, ${visibility}; transient facts (${TRANSIENT_KINDS}) get ttl: "${opts.transientTtl}". Never save your own inferences; save silently.`;
 }

@@ -14,6 +14,7 @@ import { operations } from '../src/core/operations.ts';
 import { filterOpsForSurface } from '../src/mcp/surface.ts';
 import { buildMcpInstructions, GBRAIN_MCP_INSTRUCTIONS, installInstructionsResolver } from '../src/mcp/instructions.ts';
 import type { ReadinessEntry } from '../src/core/readiness.ts';
+import type { AmbientWritebackOpts } from '../src/core/facts/writeback-instructions.ts';
 
 const SURFACES = ['verbs', 'starter', 'full'] as const;
 const OP_NAMES = operations.map(o => o.name);
@@ -115,22 +116,42 @@ describe('F1 generated instructions', () => {
     });
   }
 
+  // #6170: with ambient writeback on, the save rules must arrive inside the cap too. The private rows carry the longest summaries.
+  const WRITEBACK_CASES: Array<{ name: string; writeback: AmbientWritebackOpts | null }> = [
+    { name: 'writeback off', writeback: null },
+    { name: 'writeback salient/world', writeback: { mode: 'salient', transientTtl: '3d', visibility: 'world', extractFactsAvailable: true } },
+    { name: 'writeback salient/private', writeback: { mode: 'salient', transientTtl: '30d', visibility: 'private', extractFactsAvailable: true } },
+    { name: 'writeback all/private', writeback: { mode: 'all', transientTtl: '12h', visibility: 'private', extractFactsAvailable: false } },
+  ];
   for (const surface of SURFACES) {
-    test(`${surface}: prompt-critical lines end within the first ${HARNESS_READ_LIMIT} characters`, () => {
-      const listed = new Set(filterOpsForSurface(operations, surface).map(o => o.name));
-      const text = buildMcpInstructions({ tools: { callable: n => listed.has(n) } });
-      const critical = [
-        listed.has('context_pack') && 'call `context_pack` at session start',
-        listed.has('put_page') && listed.has('get_page') && 'put_page REPLACES the entire page',
-        listed.has('put_page') && 'Writing:',
-      ].filter((marker): marker is string => typeof marker === 'string');
-      for (const marker of critical) {
-        const start = text.indexOf(marker);
-        expect(start).toBeGreaterThanOrEqual(0);
-        const end = text.indexOf('\n', start);
-        expect(end === -1 ? text.length : end).toBeLessThanOrEqual(HARNESS_READ_LIMIT);
-      }
-    });
+    for (const { name, writeback } of WRITEBACK_CASES) {
+      test(`${surface}, ${name}: prompt-critical lines end within the first ${HARNESS_READ_LIMIT} characters`, () => {
+        const listed = new Set(filterOpsForSurface(operations, surface).map(o => o.name));
+        const text = buildMcpInstructions({ writeback, tools: { callable: n => listed.has(n) } });
+        const head = text.slice(0, HARNESS_READ_LIMIT);
+        if (writeback) {
+          expect(head).toContain(`mode: ${writeback.mode}`);
+          expect(head).toContain(`visibility: "${writeback.visibility}"`);
+          expect(head).toContain(`ttl: "${writeback.transientTtl}"`);
+          expect(head).toContain('location, travel');
+        } else {
+          expect(text).not.toMatch(/writeback|capture is on/i);
+        }
+        const critical = [
+          listed.has('context_pack') && 'call `context_pack` at session start',
+          listed.has('put_page') && listed.has('get_page') && 'put_page REPLACES the entire page',
+          listed.has('put_page') && 'Writing:',
+          writeback && listed.has('remember') && 'Automatic capture is ON',
+          listed.has('recall') && (listed.has('search') || listed.has('query')) && 'read back with recall',
+        ].filter((marker): marker is string => typeof marker === 'string');
+        for (const marker of critical) {
+          const start = text.indexOf(marker);
+          expect({ marker, found: start >= 0 }).toEqual({ marker, found: true });
+          const end = text.indexOf('\n', start);
+          expect({ marker, withinCap: (end === -1 ? text.length : end) <= HARNESS_READ_LIMIT }).toEqual({ marker, withinCap: true });
+        }
+      });
+    }
   }
 
   test('no tools and no writeback → the static contract', () => {

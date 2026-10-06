@@ -14,7 +14,7 @@
 import { describe, test, expect, afterAll } from 'bun:test';
 import { createHash } from 'node:crypto';
 
-import { buildAmbientWritebackSection } from '../src/core/facts/writeback-instructions.ts';
+import { buildAmbientWritebackSection, buildAmbientWritebackSummary } from '../src/core/facts/writeback-instructions.ts';
 import { GBRAIN_MCP_INSTRUCTIONS, buildMcpInstructions } from '../src/mcp/instructions.ts';
 import { contractFor } from './helpers/instructions-parity.ts';
 import { startHttpTransport } from '../src/mcp/http-transport.ts';
@@ -104,10 +104,37 @@ describe('buildMcpInstructions composition', () => {
     expect(buildMcpInstructions({})).toBe(GBRAIN_MCP_INSTRUCTIONS);
     expect(buildMcpInstructions({ writeback: null })).toBe(GBRAIN_MCP_INSTRUCTIONS);
   });
-  test('enabled → base + blank line + section, base untouched', () => {
+  test('enabled → the summary takes clause 2\'s explicit-save item and opt-in sentence, the read-back rule moves up, scope excepts capture, then blank line + section', () => {
     const out = buildMcpInstructions({ writeback: BASE_OPTS });
-    expect(out.startsWith(GBRAIN_MCP_INSTRUCTIONS + '\n\n')).toBe(true);
-    expect(out.endsWith(buildAmbientWritebackSection(BASE_OPTS))).toBe(true);
+    const readBack = ' Facts saved with remember are read back with recall (or entity), not search.';
+    const contract = GBRAIN_MCP_INSTRUCTIONS
+      .replace(readBack, '')
+      .replace('; `remember` what the user explicitly asks you to keep, with provenance, and preserve corrections. Automatic capture is opt-in.', `. ${buildAmbientWritebackSummary(BASE_OPTS)}${readBack}`)
+      .replace('write outside the requested task.', 'write outside the requested task (automatic capture excepted).');
+    expect(out).toBe(`${contract}\n\n${buildAmbientWritebackSection(BASE_OPTS)}`);
+    expect(out.split(readBack).length).toBe(2);
+  });
+  test('enabled but remember not callable → byte-identical to writeback off (no summary, no section)', () => {
+    const tools = { callable: (n: string) => n !== 'remember' };
+    expect(buildMcpInstructions({ writeback: BASE_OPTS, tools })).toBe(buildMcpInstructions({ tools }));
+  });
+});
+
+describe('buildAmbientWritebackSummary (#6170, the cap-safe line)', () => {
+  test.each([
+    ['salient/world', BASE_OPTS,
+      ['mode: salient', 'preferences, corrections, decisions, commitments, relationships, and project-state changes', 'visibility: "world"', 'ttl: "3d"', 'health, location, travel, mood, near-term schedule'],
+      ['secrets', 'private']],
+    ['all/private', { ...BASE_OPTS, mode: 'all' as const, visibility: 'private' as const, transientTtl: '12h' },
+      ['mode: all', 'every direct factual statement', 'assistant-generated content', 'secrets', 'visibility: "private"', 'omitting it widens to world', 'cannot recall or forget it', 'ttl: "12h"'],
+      ['visibility: "world"']],
+  ])('%s: what to save unprompted, the visibility to pass and the transient ttl', (_name, opts, present, absent) => {
+    const s = buildAmbientWritebackSummary(opts);
+    for (const marker of present) expect(s).toContain(marker);
+    for (const marker of absent) expect(s).not.toContain(marker);
+    expect(s).toContain('unasked, `remember`');
+    expect(s).toContain('Never save your own inferences; save silently.');
+    expect(s).not.toContain('\n');
   });
 });
 
