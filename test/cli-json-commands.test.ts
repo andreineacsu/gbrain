@@ -5,7 +5,8 @@
  * envelope with `code` + `suggestion`, and legacy keys stay. Subprocesses
  * against a keyless PGLite brain (and an unreachable-Postgres config for
  * the paths that need one); the Postgres-only successes (db-repair healthy,
- * jobs supervisor start --detach, edge-proposals list|show --json) live in
+ * jobs supervisor start --detach, edge-proposals list|show --json and
+ * jobs watch over int8 values) live in
  * test/e2e/cli-json-commands-postgres.test.ts.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';

@@ -175,7 +175,9 @@ export async function readSnapshot(engine: BrainEngine): Promise<WatchSnapshot> 
     budget_owners = ownerRows.map(r => ({
       owner_id: r.owner_id,
       remaining_cents: r.remaining_cents ?? 0,
-      total_spent_cents: r.total_spent_cents ?? 0,
+      // SUM over the INTEGER cents column is int8: postgres.js returns it as a bigint, which the text view's
+      // arithmetic, the JSON view and GET /admin/api/jobs/watch (res.json) all reject. Convert it here, once.
+      total_spent_cents: Number(r.total_spent_cents ?? 0),
     }));
   } catch {
     /* pre-v93 brain */

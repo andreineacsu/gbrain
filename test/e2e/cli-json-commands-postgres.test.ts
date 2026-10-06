@@ -2,8 +2,9 @@
  * Agent contract v1 (D2): the --json successes that need Postgres — a
  * healthy `db-repair --json` report, `jobs supervisor start --detach
  * --json` (one document naming the detached pid, pid file, status and log)
- * and `edge-proposals list|show --json` over a BIGSERIAL proposal id, which
- * only the Postgres driver returns as a bigint (#6193).
+ * and the two views that printed an int8 only the Postgres driver returns as
+ * a bigint: `edge-proposals list|show --json` (BIGSERIAL proposal id) and
+ * `jobs watch` (the summed budget total) (#6193).
  * The failure shapes run keyless in test/cli-json-commands.test.ts.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
@@ -98,4 +99,29 @@ describeDatabase('D2 --json successes against Postgres', () => {
     }
   }, 150_000);
 
+  test('jobs watch with an active budget owner: the JSON and text snapshots carry the reserved total as a number (#6193)', async () => {
+    const engine = getEngine();
+    const [owner] = await engine.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (submission_authority, name, queue, status)
+       VALUES ('{"version":1,"kind":"application"}'::jsonb, 'subagent', $1, 'waiting') RETURNING id`, [`json-watch-${process.pid}`]);
+    const ownerId = Number(owner!.id);
+    await engine.executeRaw(
+      `UPDATE minion_jobs SET budget_remaining_cents = 380, budget_owner_job_id = $1, budget_root_owner_id = $1 WHERE id = $1`, [ownerId]);
+    await engine.executeRaw(
+      `INSERT INTO minion_budget_log (job_id, owner_id, event_type, cents_delta) VALUES ($1, $1, 'reserved', -120)`, [ownerId]);
+    const home = postgresHome('gbrain-json-watch-');
+    try {
+      const json = await runCli(['jobs', 'watch', '--json'], { home, cwd: home, timeoutMs: 60_000 });
+      expect(json.exitCode, json.stderr).toBe(0);
+      expect(JSON.parse(json.stdout)).toMatchObject({
+        event: 'jobs.watch.snapshot',
+        budget_owners: [{ owner_id: ownerId, remaining_cents: 380, total_spent_cents: 120 }],
+      });
+      const text = await runCli(['jobs', 'watch'], { home, cwd: home, timeoutMs: 60_000 });
+      expect(text.exitCode, text.stderr).toBe(0);
+      expect(text.stdout).toContain(`owner=${ownerId}  spent=$1.20  remaining=$3.80`);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  }, 150_000);
 });
