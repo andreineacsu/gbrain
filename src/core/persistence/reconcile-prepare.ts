@@ -34,8 +34,13 @@ function preservePrivateFacts(incoming: string, stored: string): string {
   const next = parseFactsFence(incoming), prior = parseFactsFence(stored);
   if (next.warnings.length || prior.warnings.length) throw opError('invalid_params', 'Fact fences must parse losslessly before reconciliation.',
     'The ## Facts table of the file or of the stored page has rows that do not parse cleanly, so reconciliation cannot prove its private facts are kept; nothing was written. Repair the malformed rows in the file, then generate a fresh preview and apply it.');
-  for (const fact of prior.facts.filter(f => f.visibility !== 'world')) {
-    if (next.facts.some(f => f.claim === fact.claim && (f.visibility !== fact.visibility || f.rowNum === fact.rowNum && digest(f) !== digest(fact)))) {
+  // #6137: a fact row is its row number plus claim (restoreHiddenFactRows' identity), so a stored world row that
+  // shares a private fact's claim is that world row, not the private fact changing visibility.
+  const storedRows = new Map(prior.facts.map(f => [f.rowNum, f]));
+  for (const fact of next.facts) {
+    const storedRow = storedRows.get(fact.rowNum);
+    if (storedRow?.claim === fact.claim ? storedRow.visibility !== 'world' && digest(storedRow) !== digest(fact)
+      : prior.facts.some(p => p.visibility !== 'world' && p.claim === fact.claim && p.visibility !== fact.visibility)) {
       throw opError('permission_denied', 'Reconciliation cannot modify protected private facts; use the scoped fact workflow.',
         'The reconciled page would edit, renumber or change the visibility of a private fact, which reconcile never does; nothing was written. Keep those fact rows as stored, generate a fresh preview, and change private facts through the fact tools (remember, forget) instead.');
     }

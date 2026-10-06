@@ -22,7 +22,7 @@ import { retainReconcileBackup } from '../src/core/persistence/reconcile-backup.
 import { prepareReconcileMutation } from '../src/core/persistence/reconcile-prepare.ts';
 import { publishMutation } from '../src/core/persistence/coordinator.ts';
 import { localHostId } from '../src/core/persistence/identity.ts';
-import { parseFactsFence, renderFactsTable, upsertFactRow } from '../src/core/facts-fence.ts';
+import { parseFactsFence, renderFactsTable, upsertFactRow, type ParsedFact } from '../src/core/facts-fence.ts';
 import { sha256 } from '../src/core/persistence/digest.ts';
 import type { OperationContext } from '../src/core/ops/contract.ts';
 import { operationsByName } from '../src/core/operations.ts';
@@ -232,6 +232,61 @@ test('private and withdrawn timeline facts survive file choices without resurrec
     expect(parseFactsFence(current.page.compiled_truth).facts[0].visibility).toBe('private');
     expect(parseFactsFence(current.page.timeline).facts[0].validUntil).toBe(retired.validUntil);
   });
+}), 120_000);
+
+test('a private fact sharing its claim with a world row survives unrelated edits; real private fact changes stay refused (#6137)', async () => isolated(async engine => {
+  const fact = (rowNum: number, visibility: 'private' | 'world', extra: Partial<ParsedFact> = {}): ParsedFact =>
+    ({ rowNum, claim: 'Prefers a private example venue', kind: 'fact', confidence: 1, visibility, notability: 'medium', active: true, ...extra });
+  const forgotten = { active: false, forgotten: true, context: 'forgotten: example reason' };
+  const body = (rows: ParsedFact[]) => `Example biography.\n\n## Facts\n\n${renderFactsTable(rows)}\n`;
+  const takeFile = [{ path: '/compiled_truth', action: 'take_file' }];
+  const added = 'An unrelated added body line.';
+  const twins = [fact(1, 'private'), fact(2, 'world')], forgottenTwins = [fact(1, 'private', forgotten), fact(2, 'world')];
+  // The fixture's file always drifts in frontmatter; the file may also rewrite the fence and add a body line outside it.
+  const editFile = (f: Awaited<ReturnType<typeof fixture>>, storedRows: readonly ParsedFact[], fileRows: readonly ParsedFact[], bodyEdit = false) => {
+    const text = readFileSync(f.file, 'utf8');
+    expect(text).toContain(renderFactsTable([...storedRows]));
+    const edited = text.replace(renderFactsTable([...storedRows]), renderFactsTable([...fileRows]));
+    writeFileSync(f.file, bodyEdit ? edited.replace('Example biography.', `Example biography.\n\n${added}`) : edited);
+  };
+  for (const [name, storedRows, fileRows, bodyEdit] of [
+    ['frontmatter edit, active twins', twins, twins, false],
+    ['body edit, active twins', twins, twins, true],
+    ['frontmatter edit, forgotten private twin', forgottenTwins, forgottenTwins, false],
+    ['body edit, forgotten private twin', forgottenTwins, forgottenTwins, true],
+    ['edits the world twin', twins, [fact(1, 'private'), fact(2, 'world', { confidence: 0.5 })], false],
+    ['adds an unrelated world row', [fact(1, 'private')], [fact(1, 'private'), fact(2, 'world', { claim: 'Works at acme-example' })], false],
+  ] as const) {
+    const f = await fixture(engine, false, body([...storedRows]));
+    editFile(f, storedRows, fileRows, bodyEdit);
+    await local(engine, f.registration, async () => {
+      let { preview } = await runReconcilePreview(engine, { source_id: f.id, slug: f.slug });
+      if (bodyEdit || fileRows !== storedRows) preview = (await runReconcilePreview(engine, { source_id: f.id, slug: f.slug, from: preview, decisions: takeFile })).preview;
+      expect({ name, status: preview.status }).toEqual({ name, status: 'ready' });
+      expect((await runReconcileApply(engine, { source_id: f.id, slug: f.slug, preview, request_id: randomUUID() })).state).toBe('committed');
+    });
+    const stored = (await engine.readPageSnapshot(f.slug, { sourceId: f.id }))!;
+    expect(stored.page.frontmatter.custom_file).toBe('kept');
+    for (const text of [stored.page.compiled_truth, readFileSync(f.file, 'utf8')]) {
+      expect(text).toContain(renderFactsTable([...fileRows]));
+      expect({ name, published: text.includes(added) }).toEqual({ name, published: bodyEdit });
+    }
+  }
+  for (const [name, storedRows, fileRows] of [
+    ['edits a private fact that has a world twin', twins, [fact(1, 'private', { confidence: 0.5 }), fact(2, 'world')]],
+    ['makes a private fact world', [fact(1, 'private')], [fact(1, 'world')]],
+    ['copies a private claim into a new world row', [fact(1, 'private')], twins],
+    ['writes a private claim over an existing world row', [fact(1, 'private'), fact(2, 'world', { claim: 'Works at acme-example' })], twins],
+  ] as const) {
+    const f = await fixture(engine, false, body([...storedRows]));
+    editFile(f, storedRows, fileRows);
+    await local(engine, f.registration, async () => {
+      const { preview } = await runReconcilePreview(engine, { source_id: f.id, slug: f.slug });
+      const refused = await runReconcilePreview(engine, { source_id: f.id, slug: f.slug, from: preview, decisions: takeFile }).then(() => 'ready', e => e.code);
+      expect({ name, refused }).toEqual({ name, refused: 'permission_denied' });
+    });
+    expect((await engine.readPageSnapshot(f.slug, { sourceId: f.id }))!.page.compiled_truth).toContain(renderFactsTable([...storedRows]));
+  }
 }), 120_000);
 
 test('matching legacy scan state migrates only during canonical publication', async () => isolated(async engine => {
