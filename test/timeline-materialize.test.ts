@@ -53,7 +53,8 @@ type Row = { date: string; source: string; summary: string; detail: string };
 interface Fixture { engine: BrainEngine; sourceId: string; root: string;
   put(slug: string, content: string, extra?: Record<string, unknown>): Promise<Record<string, unknown>>;
   revision(slug: string): Promise<string>; body(slug: string): Promise<string>; file(slug: string): string;
-  legacy(slug: string, row: Omit<Row, 'detail'> & { detail?: string }): Promise<void>; timeline(slug: string): Promise<Row[]> }
+  legacy(slug: string, row: Omit<Row, 'detail'> & { detail?: string }): Promise<void>; timeline(slug: string): Promise<Row[]>;
+  remote(op: string, params: Record<string, unknown>): Promise<any> }
 
 async function fixture(run: (f: Fixture) => Promise<void>) {
   for (const engine of engines) {
@@ -77,6 +78,7 @@ async function fixture(run: (f: Fixture) => Promise<void>) {
         [sourceId, slug, row.date, row.source, row.summary, row.detail ?? '']), TEST_WRITE_ATTRIBUTION)); },
       timeline: async slug => engine.executeRaw<Row>(`SELECT t.date::text AS date,t.source,t.summary,t.detail FROM timeline_entries t
         JOIN pages p ON p.id=t.page_id WHERE p.source_id=$1 AND p.slug=$2 AND t.event_page_id IS NULL ORDER BY t.date,t.summary`, [sourceId, slug]),
+      remote: (op, params) => (operationsByName as any)[op].handler({ ...ctx, remote: true }, params),
     };
     try {
       await withEnv({ GBRAIN_HOME: join(dir, 'home') }, async () => {
