@@ -72,11 +72,18 @@ export interface UnifyTypesResult {
 
 /**
  * #5634: the retype, link and alias phases write canonical tables outside the
- * persistence coordinator, which a managed brain refuses mid-run. Apply is
- * refused before the lock or any write; the dry run still previews.
+ * persistence coordinator, which a managed brain refuses mid-run. The
+ * `pack_upgrade_available` finding asks this too, so neither it nor what reads
+ * it (remediation plans, autopilot, `gbrain onboard --check --explain`) offers
+ * an apply this handler refuses.
  */
+export async function unifyTypesApplySupported(engine: OperationContext['engine']): Promise<boolean> {
+  return !await managedPersistenceEnabled(engine);
+}
+
+/** Apply is refused before the lock or any write; the dry run still previews. */
 async function managedApplyWarnings(ctx: OperationContext, targetPack: string, apply: boolean): Promise<string[]> {
-  if (!await managedPersistenceEnabled(ctx.engine)) return [];
+  if (await unifyTypesApplySupported(ctx.engine)) return [];
   if (apply) {
     throw new OperationError('writer_coordinator_required',
       'unify-types apply is not supported on a managed brain: its retype runs outside the persistence coordinator. No page was changed.',

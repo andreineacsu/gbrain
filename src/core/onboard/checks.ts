@@ -517,7 +517,9 @@ export async function runAllOnboardChecks(
  * pack_upgrade_available: fires when the active schema pack has a successor
  * pack declared via `migration_from`. v0.42 ships gbrain-base-v2 as the
  * declared successor of gbrain-base@1.x. Emits a manual_only RemediationStep
- * (D17) targeting the unify-types Minion handler.
+ * (D17) targeting the unify-types Minion handler. Where that handler refuses
+ * the apply (a managed brain), the successor is reported as information with
+ * no step, so no plan, autopilot tick or printed command offers the apply.
  */
 export async function checkPackUpgradeAvailable(
   engine: BrainEngine,
@@ -552,6 +554,25 @@ export async function checkPackUpgradeAvailable(
       };
     }
     const successor = successors[0];
+    const { unifyTypesApplySupported } = await import('../schema-pack/unify-types-handler.ts');
+    const applySupported = await unifyTypesApplySupported(engine);
+    const details = { target_pack: successor.manifest.name };
+    if (!applySupported) {
+      return {
+        check: {
+          name: 'pack_upgrade_available',
+          status: 'ok',
+          severity: 'info',
+          readiness_state: 'not_applicable',
+          message:
+            `Active pack: ${active.identity}. Successor available: ${successor.identity}, but applying it is ` +
+            `not supported on a managed brain yet: the unify-types retype runs outside the persistence coordinator. ` +
+            `Preview only: \`gbrain onboard --check --explain\``,
+          details,
+        },
+        remediations: [],
+      };
+    }
     return {
       check: {
         name: 'pack_upgrade_available',
@@ -559,6 +580,7 @@ export async function checkPackUpgradeAvailable(
         message:
           `Active pack: ${active.identity}. Successor available: ${successor.identity}. ` +
           `Preview: \`gbrain onboard --check --explain\``,
+        details,
       },
       remediations: [
         makeRemediationStep({
@@ -631,7 +653,7 @@ export async function checkTypeProliferation(
           `Run \`gbrain onboard --check --explain\` to preview a pack upgrade ` +
           `or define a custom pack with mapping_rules.`,
       },
-      remediations: [],  // pack_upgrade_available check emits the actionable step
+      remediations: [],  // pack_upgrade_available emits the actionable step (none on a managed brain, where apply is refused)
     };
   }
   if (n > warn) {

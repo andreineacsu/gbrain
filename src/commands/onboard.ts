@@ -17,7 +17,7 @@
 
 import type { BrainEngine } from '../core/engine.ts';
 import { computeRemediationPlan, runRemediation } from '../core/remediation/index.ts';
-import { runAllOnboardChecks } from '../core/onboard/checks.ts';
+import { runAllOnboardChecks, type OnboardCheckResult } from '../core/onboard/checks.ts';
 import { buildOnboardReport, renderHuman } from '../core/onboard/render.ts';
 import { CapFlagError, mergeCapFlag, parseCapFlag, type CapFlag } from '../core/budget/cap-flag.ts';
 
@@ -142,7 +142,7 @@ export async function runOnboard(engine: BrainEngine, args: string[]): Promise<v
     // mode and renders the per-rule diff. No-op when no pack upgrade
     // is available.
     if (explain) {
-      await renderPackUpgradeExplain(engine, extraRemediations);
+      await renderPackUpgradeExplain(engine, onboardCheckResults);
     }
     return;
   }
@@ -218,31 +218,29 @@ export async function runOnboard(engine: BrainEngine, args: string[]): Promise<v
 /**
  * v0.42 (T16): per-cluster narrative renderer for `gbrain onboard --check --explain`.
  *
- * Finds the pack_upgrade_available recommendation in the extras, runs
- * the unify-types handler in dry-run mode, and renders a human-readable
- * breakdown:
- *   - Cluster name (heuristic: group rules by to_type)
- *   - Source page counts per from_type that would be retyped
- *   - Total alias rows that would be created
- *   - Total page-to-link conversions
- *   - Sample slugs per cluster (capped at 3)
+ * Finds the pack_upgrade_available finding, runs the unify-types handler in
+ * dry-run mode, and prints the pre-state and the per-phase totals: explicit
+ * retypes, catch-all retypes, page-to-link conversions and page-to-alias rows.
  *
- * No-op when no pack_upgrade_available recommendation is in the plan
- * (the brain is already on the latest pack).
+ * When the finding names no successor there is nothing to preview, and the
+ * finding's own message says why (latest pack, no active pack, or a skipped
+ * check). The apply command is printed only when the finding carries the
+ * unify-types step: on a managed brain it does not, and the dry run's own
+ * warning says why.
  */
 async function renderPackUpgradeExplain(
   engine: BrainEngine,
-  extras: Array<{ id: string; job: string; params: Record<string, unknown> }>,
+  results: OnboardCheckResult[],
 ): Promise<void> {
-  const packUpgrade = extras.find((e) => e.id.startsWith('onboard.pack_upgrade_'));
-  if (!packUpgrade) {
+  const packUpgrade = results.find((r) => r.check.name === 'pack_upgrade_available');
+  const targetPack = packUpgrade?.check.details?.target_pack;
+  if (!packUpgrade || typeof targetPack !== 'string') {
     process.stdout.write(
-      '\n(--explain: no pack_upgrade_available recommendation; brain is on the latest pack)\n',
+      `\n(--explain: no pack upgrade to preview: ${packUpgrade?.check.message ?? 'the pack check did not run'})\n`,
     );
     return;
   }
-  const targetPack = packUpgrade.params.target_pack;
-  if (typeof targetPack !== 'string') return;
+  const applyOffered = packUpgrade.remediations.some((r) => r.job === 'unify-types');
   process.stdout.write(`\n--- Pack upgrade plan: → ${targetPack} ---\n`);
   try {
     const { runUnifyTypes } = await import('../core/schema-pack/unify-types-handler.ts');
@@ -257,8 +255,10 @@ async function renderPackUpgradeExplain(
       `  Catch-all retypes:   ${result.per_phase.retype_catch_all.would_apply} pages across ${result.per_phase.retype_catch_all.synthesized_rules} synthesized rules\n` +
       `  Page-to-link:        ${result.per_phase.page_to_link.would_convert} edges across ${result.per_phase.page_to_link.rules} rules\n` +
       `  Page-to-alias:       ${result.per_phase.page_to_alias.would_alias} aliases across ${result.per_phase.page_to_alias.rules} rules\n` +
-      `\nRun the migration with:\n` +
-      `  gbrain jobs submit unify-types --params '${JSON.stringify({ target_pack: targetPack, apply: true })}'\n`,
+      (applyOffered
+        ? `\nRun the migration with:\n` +
+          `  gbrain jobs submit unify-types --params '${JSON.stringify({ target_pack: targetPack, apply: true })}'\n`
+        : ''),
     );
     if (result.warnings.length > 0) {
       process.stdout.write(`\nWarnings:\n`);

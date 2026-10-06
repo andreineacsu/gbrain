@@ -94,6 +94,19 @@ describe('checkPackUpgradeAvailable', () => {
     });
   });
 
+  it('offers no apply when the managed-persistence state cannot be read', async () => {
+    const unreadable = {
+      getConfig: async () => null,
+      executeRaw: async () => { throw new Error('synthetic: persistence_brain is unreadable'); },
+    } as unknown as PGLiteEngine;
+    await withEnv({ GBRAIN_HOME: emptyHome(), GBRAIN_SCHEMA_PACK: undefined }, async () => {
+      const result = await checkPackUpgradeAvailable(unreadable);
+      expect(result.remediations).toEqual([]);
+      expect(result.check.details).toBeUndefined();
+      expect(result.check.message).toContain('synthetic: persistence_brain is unreadable');
+    });
+  });
+
   it('manual_only routing via render.ts allowlist (D17)', async () => {
     await withEnv({ GBRAIN_HOME: emptyHome(), GBRAIN_SCHEMA_PACK: undefined }, async () => {
       const result = await checkPackUpgradeAvailable(engine);
