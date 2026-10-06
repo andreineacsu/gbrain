@@ -112,6 +112,18 @@ function srcExcluded(rel: string): boolean {
   return false;
 }
 
+/**
+ * Files whose comments are gated too: an operator invocation in a doc comment
+ * rots the same way a remediation string does (#6196: the unify-types handler
+ * header kept a flag `gbrain jobs submit` no longer parses). Opt-in per file,
+ * because other files' comments still name unregistered flags; add a file here
+ * once its comments resolve.
+ */
+const COMMENT_GATED = new Set([
+  'src/core/minions/handlers/unify-types.ts',
+  'src/core/schema-pack/unify-types-handler.ts',
+]);
+
 function scanSrcStrings(): string[] {
   const valid = liveCliVerbs();
   const violations: string[] = [];
@@ -122,7 +134,7 @@ function scanSrcStrings(): string[] {
     for (let i = 0; i < lines.length; i++) {
       const l = lines[i]!;
       const t = l.trim();
-      if (/^(\/\/|\*|\/\*|--)/.test(t)) continue;   // TS comments + SQL comment lines
+      if (/^(\/\/|\*|\/\*|--)/.test(t) && !COMMENT_GATED.has(rel)) continue;   // TS comments + SQL comment lines
       if (!/['"`]/.test(l)) continue;               // only string-bearing lines
       // Tail stops at quote/backtick so we never leak across string boundaries.
       for (const m of l.matchAll(/\bgbrain\s+([a-z][a-z0-9_-]{2,})\b([^'"`\n]*)/g)) {
