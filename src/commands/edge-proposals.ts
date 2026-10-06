@@ -17,6 +17,7 @@ import type { BrainEngine } from '../core/engine.ts';
 import { applyEdgeProposal, rejectEdgeProposal, undoEdgeProposal, DREAM_TIMELINE_SOURCE } from '../core/cycle/edge-contradictions.ts';
 import { isCalendarDate, dateKey } from '../core/link-validity.ts';
 import { setCliExitVerdict } from '../core/cli-force-exit.ts';
+import { bigintToStringReplacer } from '../core/utils.ts';
 
 const STATUSES = ['proposed', 'applied', 'rejected', 'undone', 'stale', 'reverted_by_user', 'undated_unresolved', 'ambiguous_same_date', 'compatible', 'error'];
 
@@ -38,13 +39,16 @@ function usage(): string {
 }
 
 async function rows(engine: BrainEngine, where: string, params: unknown[], limit = 50): Promise<Row[]> {
-  return engine.executeRaw<Row>(
+  const found = await engine.executeRaw<Row>(
     `SELECT p.id, p.status, p.link_type, f.slug AS subject, ta.slug AS a_target, tb.slug AS b_target, te.slug AS ending,
             p.close_date::text AS close_date, p.born_closed, p.model, p.confidence, p.generated_line, p.created_at
        FROM link_edge_proposals p
        JOIN pages f ON f.id = p.from_page_id JOIN pages ta ON ta.id = p.a_to_page_id JOIN pages tb ON tb.id = p.b_to_page_id
        LEFT JOIN pages te ON te.id = p.ending_to_page_id
       WHERE ${where} ORDER BY p.created_at DESC, p.id DESC LIMIT ${Math.max(1, Math.min(1000, limit))}`, params);
+  // id is BIGSERIAL: postgres.js returns it as a bigint, PGLite as a number. Number is the shape PGLite
+  // and the accept/reject/undo documents already print, and every id this command addresses is a safe integer.
+  return found.map(r => ({ ...r, id: Number(r.id) }));
 }
 
 function describe(r: Row): string {
@@ -61,7 +65,8 @@ export async function runEdgeProposals(engine: BrainEngine, args: string[]): Pro
   const json = rest.includes('--json');
   const flag = (name: string) => { const i = rest.indexOf(name); return i >= 0 ? rest[i + 1] : undefined; };
   const id = Number(rest.find(a => /^\d+$/.test(a)));
-  const out = (value: unknown, text: string) => console.log(json ? JSON.stringify(value, null, 2) : text);
+  // The replacer is a backstop: an int8 the row mapping above does not cover prints as a decimal string instead of throwing.
+  const out = (value: unknown, text: string) => console.log(json ? JSON.stringify(value, bigintToStringReplacer, 2) : text);
 
   if (!sub || sub === '--help' || sub === 'help') { console.log(usage()); return; }
   if (sub === 'list') {
