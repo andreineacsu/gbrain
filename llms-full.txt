@@ -10338,6 +10338,44 @@ at the deadline).
    Unset both to return to the default.
 3. Confirm with `gbrain doctor`: `global_maintenance_timeouts` is `ok` after the
    next job finishes within its deadline.
+
+## Dream patterns runs outgrow the cycle budget
+
+**Say to your agent:** *"Why does the patterns phase keep timing out or getting skipped?"*
+
+The `patterns` phase runs one subagent over your recent reflections, and that
+run can take tens of minutes as the pattern pages accumulate. The subagent
+writes its pages in its final turns, so a run its deadline stops has usually
+written nothing. To keep that from repeating:
+
+- Each run weighs in full only the reflections no completed run has weighed
+  yet, oldest first, at most `dream.patterns.max_new_reflections` (default
+  25), so a backlog drains over several runs.
+- The phase records how long its last run took (the state row
+  `dream.patterns.last_run`). After a run its timeout stopped, the next run
+  takes half as many new reflections.
+- Inside an autopilot job the phase skips with `insufficient_cycle_budget`
+  when the job cannot give it the time the last run needed; the summary shows
+  both numbers. A record older than 24 hours no longer holds it back.
+
+If the summary keeps reporting `insufficient_cycle_budget`:
+
+1. Run it in the foreground with a longer limit:
+   `gbrain config set dream.patterns.subagent_timeout_ms 3600000`, then
+   `gbrain dream --phase patterns`. Keep
+   `dream.patterns.subagent_wait_timeout_ms` (default 35 minutes) above the
+   subagent timeout.
+2. Give the autopilot job room for it. Inside a job the phase gets the smaller
+   of the subagent timeout and the job's remaining time, so raise both. On a
+   brain whose sources each run their own cycle, the phases that run once for
+   the whole brain go to the maintenance job:
+   `gbrain config set autopilot.global_maintenance_timeout_ms 3600000`. On a
+   brain without registered sources, autopilot runs the whole cycle as one job
+   whose limit is twice the autopilot interval, at least 30 minutes; there,
+   run the phase in the foreground (step 1).
+3. Confirm in the next cycle report: `patterns` shows `ok` with
+   `child_outcome: completed`.
+
 ## auto_chronicle has no effect
 
 **Say to your agent:** *"Why aren't my meetings showing up as timeline events?"*
