@@ -36,7 +36,7 @@ import { preserveProtectedTakes } from './protected-takes.ts';
 import { isAutoLinkEnabled } from '../link-extraction.ts';
 import { prepareAutomaticLinks } from './links-preparation.ts';
 import { loadActivePackForEngine } from '../schema-pack/engine-resolution.ts';
-import { preparePageAdvisories, remoteLinkHint, pageNoopAdvisories } from './page-advisories.ts';
+import { preparePageAdvisories, remoteLinkHint, pageNoopAdvisories, timelineRemovalAdvisory } from './page-advisories.ts';
 import { assertKnowledgePublicationAllowed } from '../shared-skills/knowledge-guard.ts';
 import { colonSlugWindowsRefusal, isWindowsColonTarget, nativeFileTarget } from './native-file-target.ts';
 import { isSourceDbOnlySlug } from './source-storage.ts';
@@ -404,6 +404,7 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
   const pinMode = sourcePath && mintMode && scannerSourcePath(file!.root, file!.root) && !await readSlugRootMode(engine, row.source_id) ? mintMode : undefined;
   return { observedRevision, noop, additionalPageKeys:links?.pageKeys, file, ...await pageDatabaseOnlyPublication(engine, row, file), validate: ready.validate, apply: async tx => {
     let autoLinks: Awaited<ReturnType<NonNullable<typeof links>['apply']>> | undefined;
+    let projection: Awaited<ReturnType<NonNullable<typeof project>>> | undefined;
     if (!noop) {
       const applied = await ready.apply(tx);
       // Mandatory metadata shares publication rollback; exact no-ops never heal it.
@@ -424,14 +425,14 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
         for (const tag of versionTags) await tx.addTag(row.slug, tag, source);
       }
       // #6007: the page the import just wrote live is the page the projections describe; no re-read.
-      await project?.(tx, row.operation === 'restore_page' ? undefined : applied?.pageId);
+      projection = await project?.(tx, row.operation === 'restore_page' ? undefined : applied?.pageId);
       autoLinks = await links?.apply(tx);
       if (targetDeleted) await tx.softDeletePage(row.slug, source);
       // Index installation and terminal receipt share this transaction. The import sealed the projection
       // as its last revision-changing step; only a later revision change (restore, tags, links, delete) reseals.
       if (!(applied?.sealed && row.operation !== 'restore_page' && !versionTags && !links && !targetDeleted)) await sealPageTextProjection(tx, row.slug, row.source_id);
     }
-    return { ...advisories, ...(autoLinks ? {auto_links:autoLinks} : {}),
+    return { ...advisories, ...(autoLinks ? {auto_links:autoLinks} : {}), ...timelineRemovalAdvisory(projection?.removedTimelineDates),
       status: noop ? 'skipped' : row.operation === 'restore_page' ? 'restored' : row.operation === 'revert_version' ? 'reverted' : 'created_or_updated',
       slug: row.slug, source_id: row.source_id, chunks: ready.result.chunks, noop,
       ...(ready.result.chunks === 0 ? {chunk_skip_reason: noop ? 'write_skipped'

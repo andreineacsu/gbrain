@@ -320,3 +320,58 @@ describe('#5567 marker parsing', () => {
     expect(renderMaterializedBullet({ date: '2026-07-01', source: 'notes', summary: 'x', detail: '**2026-07-02** | nested' }, slug)).toBeNull();
   });
 });
+
+describe('#5969 a write that removes timeline rows reports them', () => {
+  const authored = '- **2026-05-01** | meeting — Intro call\n- **2026-06-02** | email — Followed up on the proposal';
+  const all = ['Intro call', 'Followed up on the proposal', 'Signed the pilot'];
+  // Two authored bullets and one add_timeline_entry row, read back the way a remote agent reads a page.
+  async function seeded(f: Fixture): Promise<{ content: string; revision: string }> {
+    await f.put(slug, page('Body.', authored));
+    await f.remote('add_timeline_entry', { slug, date: '2026-07-03', source: 'crm', summary: 'Signed the pilot', request_id: randomUUID() });
+    return f.remote('get_page', { slug, include_content: true });
+  }
+  const summaries = async (f: Fixture) => (await f.timeline(slug)).map(r => r.summary.replace(/\s+/g, ' '));
+  const removed = (count: number, earliest: string, latest: string) =>
+    ({ count, earliest, latest, warning: expect.stringContaining('get_page include_content:true') });
+  const cases: Array<{ name: string; next: (read: { content: string }) => string; force?: true; report?: ReturnType<typeof removed>; left: string[] }> = [
+    { name: 'a revision-bound put_page without the Timeline section', next: () => page('Corrected body.'), report: removed(3, '2026-05-01', '2026-07-03'), left: [] },
+    { name: 'a forced put_page without the Timeline section', next: () => page('Corrected body.'), force: true, report: removed(3, '2026-05-01', '2026-07-03'), left: [] },
+    { name: 'a put_page that rewrites one bullet', next: read => read.content.replace('Intro call', 'Intro call, rescheduled'),
+      report: removed(1, '2026-05-01', '2026-05-01'), left: ['Intro call, rescheduled', 'Followed up on the proposal', 'Signed the pilot'] },
+    { name: 'a put_page that keeps the Timeline section', next: read => read.content.replace('Body.', 'Corrected body.'), left: all },
+    { name: 'a put_page that only respaces a bullet', next: read => read.content.replace('Intro call', 'Intro  call'), left: all },
+  ];
+  for (const c of cases) {
+    test(`${c.name} ${c.report ? `reports ${c.report.count} removed row(s)` : 'reports no removal'}`, async () => {
+      await fixture(async f => {
+        const read = await seeded(f);
+        const receipt = await f.remote('put_page', { slug, content: c.next(read), request_id: randomUUID(),
+          ...(c.force ? { force: true } : { expected_revision: read.revision }) });
+        expect(receipt.state).toBe('committed');
+        expect(receipt.timeline_rows_removed).toEqual(c.report);
+        expect(await summaries(f)).toEqual(c.left);
+      });
+    });
+  }
+
+  test('put_pages reports the removed rows on the page entry', async () => {
+    await fixture(async f => {
+      const read = await seeded(f);
+      const batch = await f.remote('put_pages', { request_id: randomUUID(), pages: [{ slug, content: page('Batch body.'), expected_revision: read.revision }] });
+      expect(batch.pages[0]).toMatchObject({ state: 'committed', timeline_rows_removed: removed(3, '2026-05-01', '2026-07-03') });
+      expect(await summaries(f)).toEqual([]);
+    });
+  });
+
+  test('revert_version to the version before the write restores the removed rows, as the warning says', async () => {
+    await fixture(async f => {
+      const read = await seeded(f);
+      await f.remote('put_page', { slug, content: page('Corrected body.'), expected_revision: read.revision, request_id: randomUUID() });
+      const versions: Array<{ id: number }> = await f.remote('get_versions', { slug });
+      const receipt = await f.remote('revert_version', { slug, version_id: Math.max(...versions.map(v => Number(v.id))),
+        expected_revision: await f.revision(slug), request_id: randomUUID() });
+      expect(receipt.timeline_rows_removed).toBeUndefined();
+      expect(await summaries(f)).toEqual(all);
+    });
+  });
+});

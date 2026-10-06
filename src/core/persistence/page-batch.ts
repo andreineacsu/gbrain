@@ -93,7 +93,8 @@ function pageEntry(result: PageResult): Record<string, unknown> {
     const outcome = (receipt.outcome ?? {}) as Record<string, unknown>;
     return { ...base, request_id: row.request_id, state: 'committed', revision: receipt.revision ?? outcome.revision ?? null,
       status: outcome.status, ...(typeof outcome.slug === 'string' && outcome.slug !== result.slug ? { duplicate_of: outcome.slug } : {}),
-      ...(outcome.embedding_state !== undefined ? { embedding_state: outcome.embedding_state } : {}), ...warning };
+      ...(outcome.embedding_state !== undefined ? { embedding_state: outcome.embedding_state } : {}),
+      ...(outcome.timeline_rows_removed !== undefined ? { timeline_rows_removed: outcome.timeline_rows_removed } : {}), ...warning };
   } catch (error) {
     if (!(error instanceof OperationError)) throw error;
     return { ...base, request_id: row.request_id, state: row.state, error: error.toJSON(), ...warning };

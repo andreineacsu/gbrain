@@ -243,6 +243,12 @@ function takeCollision(): OperationError {
     'Renumber the new takes row, or add the existing take to the fence with a revision-bound put_page.');
 }
 
+/** What one publication's projections changed that the write receipt reports. */
+export interface CanonicalProjectionResult {
+  /** Dates (YYYY-MM-DD, ascending) of the timeline rows deleted because their bullet left the body (#5969). */
+  removedTimelineDates: string[];
+}
+
 /**
  * Prepare provider-free projections outside publication. `prior` is the
  * caller's snapshot at its observed revision; stored timeline rows and take
@@ -250,12 +256,14 @@ function takeCollision(): OperationError {
  * what this writer actually edited.
  */
 export async function prepareCanonicalProjections(engine: BrainEngine, page: ParsedPage, slug: string, sourceId: string,
-  prior: PageSnapshot | null, writer: ProjectionWriter): Promise<(tx: BrainEngine, pageId?: number) => Promise<void>> {
+  prior: PageSnapshot | null, writer: ProjectionWriter): Promise<(tx: BrainEngine, pageId?: number) => Promise<CanonicalProjectionResult>> {
   const { factRows, takes } = compileCanonicalProjections(page, slug, sourceId);
   const { timeline, exactIncoming, pinned } = classifyTimeline(prior ? await storedTimeline(engine, prior.page.id) : [],
     page, prior?.page ?? null, slug, writer);
-  const deletions = JSON.stringify(pinned.filter(row => row.action === 'delete')
-    .map(({ id, date, source, summary, detail }) => ({ id, date, source, summary, detail })));
+  const deleted = pinned.filter(row => row.action === 'delete');
+  const deletions = JSON.stringify(deleted.map(({ id, date, source, summary, detail }) => ({ id, date, source, summary, detail })));
+  // A drifted row's bullet is still in the body and is inserted again under its new text; the others leave the page.
+  const removedDates = new Map(deleted.filter(row => row.state !== 'drifted').map(row => [Number(row.id), row.date]));
   const refreshes = JSON.stringify(pinned.filter(row => row.action === 'refresh_detail')
     .map(row => ({ id: row.id, detail: row.detail, next: exactIncoming.get(exactTimelineKey(row)) }))
     .filter(row => row.next !== row.detail));
@@ -271,7 +279,7 @@ export async function prepareCanonicalProjections(engine: BrainEngine, page: Par
   // statement (insertFacts, addTakesBatch) ends one, so order is kept.
   return async (tx, pageId) => {
     const id = pageId ?? (await tx.readPageSnapshot(slug, { sourceId }))?.page.id;
-    if (id == null) return;
+    if (id == null) return { removedTimelineDates: [] };
     // Fact IDs in permanent receipts remain meaningful when a canonical row is
     // removed/replaced. Expire and detach its row position instead of deleting it.
     // Conversation-extractor rows share the page coordinate without a fence
@@ -302,10 +310,12 @@ export async function prepareCanonicalProjections(engine: BrainEngine, page: Par
       take.resolvedEvidence ?? null, take.resolvedValue ?? null, take.resolvedUnit ?? null, take.resolvedBy ?? null]));
     // Event-page references have a different canonical origin and remain intact;
     // new rows carry their Markdown detail on insert, pinned rows refresh only from their preimage.
+    // The receipt counts the rows this DELETE actually removed: a row changed since preparation stays.
+    let deletedIds: number[] = [];
     const timelineRows = [
-      () => tx.executeRaw(`DELETE FROM timeline_entries t USING jsonb_to_recordset($2::text::jsonb) AS d(id integer,date date,source text,summary text,detail text)
+      async () => { deletedIds = (await tx.executeRaw<{ id: number }>(`DELETE FROM timeline_entries t USING jsonb_to_recordset($2::text::jsonb) AS d(id integer,date date,source text,summary text,detail text)
         WHERE t.page_id=$1 AND t.event_page_id IS NULL AND t.id=d.id AND t.date=d.date AND t.source=d.source
-          AND t.summary=d.summary AND t.detail=d.detail`, [id, deletions]),
+          AND t.summary=d.summary AND t.detail=d.detail RETURNING t.id`, [id, deletions])).map(row => Number(row.id)); },
       ...[...timeline.values()].map(entry => () => tx.addTimelineEntry(slug, entry, { sourceId })),
       () => tx.executeRaw(`UPDATE timeline_entries t SET detail=r.next FROM jsonb_to_recordset($2::text::jsonb) AS r(id integer,detail text,next text)
         WHERE t.page_id=$1 AND t.event_page_id IS NULL AND t.id=r.id AND t.detail=r.detail`, [id, refreshes]),
@@ -319,5 +329,6 @@ export async function prepareCanonicalProjections(engine: BrainEngine, page: Par
       await tx.addTakesBatch(takes.map(t => takesPreparation.toCanonicalBatchInput(id, t)));
       await pipelined(tx, [...resolveTakes, ...timelineRows]);
     } else await pipelined(tx, timelineRows);
+    return { removedTimelineDates: deletedIds.flatMap(rowId => removedDates.get(rowId) ?? []).sort() };
   };
 }
