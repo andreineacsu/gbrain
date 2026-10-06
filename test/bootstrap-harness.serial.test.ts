@@ -499,6 +499,53 @@ describe('full apply', () => {
   });
 });
 
+describe('re-run over hook entries that lost their marker (#6171)', () => {
+  type Groups = Array<{ hooks: Array<Record<string, unknown>> }>;
+  const MINE = {
+    permissions: { allow: ['Bash(ls:*)'] },
+    hooks: {
+      SessionStart: [{ hooks: [{ type: 'command', command: 'echo mine' }] }],
+      Notification: [{ matcher: '', hooks: [{ type: 'command', command: 'say done' }] }],
+    },
+  };
+
+  /** What a re-run that did not recognize them left: each marker-less entry, then the marked copy it appended. */
+  function leaveMarkerlessBesideMarked(path: string): void {
+    const settings = readJson(path);
+    const hooks = settings.hooks as Record<string, Groups>;
+    for (const [event, groups] of Object.entries(hooks)) {
+      hooks[event] = groups.flatMap((g) => {
+        const marked = g.hooks.filter((e) => e._gbrain === GBRAIN_HARNESS_MARKER_VALUE);
+        if (marked.length === 0) return [g];
+        return [{ hooks: marked.map(({ _gbrain: _dropped, ...entry }) => entry) }, g];
+      });
+    }
+    writeFileSync(path, JSON.stringify(settings, null, 2));
+  }
+
+  for (const c of [
+    { state: 'the marker-less entries alone', prepare: dropHarnessMarkers },
+    { state: 'each marker-less entry beside a marked copy', prepare: leaveMarkerlessBesideMarked },
+  ]) {
+    test(`${c.state}: one marked entry per event, the rest of the file as the first install wrote it`, async () => {
+      const f = makeFake();
+      writeFileSync(f.userSettings, JSON.stringify(MINE, null, 2));
+      expect(await applyHarness(flags(['--harness', 'claude-code']), f.deps)).toBe(0);
+      const installed = readFileSync(f.userSettings, 'utf8');
+      c.prepare(f.userSettings);
+      expect(readFileSync(f.userSettings, 'utf8')).not.toBe(installed);
+
+      expect(await applyHarness(flags(['--harness', 'claude-code']), f.deps)).toBe(0);
+      const hooks = readJson(f.userSettings).hooks as Record<string, Groups>;
+      for (const event of CLAUDE_HOOK_EVENTS) {
+        const harness = hooks[event].flatMap((g) => g.hooks).filter((e) => String(e.command).includes('GBRAIN_HOOK_LANE=harness'));
+        expect(harness.map((e) => e._gbrain)).toEqual([GBRAIN_HARNESS_MARKER_VALUE]);
+      }
+      expect(readFileSync(f.userSettings, 'utf8')).toBe(installed);
+    });
+  }
+});
+
 describe('--remove', () => {
   test('full remove: ours-by-url removed, token revoked by id, receipt consumed; foreign entries survive', async () => {
     const f = makeFake();
