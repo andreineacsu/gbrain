@@ -16,6 +16,9 @@
  *   1. alias-first  — page_aliases exact (unambiguous single-slug only)
  *   2. title + slug-suffix — lower(title) exact OR slug suffix match
  *      (real slugs are namespaced people/alice-example; bare slugify misses).
+ *   3. lexical arms behind `lexicalArms`: surname, pure-CJK title/slug, and
+ *      the lowercase-phrase title ("call alice example"), each exact and
+ *      unique or silent.
  *
  * Privacy (eng-review D5): the synopsis is taken from a SAFE source —
  * frontmatter `summary` if present, else the page body with takes/private-fact
@@ -35,6 +38,7 @@ import { stripTakesFence } from '../takes-fence.ts';
 import { stripFactsFence } from '../facts-fence.ts';
 import { redactFindings } from '../secret-scan.ts';
 import { privatePagesFilterFragment } from '../search/private-visibility.ts';
+import { ALWAYS_LINKABLE_TYPES } from '../mentions/linkable-types.ts';
 import type { EntityCandidate } from './entity-salience.ts';
 import { reflexPointerRationale } from './reflex-rationale.ts';
 import { logVolunteerEventsFireAndForget, volunteerEventRowsFrom } from './volunteer-events.ts';
@@ -52,9 +56,24 @@ const SYNOPSIS_MAX = 160;
 // covers only explicitly registered aliases.
 const PURE_CJK_RE = new RegExp(`^[${CJK_SLUG_CHARS}]+$`, 'u');
 
+// #6195: page types a lowercase PHRASE may resolve to by title. Ordinary
+// lowercase prose collides with note, project and concept titles ("weekly
+// sync", "next steps") far more often than with the name of a person or an
+// organization, so the title arm is limited to the always-linkable entity
+// types. A page of any other type resolves from a lowercase phrase through a
+// registered alias.
+const LOWERCASE_TITLE_TYPES: readonly string[] = ALWAYS_LINKABLE_TYPES;
+
 /** Which resolution arm produced a pointer (provenance → honest confidence). */
 /** `recall`: a System One S6 keyword-only retrieval fired by the know-to-ask slot (never produced by the resolver). */
-export type ResolveArm = 'alias' | 'title' | 'slug-suffix' | 'title-surname' | 'cjk-title' | 'recall';
+export type ResolveArm =
+  | 'alias'
+  | 'title'
+  | 'slug-suffix'
+  | 'title-surname'
+  | 'cjk-title'
+  | 'lowercase-title'
+  | 'recall';
 
 /**
  * v0.43 (#2095) — arm → confidence. Lives HERE, next to the arm definitions,
@@ -71,12 +90,17 @@ export type ResolveArm = 'alias' | 'title' | 'slug-suffix' | 'title-surname' | '
  * matches a unique page title/slug. Exact evidence, but the gram lacks the
  * capitalization signal a strong 'title' candidate carries — score it with
  * the surname class, above the volunteer gate.
+ *
+ * 'lowercase-title' (#6195) sits at 0.72 for the same reason: a lowercase
+ * 2-3 word phrase that exactly matches one entity page's title is exact
+ * evidence without the capitalization signal.
  */
 export const ARM_CONFIDENCE: Record<ResolveArm, number> = {
   alias: 0.9,
   title: 0.8,
   'title-surname': 0.72,
   'cjk-title': 0.72,
+  'lowercase-title': 0.72,
   'slug-suffix': 0.6,
   recall: 0.5,
 };
@@ -137,9 +161,10 @@ export interface ResolvePointersOpts {
    */
   sourceIds?: string[];
   /**
-   * v0.46.15 identity wave — kill switch for the two new lexical arms (the
-   * weak-candidate alias arm and the surname arm). Default ON (undefined =
-   * enabled); `false` reproduces pre-wave resolution exactly. Threaded from
+   * v0.46.15 identity wave — kill switch for the lexical arms: every arm a
+   * weak candidate reaches (alias, pure-CJK title/slug, lowercase-phrase
+   * title) and the surname arm. Default ON (undefined = enabled); `false`
+   * reproduces pre-wave resolution exactly. Threaded from
    * the file-plane config `retrieval_reflex_lexical_arms` / env
    * `GBRAIN_RETRIEVAL_REFLEX_LEXICAL_ARMS` by callers that own a loaded
    * config — the resolver itself never touches config (sync hot path).
@@ -181,7 +206,7 @@ export async function resolveEntitiesToPointers(
   const maxPointers = opts.maxPointers ?? DEFAULT_MAX_POINTERS;
   const priorLc = (opts.priorContextText ?? '').toLowerCase();
 
-  // v0.46.15: weak-alias + surname arms share one kill switch (default ON).
+  // v0.46.15: the weak-candidate arms and the surname arm share one kill switch (default ON).
   const lexicalArms = opts.lexicalArms !== false;
   const privacySql = opts.excludePrivate === false ? '' : `AND ${privatePagesFilterFragment('p')}`;
 
@@ -208,6 +233,8 @@ export async function resolveEntitiesToPointers(
     // Lowercase WEAK candidates (entity-salience step 2.5) may probe the
     // alias table ONLY — never the title/slug/suffix arms, where ordinary
     // lowercase words would fabricate pointers. Gated by the kill switch.
+    // (Two narrow exact-title exceptions are decided on the norm further
+    // down: pure-CJK grams and multi-word lowercase phrases.)
     if (c.weak) {
       if (!lexicalArms) continue;
       const wnorm = normalizeAlias(c.query);
@@ -345,12 +372,22 @@ export async function resolveEntitiesToPointers(
     }
   }
 
-  // Arm 2 — exact title OR slug-suffix, with the surname predicate on the
-  // same statement when armed (see fetchTitleSlugRows).
+  // Lowercase-phrase title probe (#6195, 'lowercase-title'). FAIL-CLOSED on
+  // partial alias visibility, like the weak fold above: without the full
+  // alias picture a claimed phrase would look unclaimed.
+  const phraseTitleNorms =
+    weakNorms.size && !anyAliasSourceFailed && liveCheckOk
+      ? unclaimedPhraseNorms(weakNorms, (n) => sourceIds.some((src, i) => liveHitsFor(aliasResults[i], src, n).length > 0))
+      : [];
+
+  // Arm 2 — exact title OR slug-suffix, with the surname and lowercase-phrase
+  // title predicates on the same statement (see fetchTitleSlugRows).
   let rows: PageRow[] = [];
   const useSurnameArm = surnamePatterns.length > 0;
   try {
-    rows = await fetchTitleSlugRows(engine, { sourceIds, privacySql, titlesLc, exactSlugs, slugSuffixes, surnamePatterns });
+    rows = await fetchTitleSlugRows(engine, {
+      sourceIds, privacySql, titlesLc, exactSlugs, slugSuffixes, surnamePatterns, phraseTitleNorms,
+    });
   } catch {
     rows = [];
   }
@@ -399,11 +436,19 @@ export async function resolveEntitiesToPointers(
       if (token) surnameCoverage.set(token, (surnameCoverage.get(token) ?? 0) + 1);
     }
   }
+  const phraseTitleHolders = phraseTitleHolderCounts(rows, phraseTitleNorms);
   const surnameHits = new Map<string, Array<{ slug: string; source_id: string }>>();
   for (const r of rows) {
     const titleLc = (r.title ?? '').toLowerCase();
     if (titleSet.has(titleLc)) {
       push(r.slug, r.source_id, 'title', titleToNorm.get(titleLc));
+      continue;
+    }
+    // Lowercase-phrase title arm: exact evidence, so it outranks the slug
+    // and surname classifications below. The phrase norm IS the lowercased
+    // title, which makes it the provenance key.
+    if (phraseTitleHolders.get(titleLc) === 1 && LOWERCASE_TITLE_TYPES.includes(r.type ?? '')) {
+      push(r.slug, r.source_id, 'lowercase-title', titleLc);
       continue;
     }
     // Slug arm: exact slugified-candidate match, else suffix scan.
@@ -474,9 +519,10 @@ export async function resolveEntitiesToPointers(
   }
 
   // Build pointers in confidence order, applying suppression + cap.
+  const kept = dropNestedWeakMatches(resolved, weakNorms);
   const suppression = opts.suppression ?? 'slug-and-title';
   const pointers: ReflexPointer[] = [];
-  for (const { slug, source_id, arm, matchedNorm } of resolved) {
+  for (const { slug, source_id, arm, matchedNorm } of kept) {
     const row = rowByKey.get(keyOf(source_id, slug));
     if (!row) continue;
     // Suppression: already present in PRIOR context. The current turn is
@@ -501,6 +547,31 @@ export async function resolveEntitiesToPointers(
   return { pointers, text: renderPointerBlock(pointers) };
 }
 
+/**
+ * #6195: the weak norms the lowercase-title arm may probe. A norm of two or
+ * more words ("alice example") qualifies; single lowercase words stay
+ * alias-only. A phrase some live alias claims is left to the alias arm, which
+ * resolves it when unique and stays silent when it is ambiguous.
+ */
+function unclaimedPhraseNorms(weakNorms: ReadonlySet<string>, aliasClaimed: (norm: string) => boolean): string[] {
+  return [...weakNorms].filter((norm) => norm.includes(' ') && !aliasClaimed(norm));
+}
+
+/**
+ * #6195: a lowercase run is probed as every 2-3 word window and as single
+ * words, so "loop in mary ann example" probes "mary ann example", "ann
+ * example" and "example" alike, where the capitalized form probes only the
+ * whole run. A weak match whose words sit, as whole words, inside another
+ * weak match that also resolved names the same mention: drop it, so the turn
+ * never also points at a different "Ann Example". Strong matches are never
+ * dropped.
+ */
+function dropNestedWeakMatches<T extends { matchedNorm?: string }>(resolved: T[], weakNorms: ReadonlySet<string>): T[] {
+  const weakMatches = resolved.map((r) => r.matchedNorm).filter((n): n is string => !!n && weakNorms.has(n));
+  return resolved.filter(({ matchedNorm: n }) =>
+    !n || !weakNorms.has(n) || !weakMatches.some((outer) => outer !== n && ` ${outer} `.includes(` ${n} `)));
+}
+
 /** Inputs of the arm-2 statement; every list is bound as text[], never interpolated. */
 interface TitleSlugProbe {
   sourceIds: string[];
@@ -509,6 +580,7 @@ interface TitleSlugProbe {
   exactSlugs: string[];
   slugSuffixes: string[];
   surnamePatterns: string[];
+  phraseTitleNorms: string[];
 }
 
 /**
@@ -519,10 +591,12 @@ interface TitleSlugProbe {
  * The surname predicate rides the SAME query when armed: person pages
  * whose lower(title) ends with " <token>". Patterns are pre-escaped for
  * LIKE (backslash default escape); type='person' kills the company-tail
- * class ("Labs", "Systems" as pseudo-surnames).
+ * class ("Labs", "Systems" as pseudo-surnames). The lowercase-phrase title
+ * predicate (#6195) rides it too (an empty list matches nothing), so phrases
+ * never add a statement to the turn.
  */
 function fetchTitleSlugRows(engine: BrainEngine, q: TitleSlugProbe): Promise<PageRow[]> {
-  const { sourceIds, privacySql, titlesLc, exactSlugs, slugSuffixes, surnamePatterns } = q;
+  const { sourceIds, privacySql, titlesLc, exactSlugs, slugSuffixes, surnamePatterns, phraseTitleNorms } = q;
   return surnamePatterns.length > 0
     ? engine.executeRaw<PageRow>(
         `SELECT p.slug, p.source_id, p.title, p.type, p.frontmatter, p.compiled_truth
@@ -532,8 +606,9 @@ function fetchTitleSlugRows(engine: BrainEngine, q: TitleSlugProbe): Promise<Pag
             AND ( lower(p.title) = ANY($2::text[])
                OR p.slug = ANY($3::text[])
                OR p.slug LIKE ANY($4::text[])
-               OR (lower(p.title) LIKE ANY($5::text[]) AND p.type = 'person') )`,
-        [sourceIds, titlesLc, exactSlugs, slugSuffixes, surnamePatterns],
+               OR (lower(p.title) LIKE ANY($5::text[]) AND p.type = 'person')
+               OR (lower(p.title) = ANY($6::text[]) AND p.type = ANY($7::text[])) )`,
+        [sourceIds, titlesLc, exactSlugs, slugSuffixes, surnamePatterns, phraseTitleNorms, LOWERCASE_TITLE_TYPES],
       )
     : engine.executeRaw<PageRow>(
         `SELECT p.slug, p.source_id, p.title, p.type, p.frontmatter, p.compiled_truth
@@ -542,9 +617,29 @@ function fetchTitleSlugRows(engine: BrainEngine, q: TitleSlugProbe): Promise<Pag
             AND p.source_id = ANY($1::text[])
             AND ( lower(p.title) = ANY($2::text[])
            OR p.slug = ANY($3::text[])
-           OR p.slug LIKE ANY($4::text[]) )`,
-        [sourceIds, titlesLc, exactSlugs, slugSuffixes],
+           OR p.slug LIKE ANY($4::text[])
+           OR (lower(p.title) = ANY($5::text[]) AND p.type = ANY($6::text[])) )`,
+        [sourceIds, titlesLc, exactSlugs, slugSuffixes, phraseTitleNorms, LOWERCASE_TITLE_TYPES],
       );
+}
+
+/**
+ * #6195: how many entity-typed rows carry each probed phrase as their exact
+ * title, counted over every fetched row BEFORE arm classification (the
+ * surname-coverage rule): a phrase resolves only when exactly one page across
+ * the considered sources holds that title.
+ */
+function phraseTitleHolderCounts(rows: readonly PageRow[], phraseTitleNorms: readonly string[]): Map<string, number> {
+  const holders = new Map<string, number>();
+  if (!phraseTitleNorms.length) return holders;
+  const probed = new Set(phraseTitleNorms);
+  for (const r of rows) {
+    const titleLc = (r.title ?? '').toLowerCase();
+    if (probed.has(titleLc) && LOWERCASE_TITLE_TYPES.includes(r.type ?? '')) {
+      holders.set(titleLc, (holders.get(titleLc) ?? 0) + 1);
+    }
+  }
+  return holders;
 }
 
 /** Recover a display label: prefer the matched candidate surface, else the page title. */

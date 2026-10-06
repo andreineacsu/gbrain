@@ -61,7 +61,11 @@ export interface RecallReflex {
   identityHit: boolean;
 }
 
-/** Identity arms that block suppression (the turn-context analogue of the alias/exact-title protection). */
+/**
+ * Identity arms that block suppression (the turn-context analogue of the alias/exact-title protection).
+ * The weak exact-title arms ('cjk-title', 'lowercase-title') stay unprotected like 'title-surname':
+ * they lack the capitalization evidence a strong 'title' hit carries.
+ */
 const IDENTITY_ARMS = new Set(['alias', 'title']);
 
 export function recallReflex(surfaced: ReadonlyArray<{ arm: string }>): RecallReflex {

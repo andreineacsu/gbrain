@@ -520,6 +520,21 @@ describe('push-path IPC handler (extracted, real engine)', () => {
     expect(after?.last_wake_at).not.toBe(before); // complete pack advances the cursor
   });
 
+  test('lowercase window phrases (#6195) are not banked or packed as entities', async () => {
+    const { makeContextPackIpcHandler } = await import('../src/mcp/context-pack-handler.ts');
+    const handler = makeContextPackIpcHandler(engine, 'default');
+    await handler({
+      kind: 'context_pack', protocol: 2, secret: 's',
+      sessionId: 'push-phrase',
+      window: [{ role: 'user', text: 'did alice sample reply about the pilot' }],
+      bankOnly: true,
+    });
+    const st = await getSessionContextState(engine, 'default', null, 'push-phrase');
+    const banked = st?.standing_entities ?? [];
+    expect(banked).toContain('alice');
+    expect(banked.filter((e) => /\s/.test(e))).toEqual([]);
+  });
+
   test('a deadline-degraded pack does NOT advance the wake cursor', async () => {
     const { makeContextPackIpcHandler } = await import('../src/mcp/context-pack-handler.ts');
     // Freeze a known cursor + banked entities first (INSERT path) so the

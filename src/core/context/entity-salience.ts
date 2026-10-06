@@ -15,6 +15,10 @@
  *     Hebrew, Devanagari, Thai — \\p{Lo} is invisible to both passes), and
  *     lowercase SURNAME-only mentions (weak candidates never reach the
  *     surname arm; see retrieval-reflex.ts).
+ *   - A lowercase name of 2-3 words also emits whole, as a weak PHRASE
+ *     candidate (#6195): alias arm, plus an exact unique entity-page title.
+ *     A name written part capitalized, part lowercase ("Alice example") is
+ *     not joined into one phrase.
  *   - extractCandidates is single-turn. The v0.43 (#2095) window layer
  *     (extractCandidatesFromWindow) widens extraction across the last N turns
  *     — assistant-introduced entities and "what about her?" follow-ups whose
@@ -43,7 +47,8 @@ export interface EntityCandidate {
    * know-to-ask limit). Weak candidates are resolution-restricted: the
    * resolver may probe them against the ALIAS table only (exact, unique,
    * live-page-verified) — never title/slug/suffix arms — so ordinary
-   * lowercase words cannot fabricate pointers.
+   * lowercase words cannot fabricate pointers. A weak PHRASE (2-3 lowercase
+   * words, #6195) may additionally match an entity page's title exactly.
    */
   weak?: true;
   /**
@@ -63,6 +68,17 @@ export const MAX_CANDIDATES = 12;
  * batched alias probe size.
  */
 export const MAX_WEAK_CANDIDATES = 32;
+
+/**
+ * Max lowercase WEAK PHRASE candidates per turn (#6195): 2-3 adjacent
+ * lowercase words ("alice example"), probed whole. Own budget, so phrases
+ * never take a slot from single weak tokens or strong candidates. Two windows
+ * start at each word, so twice the single-token budget covers the same span
+ * of text. The resolver only ever matches a phrase exactly (alias, or a
+ * unique entity-page title), so the cap bounds the size of the batched
+ * probes, not their number.
+ */
+export const MAX_WEAK_PHRASE_CANDIDATES = 2 * MAX_WEAK_CANDIDATES;
 
 /**
  * Max CJK weak n-gram candidates per turn (#3746). CJK names have no
@@ -150,6 +166,66 @@ function isPureNumber(s: string): boolean {
 // \b misbehaves with unicode property classes). The lookbehind also excludes
 // @handles (step 1 owns those) and the lowercase TAIL of a capitalized word.
 const WEAK_TOKEN_RE = /(?<![\p{L}\p{N}'’@-])\p{Ll}[\p{L}\p{N}'’-]{2,}(?![\p{L}\p{N}'’-])/gu;
+
+// #6195: lowercase PHRASE runs, two or more lowercase-initial words on one
+// line with only spaces or tabs between them, so punctuation and line breaks
+// end a run. A word here has no 3-char floor ("bo example"): a phrase is only ever
+// matched whole. Same leading boundary as WEAK_TOKEN_RE.
+const WEAK_PHRASE_WORD = `\\p{Ll}[\\p{L}\\p{N}'’-]*`;
+const WEAK_PHRASE_RUN_RE = new RegExp(
+  `(?<![\\p{L}\\p{N}'’@-])${WEAK_PHRASE_WORD}(?:[^\\S\\r\\n]+${WEAK_PHRASE_WORD})+`,
+  'gu',
+);
+const WEAK_PHRASE_GAP_RE = /[^\S\r\n]+/;
+
+/** True for a lowercase multi-word weak candidate ("alice example", #6195). */
+export function isWeakPhrase(c: EntityCandidate): boolean {
+  return c.weak === true && /\s/.test(c.query);
+}
+
+/**
+ * Lowercase PHRASE pass (#6195). A name typed lowercase is usually more than
+ * one word ("call alice example"), and the single-token pass can never probe
+ * it whole. Every 2-3 word window of each lowercase run becomes a WEAK
+ * candidate on its own budget, longest first at each position. A window is
+ * skipped when it starts or ends with a function word, or holds nothing but
+ * function and common words ("good morning"). Windows made only of other
+ * words come first, so a name late in a long lowercase message still makes
+ * the budget; windows with a common or interior function word ("call alice
+ * example", "bank of example") follow. The resolver matches a phrase exactly
+ * or not at all, so windows that are ordinary prose cost probe size only.
+ * Norms already taken by a strong candidate or an earlier weak one are
+ * skipped; emitted norms are added to `weakSeen`.
+ */
+function weakPhraseCandidates(text: string, strongNorms: ReadonlySet<string>, weakSeen: Set<string>): EntityCandidate[] {
+  const contentOnly: Array<{ raw: string; norm: string }> = [];
+  const withCommonWord: Array<{ raw: string; norm: string }> = [];
+  const taken = new Set<string>();
+  collect: for (const m of text.matchAll(WEAK_PHRASE_RUN_RE)) {
+    const words = m[0].split(WEAK_PHRASE_GAP_RE);
+    for (let i = 0; i < words.length - 1; i++) {
+      for (const n of [3, 2]) {
+        if (i + n > words.length) continue;
+        const gram = words.slice(i, i + n);
+        const lcs = gram.map((w) => stripPossessive(w).toLowerCase());
+        if (STOPWORDS.has(lcs[0]!) || STOPWORDS.has(lcs[n - 1]!)) continue;
+        const plainWords = lcs.filter((w) => STOPWORDS.has(w) || COMMON_WORDS.has(w)).length;
+        if (plainWords === n) continue;
+        const raw = stripPossessive(gram.join(' '));
+        const norm = normalizeAlias(raw);
+        if (!norm || strongNorms.has(norm) || weakSeen.has(norm) || taken.has(norm)) continue; // covered by a strong candidate / dup
+        const bucket = plainWords === 0 ? contentOnly : withCommonWord;
+        if (bucket.length >= MAX_WEAK_PHRASE_CANDIDATES) continue;
+        taken.add(norm);
+        bucket.push({ raw, norm });
+        if (contentOnly.length >= MAX_WEAK_PHRASE_CANDIDATES) break collect;
+      }
+    }
+  }
+  const kept = [...contentOnly, ...withCommonWord].slice(0, MAX_WEAK_PHRASE_CANDIDATES);
+  for (const { norm } of kept) weakSeen.add(norm);
+  return kept.map(({ raw }) => ({ display: raw, query: raw, weak: true as const }));
+}
 
 // #3746 — CJK runs (Han/hiragana/katakana/hangul, the shared cjk.ts ranges).
 // CJK chars are \p{Lo}: invisible to both the \p{Lu}-anchored strong pass and
@@ -280,6 +356,9 @@ export function extractCandidates(text: string): EntityCandidate[] {
     out.push({ display: raw, query: raw, weak: true });
   }
 
+  // 3.6. Lowercase PHRASE pass (#6195): see weakPhraseCandidates.
+  out.push(...weakPhraseCandidates(text, strongNorms, weakSeen));
+
   // 4. CJK weak n-gram pass (#3746). CJK scripts carry no capitalization and
   // (for JA/ZH) no whitespace tokenization, so both passes above are blind to
   // 田中 / 김철수 / 王小明. Emit 2–4-char n-grams of each CJK run as WEAK
@@ -400,13 +479,16 @@ export function extractCandidatesFromWindow(turns: WindowTurn[]): WindowEntityCa
   // Salience weight: recency dominates, then frequency, then user-role.
   // Deterministic tie-break on first-seen order. Strong candidates rank
   // STRICTLY above weak ones (separate budgets too) — recent weak noise can
-  // never evict an older strong candidate.
+  // never evict an older strong candidate. Lowercase phrases keep their own
+  // budget here as well, so a wordy newest turn's phrases never push an
+  // older turn's single weak tokens out of the window.
   const weight = (c: WAcc) =>
     (c.lastTurnIdx + 1) / turns.length + Math.min(c.occurrences, 4) * 0.1 + (c.userMention ? 0.15 : 0);
   const sorted = Array.from(acc.values()).sort(
     (a, b) => (a.weak ? 1 : 0) - (b.weak ? 1 : 0) || weight(b) - weight(a) || a.order - b.order,
   );
   const strong = sorted.filter((c) => !c.weak).slice(0, MAX_CANDIDATES);
-  const weak = sorted.filter((c) => c.weak).slice(0, MAX_WEAK_CANDIDATES);
-  return [...strong, ...weak].map(({ lastTurnIdx: _l, order: _o, ...rest }) => rest);
+  const weak = sorted.filter((c) => c.weak && !isWeakPhrase(c)).slice(0, MAX_WEAK_CANDIDATES);
+  const phrases = sorted.filter(isWeakPhrase).slice(0, MAX_WEAK_PHRASE_CANDIDATES);
+  return [...strong, ...weak, ...phrases].map(({ lastTurnIdx: _l, order: _o, ...rest }) => rest);
 }

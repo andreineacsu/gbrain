@@ -8,6 +8,8 @@ import {
   extractCandidatesFromWindow,
   MAX_CANDIDATES,
   MAX_WEAK_CANDIDATES,
+  MAX_WEAK_PHRASE_CANDIDATES,
+  type EntityCandidate,
 } from '../../src/core/context/entity-salience.ts';
 
 /** STRONG candidate queries only (the v1 contract most tests pin). */
@@ -21,6 +23,15 @@ function weakQueries(text: string): string[] {
   return extractCandidates(text)
     .filter((c) => c.weak)
     .map((c) => c.query);
+}
+
+/** A weak candidate spanning several words (the lowercase phrase pool). */
+const isPhrase = (c: EntityCandidate): boolean => c.weak === true && /\s/.test(c.query);
+/** A weak candidate of one token (lowercase word or CJK gram). */
+const isSingleWeak = (c: EntityCandidate): boolean => c.weak === true && !/\s/.test(c.query);
+
+function weakPhrases(text: string): string[] {
+  return extractCandidates(text).filter(isPhrase).map((c) => c.query);
 }
 
 describe('extractCandidates', () => {
@@ -121,10 +132,11 @@ describe('extractCandidates', () => {
     const weakPart = Array.from({ length: 50 }, (_, i) => `wkword${i}xy`).join(' ');
     const out = extractCandidates(`${strongPart}. ${weakPart}`);
     const strong = out.filter((c) => !c.weak);
-    const weak = out.filter((c) => c.weak);
     expect(strong.length).toBeLessThanOrEqual(MAX_CANDIDATES);
     expect(strong.length).toBe(MAX_CANDIDATES); // weak never displaces strong
-    expect(weak.length).toBeLessThanOrEqual(MAX_WEAK_CANDIDATES);
+    // Single lowercase words and lowercase phrases each fill their own pool.
+    expect(out.filter(isSingleWeak).length).toBe(MAX_WEAK_CANDIDATES);
+    expect(out.filter(isPhrase).length).toBe(MAX_WEAK_PHRASE_CANDIDATES);
     // strong candidates come first in the output
     expect(out.findIndex((c) => c.weak)).toBeGreaterThanOrEqual(strong.length);
   });
@@ -160,7 +172,74 @@ describe('extractCandidatesFromWindow — weak threading (v0.46.15)', () => {
     const strongIdx = out.findIndex((c) => c.query === 'Galewright');
     expect(strongIdx).toBe(0); // recent weak noise never outranks an older strong candidate
     expect(out.filter((c) => !c.weak).length).toBeLessThanOrEqual(MAX_CANDIDATES);
-    expect(out.filter((c) => c.weak).length).toBeLessThanOrEqual(MAX_WEAK_CANDIDATES);
+    expect(out.filter(isSingleWeak).length).toBeLessThanOrEqual(MAX_WEAK_CANDIDATES);
+    expect(out.filter(isPhrase).length).toBeLessThanOrEqual(MAX_WEAK_PHRASE_CANDIDATES);
+  });
+});
+
+describe('#6195: lowercase phrase pass (2-3 word weak candidates)', () => {
+  test('adjacent lowercase words emit whole phrases, longest first at each position', () => {
+    expect(weakPhrases('did alice sample reply')).toEqual(['alice sample reply', 'alice sample', 'sample reply']);
+    // Windows holding a common word ("call") follow the content-only ones.
+    expect(weakPhrases('call alice example')).toEqual(['alice example', 'call alice example', 'call alice']);
+    // The single lowercase words are still emitted on their own.
+    const weak = weakQueries('call alice example');
+    expect(weak).toContain('alice');
+    expect(weak).toContain('example');
+  });
+
+  const PHRASE_CASES: Array<{ name: string; text: string; expected?: string[]; present?: string[]; absent?: string[] }> = [
+    { name: 'function words only', text: 'so what about that', expected: [] },
+    { name: 'common words only', text: 'good morning, see you next week', absent: ['good morning', 'next week'] },
+    { name: 'a function word may sit inside a phrase, never at its edge', text: 'bank of example', expected: ['bank of example'] },
+    { name: 'a full stop ends the phrase', text: 'thanks alice. example numbers attached', absent: ['alice example'] },
+    { name: 'a comma ends the phrase', text: 'alice, example', expected: [] },
+    { name: 'a line break ends the phrase', text: 'thanks alice\nexample numbers attached', absent: ['alice example'] },
+    { name: 'a trailing possessive is stripped', text: "read alice example's memo", present: ['alice example'] },
+    { name: 'name parts shorter than three letters still form a phrase', text: 'ping bo example today', present: ['bo example'] },
+    { name: 'a phrase already extracted capitalized is not repeated', text: 'Alice Example joined. ping alice example', absent: ['alice example'] },
+  ];
+  for (const c of PHRASE_CASES) {
+    test(c.name, () => {
+      const phrases = weakPhrases(c.text);
+      if (c.expected) expect(phrases).toEqual(c.expected);
+      for (const p of c.present ?? []) expect(phrases).toContain(p);
+      for (const p of c.absent ?? []) expect(phrases).not.toContain(p);
+    });
+  }
+
+  test('a name late in a long lowercase message still makes the phrase budget', () => {
+    // Note-style text with few function words: every adjacent pair is a window.
+    const prefix =
+      'notes from today product sync design review pricing update vendor follow up hiring pipeline ' +
+      'budget forecast roadmap draft launch checklist onboarding flow analytics dashboard churn report ' +
+      'support backlog and then remind me what';
+    const phrases = weakPhrases(`${prefix} alice example said`);
+    expect(phrases.indexOf('alice example')).toBeGreaterThan(24);
+    expect(phrases.length).toBeLessThanOrEqual(MAX_WEAK_PHRASE_CANDIDATES);
+  });
+
+  test('a strong sighting in the window upgrades a weak-born phrase', () => {
+    const out = extractCandidatesFromWindow([
+      { role: 'user', text: 'call alice example' },
+      { role: 'user', text: 'Alice Example called back' },
+    ]);
+    const c = out.find((x) => x.query.toLowerCase() === 'alice example');
+    expect(c).toBeDefined();
+    expect(c!.weak).toBeUndefined();
+    expect(c!.display).toBe('Alice Example');
+  });
+
+  test('phrases from the newest turn never push an older single lowercase word out of the window', () => {
+    const newest = Array.from({ length: 25 }, (_, i) => `wkword${i}xy`).join(' ');
+    const out = extractCandidatesFromWindow([
+      { role: 'user', text: 'remind me what saoirse said' },
+      { role: 'user', text: newest },
+    ]);
+    // 25 newest words plus the newest turn's phrases exceed the single-word
+    // pool; the older "saoirse" survives because phrases are capped apart.
+    expect(25 + out.filter(isPhrase).length).toBeGreaterThan(MAX_WEAK_CANDIDATES);
+    expect(out.some((c) => c.query === 'saoirse' && c.weak)).toBe(true);
   });
 });
 

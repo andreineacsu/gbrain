@@ -278,20 +278,26 @@ describe('gateVolunteeredPointers — direct unit (the pure gate step)', () => {
     expect(pages).toEqual([]);
   });
 
-  test('title-surname arm clears the 0.70 gate unboosted and renders a surname rationale (R2-7)', () => {
-    const block: PointerBlock = {
-      pointers: [
-        { display: 'Galewright', slug: 'people/ronan-galewright', source_id: 'default', synopsis: 'z', arm: 'title-surname', confidence: 0.72 },
-      ],
-      text: 'B',
-    };
-    // Empty candidate map: no salience boost — the arm's base 0.72 alone must
-    // survive the 0.70 volunteer floor (the reason it isn't 0.65).
-    const pages = gateVolunteeredPointers(block, new Map(), { windowSize: 1 });
-    expect(pages).toHaveLength(1);
-    expect(pages[0].confidence).toBeCloseTo(0.72);
-    expect(pages[0].rationale).toContain('surname match "Galewright"');
-  });
+  const GATE_CLEARING_ARMS = [
+    { arm: 'title-surname', label: 'surname (R2-7)', display: 'Galewright', slug: 'people/ronan-galewright', rationale: 'surname match "Galewright"' },
+    { arm: 'lowercase-title', label: 'lowercase title (#6195)', display: 'alice example', slug: 'people/alice-example', rationale: 'lowercase title match "alice example"' },
+  ] as const;
+  for (const c of GATE_CLEARING_ARMS) {
+    test(`${c.arm} arm clears the 0.70 gate unboosted and renders a ${c.label} rationale`, () => {
+      const block: PointerBlock = {
+        pointers: [
+          { display: c.display, slug: c.slug, source_id: 'default', synopsis: 'z', arm: c.arm, confidence: 0.72 },
+        ],
+        text: 'B',
+      };
+      // Empty candidate map: no salience boost, so the arm's base 0.72 alone
+      // must survive the 0.70 volunteer floor (the reason it isn't 0.65).
+      const pages = gateVolunteeredPointers(block, new Map(), { windowSize: 1 });
+      expect(pages).toHaveLength(1);
+      expect(pages[0].confidence).toBeCloseTo(0.72);
+      expect(pages[0].rationale).toContain(c.rationale);
+    });
+  }
 });
 
 describe('volunteerUsageStats', () => {
@@ -411,6 +417,32 @@ describe('volunteer_context op (contract surface)', () => {
     expect(rows[0].session_id).toBe('s-42');
     expect(Number(rows[0].turn)).toBe(7);
   });
+
+  // garrytan/gbrain#6195: the report's table, one fixture state per row. A
+  // lowercase multi-word name volunteers through the whole phrase, and the
+  // capitalized and one-word paths keep their arms.
+  const LOWERCASE_NAME_ROWS: Array<{ message: string; aliases: string[]; arm: string }> = [
+    { message: 'call Alice Example', aliases: [], arm: 'title' },
+    { message: 'call alice example', aliases: [], arm: 'lowercase-title' },
+    { message: 'did alice sample reply', aliases: ['Alice Sample'], arm: 'alias' },
+    { message: 'ask alice about it', aliases: ['Alice'], arm: 'alias' },
+  ];
+  for (const row of LOWERCASE_NAME_ROWS) {
+    test(`"${row.message}" volunteers the page via ${row.arm} and logs that arm (#6195)`, async () => {
+      _resetPendingVolunteerEventWritesForTests();
+      await seed('people/alice-example', 'Alice Example', 'Alice is a founder.');
+      if (row.aliases.length) {
+        await engine.setPageAliases('people/alice-example', 'default', row.aliases.map((a) => normalizeAlias(a)));
+      }
+      const result = (await operationsByName.volunteer_context.handler(mkCtx(), { window: row.message })) as any;
+      expect(result.pages.map((p: any) => [p.slug, p.arm])).toEqual([['people/alice-example', row.arm]]);
+      expect(result.pages[0].confidence).toBeGreaterThanOrEqual(VOLUNTEER_DEFAULT_MIN_CONFIDENCE);
+      const { unfinished } = await awaitPendingVolunteerEventWrites(5_000);
+      expect(unfinished).toBe(0);
+      const rows = await engine.executeRaw<{ match_arm: string }>(`SELECT match_arm FROM context_volunteer_events`, []);
+      expect(rows.map((r) => r.match_arm)).toEqual([row.arm]);
+    });
+  }
 
   test('event-log failure never fails the op (failing engine injected for the INSERT)', async () => {
     _resetPendingVolunteerEventWritesForTests();

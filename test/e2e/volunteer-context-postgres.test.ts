@@ -84,6 +84,18 @@ describePg('volunteer_context on real Postgres (#2095)', () => {
     expect(stats.total_used).toBeGreaterThanOrEqual(1);
   }, 120_000);
 
+  test('a lowercase multi-word name volunteers via the lowercase-title arm (#6195)', async () => {
+    _resetPendingVolunteerEventWritesForTests();
+    const engine = getEngine();
+    const op = operationsByName.volunteer_context;
+
+    const result = (await op.handler(mkCtx(engine), { window: 'user: call alice example' })) as any;
+    expect(result.pages.map((p: any) => [p.slug, p.arm])).toEqual([['people/alice-example', 'lowercase-title']]);
+
+    const { unfinished } = await awaitPendingVolunteerEventWrites(10_000);
+    expect(unfinished).toBe(0);
+  }, 120_000);
+
   test('RLS is enabled on context_volunteer_events (auto-RLS covers v117)', async () => {
     const engine = getEngine();
     const rows = await engine.executeRaw<{ relrowsecurity: boolean }>(

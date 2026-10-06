@@ -19,7 +19,7 @@ import type { BrainEngine } from '../core/engine.ts';
 import type { ContextPackHandler } from '../core/context/resolve-ipc.ts';
 import { CONTEXT_PACK_SERVER_BUDGET_MS } from '../core/context/resolve-ipc.ts';
 import { assembleContextPack } from '../core/context/turn-context.ts';
-import { extractCandidatesFromWindow } from '../core/context/entity-salience.ts';
+import { extractCandidatesFromWindow, isWeakPhrase } from '../core/context/entity-salience.ts';
 import {
   getCheckpointManifest,
   getSessionContextState,
@@ -97,7 +97,9 @@ export function makeContextPackIpcHandler(
     let fromWindow: string[] = [];
     try {
       if (Array.isArray(req.window) && req.window.length) {
-        fromWindow = extractCandidatesFromWindow(req.window).map((c) => c.query);
+        // Lowercase phrases (#6195) stay out: the entity card matches titles
+        // of any page type with none of the reflex's phrase guards.
+        fromWindow = extractCandidatesFromWindow(req.window).filter((c) => !isWeakPhrase(c)).map((c) => c.query);
       }
     } catch { /* extraction is best-effort */ }
     const state = sessionId

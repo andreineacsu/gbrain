@@ -165,8 +165,9 @@ export function volunteerEnabled(cfg: GBrainConfig | null): boolean {
 }
 
 /**
- * v0.46.15 identity wave — kill switch for the lexical recall arms
- * (weak-candidate alias arm + surname arm). Default ON; same env-direct
+ * v0.46.15 identity wave — kill switch for the lexical recall arms (the
+ * weak-candidate arms: alias, pure-CJK title, lowercase-phrase title; and the
+ * surname arm). Default ON; same env-direct
  * pattern as reflexEnabled/windowTurnCount so a config-less environment
  * still honors the escape hatch.
  */

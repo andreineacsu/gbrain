@@ -119,6 +119,7 @@ function rationaleFor(arm: ResolveArm, display: string, c: WindowEntityCandidate
     : arm === 'title' ? `exact title match "${display}"`
     : arm === 'title-surname' ? `surname match "${display}"`
     : arm === 'cjk-title' ? `exact CJK title/slug match "${display}"`
+    : arm === 'lowercase-title' ? `lowercase title match "${display}"`
     : `slug match "${display}"`;
   if (!c) return armText;
   const parts = [armText];

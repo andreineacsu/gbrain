@@ -12,7 +12,11 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { withEnv } from './helpers/with-env.ts';
 import { normalizeAlias } from '../src/core/search/alias-normalize.ts';
 import { resolveEntitiesToPointers } from '../src/core/context/retrieval-reflex.ts';
-import { extractCandidates } from '../src/core/context/entity-salience.ts';
+import {
+  extractCandidates,
+  MAX_WEAK_CANDIDATES,
+  MAX_WEAK_PHRASE_CANDIDATES,
+} from '../src/core/context/entity-salience.ts';
 import { createGBrainContextEngine } from '../src/core/context-engine.ts';
 import { disposeReflex, lexicalArmsEnabled } from '../src/core/context/reflex.ts';
 import { TAKES_FENCE_BEGIN, TAKES_FENCE_END } from '../src/core/takes-fence.ts';
@@ -824,5 +828,207 @@ describe('#3746 — cjk-title arm (pure-CJK weak norms probe exact title/slug)',
       { lexicalArms: false },
     );
     expect(block).toBeNull();
+  });
+});
+
+describe('#6195: lowercase multi-word names (whole-phrase alias + lowercase-title arm)', () => {
+  type Opts = Parameters<typeof resolveEntitiesToPointers>[3];
+
+  async function seedTyped(slug: string, title: string, type: string, source = 'default', frontmatter = '{}') {
+    await engine.executeRaw(
+      `INSERT INTO pages (slug, source_id, type, title, compiled_truth, timeline, frontmatter)
+       VALUES ($1, $2, $3, $4, 'A page.', '', $5::text::jsonb)`,
+      [slug, source, type, title, frontmatter],
+    );
+  }
+  const seedAlice = () => seed('people/alice-example', 'Alice Example', 'Alice is a founder.');
+  const resolve = (text: string, opts: Opts = {}) =>
+    resolveEntitiesToPointers(engine, 'default', extractCandidates(text), opts);
+  const arms = (block: Awaited<ReturnType<typeof resolve>>) => (block?.pointers ?? []).map((p) => [p.slug, p.arm]);
+
+  test('a lowercase title resolves with exact-title provenance, above the volunteer gate and below a capitalized hit', async () => {
+    await seedAlice();
+    const block = await resolve('call alice example');
+    expect(arms(block)).toEqual([['people/alice-example', 'lowercase-title']]);
+    const p = block!.pointers[0];
+    expect(p.confidence).toBeGreaterThanOrEqual(0.7);
+    expect(p.confidence).toBeLessThan(0.8);
+    expect(p.matchedNorm).toBe(normalizeAlias('alice example'));
+  });
+
+  // The title arm is limited to the always-linkable entity types; any other
+  // page needs a registered alias to resolve from a lowercase phrase.
+  const TYPE_CASES: Array<[type: string, resolves: boolean]> = [
+    ['person', true],
+    ['company', true],
+    ['organization', true],
+    ['entity', true],
+    ['note', false],
+    ['project', false],
+  ];
+  for (const [type, resolves] of TYPE_CASES) {
+    test(`page type ${type}: a title equal to the phrase ${resolves ? 'resolves' : 'stays silent'}`, async () => {
+      await seedTyped('pages/acme-example', 'Acme Example', type);
+      const block = await resolve('any news from acme example today');
+      expect(arms(block)).toEqual(resolves ? [['pages/acme-example', 'lowercase-title']] : []);
+    });
+  }
+
+  test('a page of another type still resolves from a lowercase phrase registered as its alias', async () => {
+    await seedTyped('projects/acme-example', 'Project Acme', 'project');
+    await engine.setPageAliases('projects/acme-example', 'default', [normalizeAlias('Acme Example')]);
+    expect(arms(await resolve('any news from acme example today'))).toEqual([['projects/acme-example', 'alias']]);
+  });
+
+  const SILENT_CASES: Array<{ name: string; setup: () => Promise<void>; message: string; opts?: Opts }> = [
+    {
+      name: 'a common lowercase phrase with no matching page',
+      setup: seedAlice,
+      message: 'see you next week at the usual place',
+    },
+    {
+      name: 'one lowercase word, which never resolves by title',
+      setup: () => seed('people/alice', 'Alice', 'A founder.'),
+      message: 'ask alice about it',
+    },
+    { name: 'a phrase split by a full stop', setup: seedAlice, message: 'thanks alice. example numbers attached' },
+    { name: 'a phrase split by a line break', setup: seedAlice, message: 'thanks alice\nexample numbers attached' },
+    {
+      name: 'two pages that share the title',
+      setup: async () => {
+        await seedAlice();
+        await seed('people/alice-example-2', 'Alice Example', 'Another Alice.');
+      },
+      message: 'call alice example',
+    },
+    {
+      name: 'two sources that share the title',
+      setup: async () => {
+        await engine.executeRaw(
+          `INSERT INTO sources (id, name, local_path) VALUES ('other', 'Other', '/tmp/other') ON CONFLICT (id) DO NOTHING`,
+          [],
+        );
+        await seedAlice();
+        await seed('people/alice-example', 'Alice Example', 'Another Alice.', 'other');
+      },
+      message: 'call alice example',
+      opts: { sourceIds: ['default', 'other'] },
+    },
+    {
+      name: 'a phrase two pages claim as an alias, even when a third page is titled like it',
+      setup: async () => {
+        await seed('people/ally-a', 'Ally A', 'First.');
+        await seed('people/ally-b', 'Ally B', 'Second.');
+        await seedAlice();
+        await engine.setPageAliases('people/ally-a', 'default', [normalizeAlias('alice example')]);
+        await engine.setPageAliases('people/ally-b', 'default', [normalizeAlias('alice example')]);
+      },
+      message: 'call alice example',
+    },
+    {
+      name: 'a private page',
+      setup: () => seedTyped('people/alice-example', 'Alice Example', 'person', 'default', '{"visibility":"private"}'),
+      message: 'call alice example',
+    },
+    { name: 'a lowercase title with the lexical arms off', setup: seedAlice, message: 'call alice example', opts: { lexicalArms: false } },
+    {
+      name: 'a lowercase multi-word alias with the lexical arms off',
+      setup: async () => {
+        await seedAlice();
+        await engine.setPageAliases('people/alice-example', 'default', [normalizeAlias('Alice Sample')]);
+      },
+      message: 'did alice sample reply',
+      opts: { lexicalArms: false },
+    },
+  ];
+  for (const c of SILENT_CASES) {
+    test(`stays silent: ${c.name}`, async () => {
+      await c.setup();
+      expect(await resolve(c.message, c.opts)).toBeNull();
+    });
+  }
+
+  test('a private page resolves only for a caller allowed to see private pages', async () => {
+    await seedTyped('people/alice-example', 'Alice Example', 'person', 'default', '{"visibility":"private"}');
+    expect(arms(await resolve('call alice example', { excludePrivate: false }))).toEqual([
+      ['people/alice-example', 'lowercase-title'],
+    ]);
+  });
+
+  test('a phrase registered as a unique alias resolves that page only, not a second page titled like it', async () => {
+    await seed('people/ally-a', 'Ally A', 'First.');
+    await seedAlice();
+    await engine.setPageAliases('people/ally-a', 'default', [normalizeAlias('alice example')]);
+    expect(arms(await resolve('call alice example'))).toEqual([['people/ally-a', 'alias']]);
+  });
+
+  test('a lowercase title resolves on the statement that also carries the surname predicate', async () => {
+    await seedAlice();
+    // "Remind" is a sentence-start capitalized token, so the surname arm is
+    // armed and the phrase predicate rides the other statement shape.
+    const candidates = extractCandidates('Remind me to call alice example');
+    expect(candidates.some((c) => !c.weak && c.query === 'Remind')).toBe(true);
+    const block = await resolveEntitiesToPointers(engine, 'default', candidates, {});
+    expect(arms(block)).toEqual([['people/alice-example', 'lowercase-title']]);
+  });
+
+  test('a nested lowercase phrase never points at a second page', async () => {
+    await seed('people/mary-ann-example', 'Mary Ann Example', 'A founder.');
+    await seed('people/ann-example', 'Ann Example', 'A different person.');
+    expect(arms(await resolve('loop in mary ann example on the intro'))).toEqual([['people/mary-ann-example', 'lowercase-title']]);
+    // The inner name alone still resolves its own page.
+    expect(arms(await resolve('loop in ann example on the intro'))).toEqual([['people/ann-example', 'lowercase-title']]);
+  });
+
+  test('a single lowercase word inside a resolved phrase never points at a second page', async () => {
+    await seedAlice();
+    await seed('people/alice-other', 'Alice Other', 'Another Alice.');
+    await engine.setPageAliases('people/alice-other', 'default', [normalizeAlias('alice')]);
+    expect(arms(await resolve('call alice example'))).toEqual([['people/alice-example', 'lowercase-title']]);
+    expect(arms(await resolve('ask alice about it'))).toEqual([['people/alice-other', 'alias']]);
+  });
+
+  test('the lowercase title probe goes fail-closed when a source alias lookup fails', async () => {
+    await engine.executeRaw(
+      `INSERT INTO sources (id, name, local_path) VALUES ('other', 'Other', '/tmp/other') ON CONFLICT (id) DO NOTHING`,
+      [],
+    );
+    await seedAlice();
+    const shim = {
+      resolveAliases: (norms: string[], opts?: { sourceId?: string }) =>
+        opts?.sourceId === 'other' ? Promise.reject(new Error('transient blip')) : engine.resolveAliases(norms, opts),
+      executeRaw: (sql: string, params: unknown[]) => engine.executeRaw(sql, params),
+    } as unknown as typeof engine;
+    const block = await resolveEntitiesToPointers(shim, 'default', extractCandidates('call alice example'), {
+      sourceIds: ['default', 'other'],
+    });
+    expect(block).toBeNull();
+    // The same message resolves once every alias lookup answers.
+    expect(arms(await resolve('call alice example', { sourceIds: ['default', 'other'] }))).toEqual([
+      ['people/alice-example', 'lowercase-title'],
+    ]);
+  });
+
+  test('a long lowercase message stays inside the probe budget and adds no query', async () => {
+    await seedAlice();
+    const long = Array.from({ length: 200 }, (_, i) => `wkword${i}xy`).join(' ');
+    const aliasBatches: number[] = [];
+    let rawQueries = 0;
+    const shim = {
+      resolveAliases: (norms: string[], opts?: { sourceId?: string }) => {
+        aliasBatches.push(norms.length);
+        return engine.resolveAliases(norms, opts);
+      },
+      executeRaw: (sql: string, params: unknown[]) => {
+        rawQueries++;
+        return engine.executeRaw(sql, params);
+      },
+    } as unknown as typeof engine;
+    const block = await resolveEntitiesToPointers(shim, 'default', extractCandidates(`call alice example ${long}`), {});
+    expect(arms(block)).toEqual([['people/alice-example', 'lowercase-title']]);
+    // One batched alias lookup, bounded by the two weak pools.
+    expect(aliasBatches).toEqual([MAX_WEAK_CANDIDATES + MAX_WEAK_PHRASE_CANDIDATES]);
+    // The title probe rides the existing title/slug query: one statement, as before.
+    expect(rawQueries).toBe(1);
   });
 });
