@@ -168,6 +168,8 @@ const fireLowerSurname: Template = (n) => {
   return { intent: 'fire', subtype: 'lowercase-surname', text, should_retrieve: true, gold_slugs: [page.slug], pages: [page], expect_reflex: 'silent', expect_protected: false };
 };
 
+// Since #6195 the reflex resolves these turns through the lowercase-title arm
+// (unprotected); the committed corpus predates that (see datasets/README.md).
 const fireLowerFullName: Template = (n) => {
   const first = n.first(), last = n.surname(), co = n.companyWord(), topic = pick(TOPICS);
   const page = personPage(first, last, false, `${cap(first)} ${last} is the ${pick(ROLES)} at ${co}. ${topic.fact(cap(first))}`);

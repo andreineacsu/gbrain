@@ -76,6 +76,13 @@ and protection flag (0 mismatches against `_design.json`).
 | Extra | 0 | 66 | 44 | 121 | 165 | 132 |
 | Combined | 57 | 71 | 44 | 121 | 165 | 219 |
 
+**Since #6195.** The reflex now resolves a lowercase two- or three-word name that exactly matches one
+person, company, organization or entity title (the `lowercase-title` arm, unprotected). On replay, the 17
+`fire/lowercase-full-name-no-alias` turns fire: Extra reads 0 / 83 / 44 / 121 / 148 / 132 and the eval half
+41 fired-and-needed unprotected turns and 74 fire opportunities, with every other turn on its designed
+slice. The committed datasets, `_design.json` (which still labels those turns silent) and the counts above
+predate that change.
+
 The shipped reflex resolves every BrainBench know-to-ask turn (its baseline failure rate is 0), so BrainBench
 alone offers S6 no fire and no suppress opportunity; the extra corpus supplies all of them. Eval half of the
 extra corpus: 62 unprotected suppress opportunities (at least 35 of 35 correct are needed for

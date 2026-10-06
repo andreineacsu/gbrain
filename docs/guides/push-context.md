@@ -27,13 +27,25 @@ serve-side extraction, `memory.auto_writeback`) — is documented in
    in the window resolve.
 2. **Resolve** through the alias table, exact titles, surnames, and slug
    suffixes — each arm carries an honest confidence: alias 0.9, exact title
-   0.8, surname 0.72, slug-suffix 0.6, +0.05 when mentioned in ≥2 turns or the
-   newest turn. Lowercase mentions ("remind me what alice said") probe the
-   alias table only, and only when the alias is unique across every source in
-   play; a surname-only reference ("Did Galewright follow up?") resolves when
-   exactly one person page carries that surname. Ambiguity in either arm
-   injects nothing — silence beats a wrong pointer. Kill switch for both:
-   `retrieval_reflex_lexical_arms` (default on).
+   0.8, surname 0.72, lowercase title 0.72, slug-suffix 0.6, +0.05 when
+   mentioned in ≥2 turns or the newest turn. A single lowercase word ("remind
+   me what alice said") probes the alias table only, and only when the alias
+   is unique across every source in play. A lowercase name of two or three
+   words ("call alice example") is probed whole: against the alias table
+   under the same rule and, when no alias claims it, against page titles,
+   where it resolves only if exactly one person, company, organization or
+   entity page carries that exact title. A shorter name inside a longer one
+   that resolved ("ann example" inside "mary ann example") is not pointed at
+   separately. A surname-only reference ("Did
+   Galewright follow up?") resolves when exactly one person page carries that
+   surname. Ambiguity in any of these arms injects nothing: silence beats a
+   wrong pointer. Kill switch for all of them: `retrieval_reflex_lexical_arms`
+   (default on).
+
+   A first name, a nickname, or the name of a project or any other page type
+   resolves from lowercase text once it is listed in the page's `aliases:`
+   frontmatter. **Say to your agent:** *"Add 'alice' as an alias on the
+   alice-example page."*
 3. **Gate** at `min_confidence` (default 0.7 — slug-suffix matches need an
    explicit lower gate), suppress pages already surfaced (slug-presence only),
    cap at 3 pages (hard cap 5).
@@ -128,7 +140,7 @@ used?"* — your agent runs `gbrain volunteer-context --stats`.
 | `retrieval_reflex` | true | the ambient channel's master switch (env: `GBRAIN_RETRIEVAL_REFLEX`; negatives `false/0/off/no`, case-insensitive) |
 | `retrieval_reflex_volunteer` | true | the reflex volunteer arm (Arm 2) — the incident kill switch for volunteered pages on the OpenClaw lane (env: `GBRAIN_RETRIEVAL_REFLEX_VOLUNTEER`, env above config) |
 | `retrieval_reflex_max_pointers` | 3 | pointer cap per turn |
-| `retrieval_reflex_lexical_arms` | true | the lowercase-alias + surname recall arms (env: `GBRAIN_RETRIEVAL_REFLEX_LEXICAL_ARMS`); off = disables both arms |
+| `retrieval_reflex_lexical_arms` | true | the lowercase (alias, multi-word title) + surname recall arms (env: `GBRAIN_RETRIEVAL_REFLEX_LEXICAL_ARMS`); off = disables all of them |
 
 Per-call knobs: `max_pages` + `min_confidence` on both the op and `gbrain watch`
 (`--max-pages` / `--min-confidence`, plus `--window-turns` / `--source` on watch);
