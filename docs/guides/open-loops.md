@@ -170,6 +170,11 @@ gbrain waiting [--top N] [--json] [--stale-ok]
     completeness: "partial" and names each held thread with its retry
     command (gbrain sources retry-held <id>); an empty partial answer says
     coverage is partial instead of "You are clean".
+    Each counterparty shows at most 5 loops (due soonest first, then most
+    recently active) and "+N more" for the rest. Loops that name no
+    counterparty (pending decisions, mostly) are never ranked as a person:
+    they follow the people in a "No counterparty" section under the same
+    cap, and --top counts counterparties only.
 
 gbrain loops list|show <id>          inspect
 gbrain loops done <id> | drop <id>   close (a closed commitment retires its
@@ -274,3 +279,20 @@ count). Deterministic — same data and same reference time, same order. Due
 dates and ages are relative to the reference time, which defaults to now;
 pin it with `gbrain waiting --as-of <iso>` (MCP: `open_loops` `as_of`) to
 reproduce a ranking. The result echoes it as `as_of`.
+
+Only loops that name a counterparty are ranked. A group reports its loop
+count as `loop_count` and carries at most 5 loops (due soonest first, then
+most recently active); `loops_omitted` counts the rest. Loops with no
+counterparty (the extractor's pending decisions carry none) are reported
+beside the ranking as `no_counterparty`: `loop_count`, a `by_type` breakdown,
+and the same 5-loop cap. These counts cover the loops the read fetched, the
+500 most recently active; `count` reports that number and `truncated: true`
+marks a cut. To read more of them, list by type:
+`gbrain loops list --type decision_pending` prints the 200 most recently
+active (MCP: `open_loops` with `group_by: "none"`, `loop_type` and `limit`,
+50 by default and 500 at most). More of one counterparty's loops: MCP
+`open_loops` with `counterparty` and `group_by: "none"`, under the same
+`limit`.
+
+**Say to your agent:** *"Show me every pending decision in my open loops."*
+(the agent runs `gbrain loops list --type decision_pending`).
