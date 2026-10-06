@@ -69,7 +69,7 @@ interface Cursor extends SyncDiscovery { runId: string; index: number; authority
     waived?: { imports: number; deletes: number };
     /** #5988: imports held, and files imported only after quoting frontmatter. */
     held?: number; recovered?: { count: number; sample_paths: string[]; comment_values?: number } };
-  /** #5988: failed content-refusal requests this run converted in place. */
+  /** #5988, #6194: failed requests this run converted in place (content refusals, and imports a newer page superseded). */
   convertedFromFailed?: string[];
   /** #5984: the active drain window (reset when a new drain starts), so a backlog ETA never counts downtime. */
   progress?: CursorProgress;
@@ -287,6 +287,10 @@ async function freezeEntry(engine: BrainEngine, cursor: Cursor, key: string, ass
     const moved = entry.renameFrom;
     const recorded = moved?.slug === slug ? moved.sourcePath : entry.sourcePath;
     const foreignOrigin = snapshot?.page.source_path != null && !sameSyncOrigin(snapshot.page.source_path, recorded, originScope, snapshot.page.slug);
+    // #6194: a superseded import freezes at the page's current revision, as the no-op it is; any other newer page keeps the refusal below.
+    if (!occupant && content !== null && pageId !== null && snapshot?.page.id === pageId && snapshot.revision !== revision && !foreignOrigin
+        && await supersededImport(engine, cursor, entry, key, snapshot, content, rawHash, lineEndingOnly)) revision = snapshot.revision;
+    assertActive();
     if ((snapshot?.page.id ?? null) !== pageId || (snapshot?.revision ?? null) !== revision || (entry.unownedDeletion ? !foreignOrigin : foreignOrigin)) {
       throw syncRunRefusal('revision_conflict', 'A page changed after this sync cursor was enumerated.', retry,
         `Page ${slug} in source ${cursor.sourceId} was edited, deleted or re-bound after this sync enumerated ${entry.path}, so the run stopped before admitting it.`);
@@ -396,6 +400,33 @@ async function convertBlockedCursor(engine: BrainEngine, blocked: Cursor, key: s
 }
 
 /**
+ * #6194: an import refused with `revision_conflict` because its page moved past the frozen revision can never
+ * publish. When the freeze proves the newer page superseded it (the working tree holds that page), the entry is
+ * re-frozen in place under a new request and the refused one stops blocking the checkpoint. Returns null to
+ * report the refusal as before: the page did not move, or the newer page and the file disagree.
+ */
+async function refreezeSuperseded(engine: BrainEngine, blocked: Cursor, refused: WriteRequest, key: string, assertActive: () => void,
+  run: Parameters<typeof freezeEntry>[4]): Promise<Cursor | null> {
+  const previous = blocked.pending!;
+  if (refused.state !== 'conflict' || refused.error_code !== 'revision_conflict' || previous.intent.kind !== 'managed_sync_import' || previous.pageId === null) return null;
+  const current = await engine.readPageSnapshot(previous.slug, { sourceId: blocked.sourceId, includeDeleted: true });
+  assertActive();
+  // Each re-freeze answers a page that moved since the refused freeze, so a refusal that repeats at one revision stays blocked.
+  if (!current || current.revision === previous.intent.expected_revision) return null;
+  const base: Cursor = { ...blocked }; delete base.pending;
+  let again: Pending | Held;
+  try { again = await freezeEntry(engine, base, key, assertActive, run); }
+  catch (error) {
+    if (error instanceof OperationError && (error.code === 'revision_conflict' || error.code === 'page_identity_changed')) return null;
+    throw error;
+  }
+  if ('hold' in again) return null;
+  return saveCursor(engine, key, blocked, { ...blocked, convertedFromFailed: [...(blocked.convertedFromFailed ?? []), previous.requestId], pending: again }, false, assertActive,
+    tx => recordSyncConversion(tx, blocked.sourceId, blocked.incarnation,
+      { request_id: previous.requestId, path: previous.intent.path ?? null, slug: previous.slug, run_id: blocked.runId, outcome: 'refrozen' }));
+}
+
+/**
  * #5522: an import entry enumerated before its page existed (`pageId: null`)
  * whose origin now names exactly one live page at the entry's slug, in the
  * cursor's source incarnation, was imported meanwhile by another cursor of the
@@ -432,6 +463,22 @@ async function sameContentAtOrigin(engine: BrainEngine, cursor: Cursor, entry: C
   } catch {
     return false;
   }
+}
+
+/**
+ * #6194: an import enumerated against a page that has since moved is superseded when the page's live revision
+ * was written by a committed coordinated write that is not another sync import (read from the revision's stamped
+ * request; this run's own request for the entry counts too) and the working tree holds that page, so the import
+ * would change nothing. A revision nothing stamped, or one another cursor imported, proves nothing.
+ */
+async function supersededImport(engine: BrainEngine, cursor: Cursor, entry: Cursor['entries'][number], key: string,
+  snapshot: NonNullable<Awaited<ReturnType<BrainEngine['readPageSnapshot']>>>, content: string, rawHash: string | null, lineEndingOnly: boolean): Promise<boolean> {
+  if (entry.renameFrom || cursor.companyPlan || !cursor.processingOptions) return false;
+  const writer = await engine.executeRaw(`SELECT 1 FROM pages p JOIN persistence_requests r ON r.id=p.revision_write_request_id
+    WHERE p.id=$1 AND p.knowledge_revision::text=$2 AND r.state='committed' AND NOT r.compacted
+      AND (COALESCE(r.intent->>'kind','') NOT LIKE 'managed_sync_%' OR (r.intent->>'runId'=$3 AND r.intent->>'index'=$4)) LIMIT 1`,
+  [snapshot.page.id, snapshot.revision, cursor.runId, String(cursor.index)]);
+  return writer.length > 0 && sameContentAtOrigin(engine, cursor, entry, key, snapshot, content, rawHash, lineEndingOnly);
 }
 
 /** Counts a committed page into the cursor, as the single path does. */
@@ -859,6 +906,9 @@ async function runManagedSync(engine: BrainEngine, opts: SyncOpts, slice: { maxP
           ...(authority.writer.remote ? {} : { managedWrite: writeDiagnostic(cursor, pending, done), writeWait: writeWaitOf(waited) }) };
       }
       if (done.state !== 'committed') {
+        // #6194: a refused import the newer page superseded is re-frozen instead of blocking the run.
+        const refrozen = await refreezeSuperseded(engine, cursor, done, key, assertActive, frozenRun);
+        if (refrozen) { cursor = refrozen; continue; }
         const { failure, ledgerRecorded } = await recordManagedSyncFailure(engine, { source_id: cursor.sourceId, source_incarnation: cursor.incarnation, path: pending.intent.path ?? '<checkpoint>',
           code: done.error_code ?? (done.state === 'cancelled' ? 'cancelled' : 'storage_error'), message: done.error_message ?? 'The accepted sync request did not commit.',
         request_id: pending.requestId, run_id: cursor.runId, target: cursor.target, cursor_key: key,

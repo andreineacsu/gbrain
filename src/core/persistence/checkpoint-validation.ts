@@ -44,8 +44,9 @@ export const INCOMPLETE_SYNC_RECEIPT_SQL = incompleteSyncReceiptSql(false);
 
 /**
  * The request id of a receipt that blocks the run's checkpoint, or null.
- * `superseded` names failed content-refusal requests the run converted in
- * place (#5988): their entry was held, so they no longer block the checkpoint.
+ * `superseded` names failed requests the run converted in place: content
+ * refusals whose entry was held (#5988) and imports a newer page superseded
+ * (#6194). They no longer block the checkpoint.
  */
 export async function findIncompleteSyncReceipt(tx: Pick<BrainEngine, 'executeRaw'>, worktreeId: string, runId: string, superseded: string[] = []): Promise<string | null> {
   try {

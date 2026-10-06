@@ -114,7 +114,7 @@ export interface SyncResult {
   /** A sliced run (`writer_yield`) has not screened every entry yet. */
   holds_pending_screen?: boolean;
   holds_fix?: import('../core/agent-output.ts').Action;
-  /** Requests of a blocked cursor this run converted in place (held, or re-frozen after the file was fixed). */
+  /** Requests of a blocked cursor this run converted in place (held, re-frozen after the file was fixed, or re-frozen at the newer page revision that superseded the import). */
   converted_from_failed?: string[];
   /** Files imported by quoting unquoted frontmatter values, cumulative for the run. */
   recovered_frontmatter?: import('../core/persistence/sync-holds.ts').RecoveredFrontmatter;

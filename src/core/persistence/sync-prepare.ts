@@ -64,7 +64,7 @@ export interface SyncIntent extends Record<string, unknown> {
   releasedHolds?: string[];
   /** #5988: the pinned Git blob of the imported content, recorded as import provenance. */
   blobOid?: string;
-  /** #5988 checkpoint only: failed content-refusal requests of this run converted in place; they no longer block the checkpoint. */
+  /** #5988, #6194 checkpoint only: failed requests of this run converted in place (content refusals, superseded imports); they no longer block the checkpoint. */
   supersededRequests?: string[];
   syncAuthority: SyncAuthority; cursorKey: string; runId: string; index: number;
   from: string | null; target: string; total: number; slugMode: 'git-root' | 'source-root';

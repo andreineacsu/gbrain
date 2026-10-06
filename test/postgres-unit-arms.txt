@@ -49,6 +49,7 @@ test/managed-sync-drain.test.ts
 test/managed-sync-group-completion.test.ts
 test/managed-sync-images-5493.test.ts
 test/managed-sync-lanes.test.ts
+test/managed-sync-superseded-import-6194.test.ts
 test/pack-relation-direction-engine.test.ts
 test/page-embedding-install-batch.test.ts
 test/page-state-engine.test.ts
