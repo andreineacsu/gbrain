@@ -297,7 +297,11 @@ vars — incident-time escape hatches, not everyday knobs.
    history rewrite still hard-blocks even with `--skip-failed`. For legacy
    sync only, `gbrain sync --skip-failed` acknowledges a known-bad set.
    **Managed sync never acknowledges or auto-skips failed cursors.** Its
-   durable failed receipt remains immutable on ordinary replay. Correct the
+   durable failed receipt remains immutable on ordinary replay. One refusal
+   clears by itself: an import overtaken by an ordinary page write of the
+   same page is re-frozen on the next sync when the file already is that
+   newer page ([details](write-refusals.md#drain-blocked-by-a-failed-page)).
+   For any other failure, correct the
    cause, inspect local `gbrain doctor`, then explicitly retry an idle
    ordinary-source cursor with the same full/working-tree/filter options:
 
