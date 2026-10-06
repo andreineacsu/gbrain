@@ -65,6 +65,10 @@ const STILL_NEEDS_A_BRAIN = [
 ];
 
 async function runHelp(command: string): Promise<{ code: number; out: string }> {
+  return runBrainless([command, '--help']);
+}
+
+async function runBrainless(args: string[]): Promise<{ code: number; out: string }> {
   const home = mkdtempSync(join(tmpdir(), 'gbrain-nobrain-'));
   // An empty GBRAIN_HOME is not enough: loadConfig also honours
   // GBRAIN_DATABASE_URL and DATABASE_URL (config.ts:550-551), so a developer
@@ -76,7 +80,7 @@ async function runHelp(command: string): Promise<{ code: number; out: string }> 
   // --no-env-file: bun auto-loads .env from cwd, and GBRAIN_DATABASE_URL is
   // honored unconditionally, so a developer's local .env would put back
   // exactly what the deletes above removed.
-  const proc = Bun.spawn(['bun', '--no-env-file', 'run', 'src/cli.ts', command, '--help'], {
+  const proc = Bun.spawn(['bun', '--no-env-file', 'run', 'src/cli.ts', ...args], {
     cwd: REPO,
     env,
     stdout: 'pipe',
@@ -91,25 +95,23 @@ async function runHelp(command: string): Promise<{ code: number; out: string }> 
 }
 
 describe('--help without a configured brain', () => {
-  // cathedral-6: the register SUBCOMMAND help must also answer brainless —
-  // the whole point of the SELF_HELP_WITHOUT_ENGINE entry is that a reader on
-  // a fresh machine can discover the mint flow before they have a brain.
-  test('agent register --help answers with real help', async () => {
-    const home = mkdtempSync(join(tmpdir(), 'gbrain-nobrain-'));
-    const env: Record<string, string | undefined> = { ...process.env, GBRAIN_HOME: home };
-    delete env.GBRAIN_DATABASE_URL;
-    delete env.DATABASE_URL;
-    const proc = Bun.spawn(['bun', '--no-env-file', 'run', 'src/cli.ts', 'agent', 'register', '--help'], {
-      cwd: REPO, env, stdout: 'pipe', stderr: 'pipe',
-    });
-    const [stdout, stderr] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-    ]);
-    const code = await proc.exited;
-    expect(code).toBe(0);
-    expect(stdout + stderr).toContain('--preset daily-driver|coding-agent');
-  }, 30_000);
+  // SUBCOMMAND help must also answer brainless. cathedral-6: the whole point of
+  // the SELF_HELP_WITHOUT_ENGINE entry is that a reader on a fresh machine can
+  // discover the agent mint flow before they have a brain. #6114: the purge's
+  // help reaches its handler with a null engine and must print usage, never
+  // fall through to the hard delete.
+  const SUBCOMMAND_HELP: Array<{ args: string[]; expected: string }> = [
+    { args: ['agent', 'register', '--help'], expected: '--preset daily-driver|coding-agent' },
+    { args: ['pages', 'purge-deleted', '--help'], expected: 'Usage: gbrain pages purge-deleted' },
+    { args: ['pages', 'purge-deleted', '-h'], expected: 'Usage: gbrain pages purge-deleted' },
+  ];
+  for (const { args, expected } of SUBCOMMAND_HELP) {
+    test(`${args.join(' ')} answers with real help`, async () => {
+      const { code, out } = await runBrainless(args);
+      expect(code).toBe(0);
+      expect(out).toContain(expected);
+    }, 30_000);
+  }
 
   // System One: the eval-only judge harness is discoverable (and runnable) brainless.
   test('decide judge-agreement --help answers with its usage', async () => {
