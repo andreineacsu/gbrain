@@ -275,7 +275,7 @@ Active items, pending decisions, things to track.
 - Update related project/deal pages if relevant context surfaced
 - Check index files if the brain uses them
 
-**Note (v0.10.1):** A trusted local write links brain pages inline (auto-link
+**Note:** A trusted local write links brain pages inline (auto-link
 post-hook) and its put_page response carries
 `auto_links: { created, removed, errors }`, so Step 7 focuses on content
 cross-references (updating related pages' compiled truth with new signal

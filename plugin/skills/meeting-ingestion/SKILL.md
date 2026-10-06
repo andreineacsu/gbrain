@@ -364,9 +364,9 @@ breaks a Phase 5 rule, or it names a person whose page did not exist when the
 meeting page was written; auto-link then reports an error and writes none of
 the page's links. This skill creates new people pages in Phase 7, after the
 meeting page, so once Phase 7 is done run `gbrain extract --stale` to link the
-page. An MCP-only agent cannot run that command: on a stdio server wait for the
-next maintenance sweep, and behind `gbrain serve --http` ask the user to run
-`gbrain sweep --once` on the brain host. Then read the meeting page's
+page. An MCP-only agent cannot run that command and relies on the link
+extraction described in the note above (asking the user for the host-side
+command behind `gbrain serve --http`). Then read the meeting page's
 backlinks (`get_backlinks`) to confirm the `attended` edges. You DO still need
 `gbrain timeline-add` for dated events (auto-link only handles links, not
 timeline entries).

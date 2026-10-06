@@ -375,19 +375,29 @@ the user's approval or the user preapproved runs of that size
 2. Ask the user. The consent payload's `user_message` is written for this and
    carries the cost estimate.
 3. Submit with the approval on the command itself. Embedding has its own job,
-   so it needs no shell lane:
+   so it needs no shell lane; the submit checks the approval in the foreground
+   and exits 3 there when it is missing:
 
    ```
-   gbrain jobs submit embed --params '{"stale":true}' --yes
+   gbrain jobs submit embed --params '{"stale":true}' --timeout-ms 1800000 --yes
    ```
 
-   In a shell job the flag goes inside `cmd`
+   Pass `--timeout-ms` (table below): without it the queue kills the job after
+   about 5 minutes. In a shell job the flag goes inside `cmd`
    (`"cmd":"gbrain embed --stale --yes"`). `--max-usd N` in place of `--yes`
-   holds the run to a cap the user named.
+   refuses the run up front when its estimate is above the limit the user
+   named; the run is not metered against it. When the user preapproved runs of
+   this size (`consent.preapprove.paid.max_usd_per_run`), pass no consent
+   flag: the preapproval admits the run only while its estimate fits that
+   limit, and `--yes` would bypass the limit.
+4. Check the result against the backlog. The `embed` job reports what it
+   embedded, not what is left, and one run stops at its time budget:
+   `gbrain embed --stale --dry-run` must report 0 chunks before you report the
+   backfill done. Otherwise submit another run under the same approval.
 
-A job whose error starts with `exit 3` was refused, not broken, and nothing
-ran. Ask the user and resubmit with their approval: `gbrain jobs retry <id>`
-replays the same unapproved command.
+A shell job whose error starts with `exit 3` was refused, not broken, and
+nothing ran. Ask the user and submit again with their approval:
+`gbrain jobs retry <id>` replays the same unapproved command.
 
 ### The deadman pattern
 
@@ -414,7 +424,10 @@ submission** (not after, not "if I remember").
      follow-up deadman at +50% of the original estimate. One follow-up
      max — no infinite chains.
    - **Dead/failed** → report what it produced before dying (`stderr_tail`
-     from `gbrain jobs get <id>`) and offer `gbrain jobs retry <id>`.
+     from `gbrain jobs get <id>`) and offer `gbrain jobs retry <id>`. An
+     error starting with `exit 3` is the exception: nothing ran, so relay the
+     consent `user_message` instead and submit again only with the user's
+     approval (see "Paid operations" above).
 4. **Disarm on normal completion.** When the completion arrives and you
    report it, remove the deadman. If it fires anyway, the reported-check
    makes it a silent no-op — belt and suspenders.
@@ -541,6 +554,7 @@ Follow the [agent operator protocol](../../docs/protocol/AGENT_OPERATOR_v1.md) f
 - A shell job dead-letters immediately with the flag named in `error_text` (shell jobs disabled): tell the user which env flag the host operator must set; do not retry.
 - `rate_limited` from the submission cap: back off for the stated delay before resubmitting; do not fan out more submissions meanwhile.
 - A job sits in `waiting` with no worker: confirm a worker is registered (`gbrain jobs get <id>`) before resubmitting.
+- A paid job or submit exits 3 (`confirmation_required`): nothing ran. Relay the consent `user_message`, wait for the user, and submit again with their approval; `gbrain jobs retry <id>` replays the unapproved command.
 
 ## Anti-Patterns
 

@@ -347,7 +347,7 @@ Before declaring a pipeline "done":
 □ Every "done" item verified by artifact existence, not assertion
 □ Entity propagation spot-checked (10 pages)
 □ No duplicate pages (dedup key held)
-□ gbrain sync run after bulk write; check-backlinks clean
+□ gbrain sync --no-pull run after bulk write; check-backlinks clean
 □ Failure log + monitoring cadence wired
 ```
 

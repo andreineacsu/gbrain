@@ -394,8 +394,10 @@ Chunks without embeddings, or chunks embedded with an old model.
   Without a terminal and without that agreement, `gbrain embed --stale` embeds
   nothing and exits 3 with a consent payload: relay its `user_message` (it
   carries the cost estimate) and wait.
-- Once the user agrees: `gbrain embed --stale --yes` (capped at 1.5x the
-  estimate), or `gbrain embed --stale --max-usd N` for a cap they name.
+- Once the user agrees: `gbrain embed --stale --yes`, or
+  `gbrain embed --stale --max-usd N` for a limit they name. Either flag
+  refuses the run up front when its estimate is above the limit (1.5x the
+  estimate for `--yes`); the run is not metered against it.
 - Read the exit status of every run. A backgrounded shell with redirected
   output hides the exit 3, so route a refresh that will run past ~2 minutes
   through durable execution in `skills/minion-orchestrator/SKILL.md`.
@@ -458,10 +460,12 @@ their last embedding. A scheduled run has no terminal, so on a paid embedding
 provider it runs only under approval the user already gave: a per-run
 preapproval they set on the brain host
 (`gbrain config set consent.preapprove.paid.max_usd_per_run <usd>`) or a
-`--max-usd N` cap they agreed to. Without one it exits 3 and embeds nothing:
-put the consent `user_message` in the heartbeat report and wait for the user.
-Never add `--yes` on your own. For large brains (>5000 pages), submit the run
-through durable execution in `skills/minion-orchestrator/SKILL.md`.
+`--max-usd N` limit they agreed to. Under a preapproval pass no consent flag:
+it admits the run only while the estimate fits its limit. Without either the
+run exits 3 and embeds nothing: put the consent `user_message` in the
+heartbeat report and wait for the user. Never add `--yes` on your own. A run
+past ~2 minutes goes through durable execution, as under "Embedding
+freshness" above.
 
 ### Monthly backup check
 

@@ -265,7 +265,7 @@ serves it via `--include-expired`. An expired fact is retained, not gone.
 For sanitization, sensitive fact rows must be ACTUALLY REMOVED: find them
 (`gbrain recall --grep`), then delete the row from the page's Facts fence
 (step 5), exactly like a sensitive take. On an in-place shared brain, the
-page edit must then be re-synced (`gbrain sync --no-pull` re-imports the edited page)
+page edit must then be committed and re-synced (`gbrain sync --no-pull` imports committed changes only)
 AND the facts index reconciled — sync's convergence contract covers page
 import only; downstream fact extraction is explicitly decoupled
 (`src/commands/sync.ts`, "CONVERGENCE CONTRACT"), so the DB keeps serving
@@ -278,7 +278,7 @@ can never certify a brain clean.
 After edits: on the **staging-copy** path the fact rows are removed by editing
 the copied markdown directly (there is no live DB to re-sync yet — the team DB
 is built fresh when Phase 5 Step 0 turns the export into a source). On the
-**in-place shared-brain** path, run `gbrain sync --no-pull` so the page content matches
+**in-place shared-brain** path, commit the edited pages and run `gbrain sync --no-pull` so the page content matches
 the markdown, then reconcile and verify the facts index as above. Either way,
 run `gbrain check-backlinks check` to catch pages still pointing at removed
 content.
