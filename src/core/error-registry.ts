@@ -218,7 +218,7 @@ export const CODES = {
   migration_failed: { class: 'server', summary: "A migration orchestrator failed, so the migration chain stopped; finished migrations stay recorded.",
     reasons: ['orchestrator_failed', 'orchestrator_threw', 'ledger_write_failed', 'preview_failed', 'schema_failed'] },
   migrations_pending: { class: 'caller', summary: "Schema migrations are behind and this run did not apply them.",
-    why: 'apply-migrations applies schema migrations only with --yes (or --non-interactive); without it the run reports the drift instead of claiming the brain is up to date.' },
+    why: 'apply-migrations applies schema migrations only with --yes (or --non-interactive); a run that leaves the schema behind (no --yes, a failed schema migration, or a schema version it could not read back) reports the drift instead of claiming the brain is up to date.' },
   migrations_running: { class: 'retryable', summary: "Another apply-migrations run holds the migration orchestration lock.", exit: 75 },
   missing_source_scope: { class: 'server', summary: "A remote tool call reached dispatch without a resolved source scope; the shared default source is refused." },
   missing_source_value: { class: 'caller', summary: "A source flag was given without a value." },

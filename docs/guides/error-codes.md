@@ -1491,7 +1491,7 @@ Reasons: `orchestrator_failed`, `orchestrator_threw`, `ledger_write_failed`, `pr
 
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
-| Schema migrations are behind and this run did not apply them. | apply-migrations applies schema migrations only with --yes (or --non-interactive); without it the run reports the drift instead of claiming the brain is up to date. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
+| Schema migrations are behind and this run did not apply them. | apply-migrations applies schema migrations only with --yes (or --non-interactive); a run that leaves the schema behind (no --yes, a failed schema migration, or a schema version it could not read back) reports the drift instead of claiming the brain is up to date. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
 
 ### migrations_running
 
