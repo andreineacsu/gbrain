@@ -213,13 +213,13 @@ export function parseSeatFlags(rest: string[], harness?: string): { seat?: strin
 
 /** The seat a prior install of `marker` rendered into this file's hook commands. */
 function installedSeat(hooks: Record<string, unknown>, marker: string): string | undefined {
-  for (const groups of Object.values(hooks)) {
+  for (const [event, groups] of Object.entries(hooks)) {
     if (!Array.isArray(groups)) continue;
     for (const group of groups) {
       const entries = (group as HookMatcherGroup)?.hooks;
       if (!Array.isArray(entries)) continue;
       for (const entry of entries) {
-        if (!isOurs(entry, marker) || typeof (entry as HookCommandEntry).command !== 'string') continue;
+        if (!isOurs(entry, event, marker) || typeof (entry as HookCommandEntry).command !== 'string') continue;
         const m = /(?:^| )GBRAIN_SEAT=([a-z0-9][a-z0-9._-]{0,63})(?= )/.exec((entry as HookCommandEntry).command);
         if (m) return m[1];
       }
@@ -278,7 +278,7 @@ export function committedHookEvents(workspaceDir: string): Set<ClaudeHookEvent> 
           Array.isArray((g as HookMatcherGroup).hooks) &&
           ((g as HookMatcherGroup).hooks as unknown[]).some(
             (h) =>
-              isOurs(h) &&
+              isOurs(h, event) &&
               // A committed file is repo-contributor-writable: a marker + a
               // bare `includes('gbrain hook')` substring is spoofable
               // (`evil; # gbrain hook` suppresses the real local install AND
@@ -300,29 +300,36 @@ export function committedHookEvents(workspaceDir: string): Set<ClaudeHookEvent> 
 }
 
 const HARNESS_LANE_ASSIGNMENT = /(?:^|\s)GBRAIN_HOOK_LANE=harness\s/;
-const HOOK_SUBCOMMAND_CALL = new RegExp(`\\shook\\s+(?:${Object.values(CLAUDE_HOOK_SUBCOMMAND).join('|')})(?:\\s|$)`);
+/** The `hook <subcommand>` call gbrain wires under each event, keyed by event. */
+const HOOK_CALL_BY_EVENT = new Map<string, RegExp>(
+  Object.entries(CLAUDE_HOOK_SUBCOMMAND).map(([event, sub]) => [event, new RegExp(`\\shook\\s+${sub}(?:\\s|$)`)]),
+);
 
 /**
  * Claude Code rewrites settings.json through its own schema and can drop the
  * `_gbrain` key while keeping the hook entry (#6092). A harness entry stays
- * recognizable by its command: the lane assignment plus a `hook <event>`
- * call. Only entries with NO marker key qualify: another marker value
- * belongs to another lane.
+ * recognizable by its command: the lane assignment plus the `hook <subcommand>`
+ * call gbrain wires under the event the entry sits in (#6171: the same
+ * command under another event is the user's copy). Only entries with NO
+ * marker key qualify: another marker value belongs to another lane.
  */
-function isMarkerlessHarnessEntry(entry: Record<string, unknown>): boolean {
+function isMarkerlessHarnessEntry(entry: Record<string, unknown>, event: string): boolean {
+  const hookCall = HOOK_CALL_BY_EVENT.get(event);
   return (
+    hookCall !== undefined &&
     !(GBRAIN_HOOK_MARKER_KEY in entry) &&
     typeof entry.command === 'string' &&
     HARNESS_LANE_ASSIGNMENT.test(entry.command) &&
-    HOOK_SUBCOMMAND_CALL.test(entry.command)
+    hookCall.test(entry.command)
   );
 }
 
-function isOurs(entry: unknown, marker: string = GBRAIN_HOOK_MARKER_VALUE): boolean {
+/** True when `entry`, found under hooks.<event>, belongs to `marker`'s install. */
+function isOurs(entry: unknown, event: string, marker: string = GBRAIN_HOOK_MARKER_VALUE): boolean {
   if (typeof entry !== 'object' || entry === null) return false;
   const e = entry as Record<string, unknown>;
   if (e[GBRAIN_HOOK_MARKER_KEY] === marker) return true;
-  return marker === GBRAIN_HARNESS_MARKER_VALUE && isMarkerlessHarnessEntry(e);
+  return marker === GBRAIN_HARNESS_MARKER_VALUE && isMarkerlessHarnessEntry(e, event);
 }
 
 /** True when the entry carries the gbrain marker KEY with any OTHER value. */
@@ -334,14 +341,15 @@ function isForeignGbrainMarked(entry: unknown, marker: string): boolean {
 
 /**
  * Strip our command entries (isOurs: the marker, or for the harness marker a
- * marker-less harness-lane command) from one event's matcher-group array.
+ * marker-less harness-lane command calling `event`'s own subcommand) from one
+ * event's matcher-group array.
  * Groups EMPTIED by the removal are dropped; groups that were already empty
  * (foreign) survive untouched. Returns the surviving groups + removal count.
  * The group-drop rule is marker-independent: it fires only when THIS call's
  * filter emptied a previously non-empty group, so it can never drop a group a
  * different marker still owns.
  */
-function stripOurEntries(groups: unknown[], marker: string = GBRAIN_HOOK_MARKER_VALUE): { kept: unknown[]; removed: number } {
+function stripOurEntries(groups: unknown[], event: string, marker: string = GBRAIN_HOOK_MARKER_VALUE): { kept: unknown[]; removed: number } {
   const kept: unknown[] = [];
   let removed = 0;
   for (const group of groups) {
@@ -351,7 +359,7 @@ function stripOurEntries(groups: unknown[], marker: string = GBRAIN_HOOK_MARKER_
     }
     const g = group as HookMatcherGroup;
     const before = g.hooks!.length;
-    const filtered = g.hooks!.filter((h) => !isOurs(h, marker));
+    const filtered = g.hooks!.filter((h) => !isOurs(h, event, marker));
     removed += before - filtered.length;
     if (filtered.length === 0 && before > 0 && filtered.length !== before) {
       continue; // we emptied it → drop the husk
@@ -517,7 +525,7 @@ export function writeClaudeHooksAt(
   for (const event of Object.keys(hooks)) {
     const groups = hooks[event];
     if (!Array.isArray(groups)) continue; // structurally foreign — never touch
-    const { kept, removed } = stripOurEntries(groups, marker);
+    const { kept, removed } = stripOurEntries(groups, event, marker);
     removedPrior += removed;
     if (removed === 0) continue;
     if (kept.length === 0) {
@@ -632,7 +640,7 @@ export function writeCommittedClaudeHooks(
       }
       groups = [];
     }
-    const { kept, removed } = stripOurEntries(groups as unknown[]);
+    const { kept, removed } = stripOurEntries(groups as unknown[], event);
     removedPrior += removed;
     const command = buildPortableClaudeHookCommand(event, opts.env);
     const timeout = opts.timeoutSecs?.[event] ?? CLAUDE_HOOK_DEFAULT_TIMEOUT_SECS[event];
@@ -714,7 +722,7 @@ export function removeClaudeHooksAt(
   for (const event of Object.keys(hooks)) {
     const groups = hooks[event];
     if (!Array.isArray(groups)) continue; // structurally foreign — never touch
-    const { kept, removed: n } = stripOurEntries(groups, marker);
+    const { kept, removed: n } = stripOurEntries(groups, event, marker);
     removed += n;
     if (n === 0) continue;
     if (kept.length === 0) {

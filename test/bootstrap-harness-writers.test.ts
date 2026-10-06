@@ -150,7 +150,10 @@ describe('marker-less harness entries (#6092)', () => {
       Stop: [
         { hooks: [{ type: 'command', command: `${BIN} hook stop` }] },
         { hooks: [{ type: 'command', command: 'echo GBRAIN_HOOK_LANE=harness' }] },
+        // #6171: the lane command of another event is the user's copy, not ours.
+        { hooks: [{ type: 'command', command: `env GBRAIN_HOOK_LANE=harness ${BIN} hook session-start` }] },
       ],
+      SubagentStop: [{ hooks: [{ type: 'command', command: `env GBRAIN_HOOK_LANE=harness ${BIN} hook stop` }] }],
       PreCompact: [
         {
           hooks: [
@@ -165,7 +168,7 @@ describe('marker-less harness entries (#6092)', () => {
       Notification: [{ matcher: '', hooks: [{ type: 'command', command: 'say done' }] }],
     },
   };
-  const UNRELATED_ENTRIES = 5;
+  const UNRELATED_ENTRIES = 7;
   const UNRELATED_TEXT = `${JSON.stringify(UNRELATED, null, 2)}\n`;
 
   function installThenDropMarkers(seat?: string): string {
