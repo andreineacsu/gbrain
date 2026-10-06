@@ -19,7 +19,7 @@ import type { BrainEngine } from './engine.ts';
 import type { LinkBatchInput } from './engine.ts';
 import { buildGazetteer, findMentionedEntities, type Gazetteer } from './by-mention.ts';
 import { isCrossSourceLinksEnabled } from './link-extraction.ts';
-import { inferLinkTypeFromPack } from './schema-pack/link-inference.ts';
+import { inferLinkTypeFromPack, employmentFits } from './schema-pack/link-inference.ts';
 import { loadActivePackForLocalEngine, packSupportsNerInference } from './schema-pack/best-effort.ts';
 
 export interface ExtractNerOpts {
@@ -71,18 +71,22 @@ export function getContextWindow(
 /**
  * Pure helper: derive the entity-type→link-verb pair from a single mention.
  * Returns null when (a) target type unknown, (b) pack has no inference for
- * that type, (c) no verb pattern matches the surrounding context.
+ * that type, (c) no verb pattern matches the surrounding context, (d) the
+ * verb is works_at and neither the mentioning page nor the target can be the
+ * employer (#6191, employmentFits; applies once `pageType` is known).
  *
  * Exported for unit tests; the orchestrator below uses it directly.
  */
 export function inferNerLinkType(
-  pack: Parameters<typeof inferLinkTypeFromPack>[0],
+  pack: Parameters<typeof inferLinkTypeFromPack>[0] & Parameters<typeof employmentFits>[2],
   targetType: string | undefined,
   context: string,
+  pageType?: string,
 ): string | null {
   if (!targetType) return null;
   try {
-    return inferLinkTypeFromPack(pack, targetType, context, undefined, undefined, { ner: true });
+    const verb = inferLinkTypeFromPack(pack, targetType, context, undefined, undefined, { ner: true });
+    return verb === 'works_at' && pageType && !employmentFits(pageType, targetType, pack) ? null : verb;
   } catch {
     return null;
   }
@@ -179,7 +183,7 @@ export async function extractNerLinks(
     for (const m of mentions) {
       const targetType = targetTypeMap.get(`${m.source_id}::${m.slug}`);
       const context = getContextWindow(body, m.offset, m.name.length);
-      const verb = inferNerLinkType(pack.manifest, targetType, context);
+      const verb = inferNerLinkType(pack.manifest, targetType, context, page.type);
       if (!verb) continue;
 
       batch.push({

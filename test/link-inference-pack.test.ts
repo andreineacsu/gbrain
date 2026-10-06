@@ -163,6 +163,18 @@ describe('#2117: gbrain-base-v2 NER verb routes', () => {
     expect(inferNerLinkType(v2, 'person', 'a sentence with no verb signal')).toBeNull();
   });
 
+  // #6191: employment wording near a mentioned person is works_at only when the mentioning page can employ.
+  test.each([
+    ['a person on a person page', [v1, v2], 'person', 'person', 'Alice joined Bob Example for lunch on Friday', null],
+    ['a person on a meeting page', [v1, v2], 'meeting', 'person', 'Bob Example joined late and works at a bank', null],
+    ['a person on an alias-of-person page', [v2], 'founder', 'person', 'Alice works at a bank with Bob Example', null],
+    ['a person on a company page', [v1, v2], 'company', 'person', 'Bob Example works at the Berlin office', 'works_at'],
+    ['a company on a person page', [v1, v2], 'person', 'company', 'Alice works at Acme Example', 'works_at'],
+    ['a person, mentioning page type not given', [v1, v2], undefined, 'person', 'works at widget-co', 'works_at'],
+  ] as const)('NER works_at for %s', (_label, packs, pageType, targetType, context, expected) => {
+    for (const pack of packs) expect(inferNerLinkType(pack, targetType, context, pageType)).toBe(expected);
+  });
+
   // #5882: the sketch regexes are NER-only, so markdown link typing falls
   // through to the tuned in-code matchers instead of labelling a bare
   // "started" founded or a bare "joined" works_at.

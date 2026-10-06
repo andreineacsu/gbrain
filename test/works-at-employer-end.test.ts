@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { LINK_EXTRACTOR_VERSION_TS } from '../src/core/link-extraction.ts';
 import { extractStaleFromDB } from '../src/commands/extract.ts';
+import { extractNerLinks } from '../src/core/extract-ner.ts';
 import { importFromContent } from '../src/core/import-file.ts';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 
@@ -70,4 +71,21 @@ test('pages extracted before the rule re-extract: works_at survives only where o
   expect(await linkTypes(alice, deal)).toEqual(['mentions']);
   // An employer's page naming one of its people keeps the row graph reads flip.
   expect(await worksAtTargets(widget)).toEqual([bob]);
+});
+
+test('NER body mentions: a person named on a person page is not typed works_at, a person named on a company page is', async () => {
+  const page = (type: string, title: string, body: string) => `---\ntype: ${type}\ntitle: ${title}\n---\n\n${body}\n`;
+  await importFromContent(engine, 'people/dana-example', page('person', 'Dana Example', 'Dana Example.'), { noEmbed: true });
+  await importFromContent(engine, 'people/carol-example', page('person', 'Carol Example',
+    'Carol joined Dana Example for lunch on Friday.'), { noEmbed: true });
+  await importFromContent(engine, 'companies/delta-example', page('company', 'Delta Example',
+    'Dana Example works at the Berlin office.'), { noEmbed: true });
+
+  await extractNerLinks(engine, {});
+
+  const rows = await engine.executeRaw<{ from_slug: string; to_slug: string; link_type: string }>(
+    `SELECT f.slug AS from_slug, t.slug AS to_slug, l.link_type FROM links l
+       JOIN pages f ON f.id = l.from_page_id JOIN pages t ON t.id = l.to_page_id
+      WHERE l.link_kind = 'typed_ner' AND t.slug = 'people/dana-example' ORDER BY 1`);
+  expect(rows).toEqual([{ from_slug: 'companies/delta-example', to_slug: 'people/dana-example', link_type: 'works_at' }]);
 });
