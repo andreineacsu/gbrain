@@ -1117,13 +1117,19 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
   const targets: HarnessTarget[] = [];
   if (wireClaude) {
     targets.push({ host: 'claude-code', kind: 'mcp', state: 'pending', scope: 'user', name: flags.name, mechanism: 'claude-cli' });
+    // #6092: a pre-approval an earlier run added stays ours whatever that run's
+    // state (a legacy confirmed target without a mechanism was ours too).
+    const entry = mcpPermissionEntry(flags.name);
+    const owned = prior?.targets.some((pt) => pt.kind === 'permission' && pt.path === d.userSettingsPath && pt.entry === entry &&
+      (pt.mechanism === 'added' || (pt.mechanism === undefined && pt.state === 'confirmed')));
     targets.push({
       host: 'claude-code',
       kind: 'permission',
       state: 'pending',
       scope: 'user',
       path: d.userSettingsPath,
-      entry: mcpPermissionEntry(flags.name),
+      entry,
+      ...(owned ? { mechanism: 'added' } : {}),
     });
     if (wireHooks) {
       if (flags.projects.length > 0) {
@@ -1274,6 +1280,8 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
     t.state = 'confirmed';
     save();
   };
+  // The smoke rollback removes only a pre-approval THIS run added (#6092).
+  let permissionAddedThisRun = false;
   const failTarget = (t: HarnessTarget, err: string) => {
     t.state = 'failed';
     t.error = err;
@@ -1377,13 +1385,15 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
         }
         const r = addPermissionsAllowEntry(t.path!, t.entry!);
         for (const note of r.notes) d.logError(note);
-        if (r.added === false) {
+        if (r.added === false && t.mechanism !== 'added') {
           // [X8] Already allowed before us — record it as pre-existing so
           // removal never deletes what we didn't add.
           t.mechanism = 'pre-existing';
           confirm(t);
           d.log(`headless pre-approval: '${t.entry}' was already allowed (pre-existing — remove will leave it).`);
         } else {
+          permissionAddedThisRun = r.added !== false;
+          t.mechanism = 'added';
           confirm(t);
           d.log(`headless pre-approval: '${t.entry}' in permissions.allow (${t.path})`);
         }
@@ -1760,7 +1770,7 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
     // registration (red-team CRITICAL): remove the entry we added this run.
     // Pre-existing entries [X8] are never touched.
     const pt = targets.find((t) => t.host === 'claude-code' && t.kind === 'permission');
-    if (pt?.state === 'confirmed' && pt.mechanism !== 'pre-existing') {
+    if (pt?.state === 'confirmed' && permissionAddedThisRun) {
       try {
         removePermissionsAllowEntry(pt.path!, pt.entry!);
         failTarget(pt, 'pre-approval removed after the failed smoke (its registration was rolled back)');

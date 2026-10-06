@@ -604,6 +604,48 @@ describe('--remove', () => {
     expect(f.out.join('\n')).not.toMatch(/no harness hook entries/);
     expect(readHarnessReceiptState(f.home)).toEqual({ state: 'absent' });
   });
+
+  // #6092: a re-run finds the entry its own first run added. The receipt must
+  // keep calling it ours, or --remove leaves it behind as "pre-existing".
+  for (const c of [
+    { name: 'added by the first run is removed', before: [] as string[], after: [] as string[], log: /'mcp__gbrain' removed/ },
+    { name: 'allowed before the first run survives [X8]', before: ['mcp__gbrain'], after: ['mcp__gbrain'], log: /predates the harness install/ },
+  ]) {
+    test(`#6092 after a re-run, a pre-approval ${c.name}`, async () => {
+      const f = makeFake();
+      writeFileSync(f.userSettings, JSON.stringify({ permissions: { allow: c.before } }));
+      expect(await applyHarness(flags(['--harness', 'claude-code', '--no-hooks']), f.deps)).toBe(0);
+      expect(await applyHarness(flags(['--harness', 'claude-code', '--no-hooks']), f.deps)).toBe(0);
+      expect(await removeHarness(parseHarnessArgs(['--remove', '--yes']), f.deps)).toBe(0);
+      expect(((readJson(f.userSettings).permissions as { allow?: string[] } | undefined)?.allow) ?? []).toEqual(c.after);
+      expect(f.out.join('\n')).toMatch(c.log);
+    });
+  }
+
+  test('#6092 ownership of the pre-approval survives a re-run that failed before reaching it', async () => {
+    const f = makeFake();
+    const noHooks = flags(['--harness', 'claude-code', '--no-hooks']);
+    expect(await applyHarness(noHooks, f.deps)).toBe(0);
+    const failing = makeFake({ mcpAddCode: 1, mintQueue: DEFAULT_MINT_QUEUE.slice(3) });
+    const failingDeps: HarnessDeps = { ...failing.deps, gbrainHome: f.home, userSettingsPath: f.userSettings, codexConfig: f.codexConfig };
+    expect(await applyHarness(noHooks, failingDeps)).toBe(1);
+    expect(await applyHarness(noHooks, f.deps)).toBe(0);
+    expect(await removeHarness(parseHarnessArgs(['--remove', '--yes']), f.deps)).toBe(0);
+    expect(((readJson(f.userSettings).permissions as { allow?: string[] } | undefined)?.allow) ?? []).toEqual([]);
+    expect(f.out.join('\n')).toMatch(/'mcp__gbrain' removed/);
+  });
+
+  test('#6092 a re-run whose smoke fails keeps the pre-approval the restored registration relies on', async () => {
+    const f = makeFake();
+    expect(await applyHarness(flags(['--harness', 'claude-code', '--no-hooks']), f.deps)).toBe(0);
+    const failingSmoke: HarnessDeps = {
+      ...f.deps,
+      probeIdentity: async () => ({ ok: false, reason: 'auth', message: 'HTTP 401' }),
+    };
+    expect(await applyHarness(flags(['--harness', 'claude-code', '--no-hooks']), failingSmoke)).toBe(1);
+    expect(f.out.join('\n')).toMatch(/previous Claude Code registration restored/);
+    expect((readJson(f.userSettings).permissions as { allow: string[] }).allow).toEqual(['mcp__gbrain']);
+  });
 });
 
 describe('--status', () => {

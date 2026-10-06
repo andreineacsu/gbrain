@@ -247,7 +247,8 @@ export interface HarnessTarget {
   entry?: string;
   /** Hook marker value (hooks targets). */
   marker?: string;
-  /** Write mechanism note, e.g. 'toml-block' vs 'claude-cli'. */
+  /** Write mechanism note, e.g. 'toml-block' vs 'claude-cli'. Permission
+   * targets: 'added' (this install added the entry) or 'pre-existing'. */
   mechanism?: string;
   /** One-line failure reason when state === 'failed'. */
   error?: string;
