@@ -181,8 +181,12 @@ export function flagRejection(inv: Invocation): string | null {
   return flag ? `unknown flag ${flag} for 'gbrain ${typed}'` : null;
 }
 
-/** Flags that select an embed run, so runEmbed never reads a positional as the page slug. */
-const EMBED_RUN_SELECTORS = ['--slugs', '--all', '--stale', '--facts', '--images', '--help', '-h'];
+/**
+ * Flags after which runEmbed never reads a positional as the page slug: the
+ * run selectors it dispatches on before the slug branch (src/commands/embed.ts),
+ * plus help, which the CLI wrapper answers before runEmbed runs.
+ */
+const EMBED_SLUG_PREEMPTORS = ['--slugs', '--all', '--stale', '--facts', '--images', '--help', '-h'];
 
 /**
  * `gbrain embed <word>`: without a run selector, runEmbed embeds the page
@@ -195,8 +199,13 @@ const EMBED_RUN_SELECTORS = ['--slugs', '--all', '--stale', '--facts', '--images
  */
 export function positionalRejection(inv: Invocation): { token: string; reason: string } | null {
   if (inv.verb !== 'embed') return null;
-  const args = inv.argv.slice(1);
-  if (EMBED_RUN_SELECTORS.some((flag) => args.includes(flag))) return null;
+  let args: string[];
+  try {
+    args = parseGlobalFlags(inv.argv).rest.slice(1); // runEmbed never sees --brain <id> and the other global flags
+  } catch {
+    return null; // flagRejection reports the unparseable global flag
+  }
+  if (EMBED_SLUG_PREEMPTORS.some((flag) => args.includes(flag))) return null;
   const slug = args.find((a) => !a.startsWith('--'));
   if (slug === undefined || !/^[a-z][a-z0-9_-]*$/.test(slug)) return null;
   return {

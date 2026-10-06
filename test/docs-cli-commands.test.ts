@@ -167,8 +167,9 @@ describe('#3502 — docs reference only real gbrain commands and flags', () => {
       'gbrain embed <slug>',
       'gbrain embed people/alice-example',
       'gbrain embed --slugs people/alice-example people/charlie-example',
-      '```',
+      'gbrain embed --brain work people/alice-example',
       'Each time gbrain embed refresh is mentioned in prose it is not a command.',
+      '```',
     ].join('\n');
     const found = scanText('skills/x/SKILL.md', doc, valid).map((v) => `${v.line}:${v.token}`);
     expect(found).toEqual(['1:refresh', '3:status', '4:--no-such-flag']);
