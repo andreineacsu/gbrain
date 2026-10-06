@@ -11783,10 +11783,22 @@ and `--source`) continues after the last committed page, and the preview says
 `resuming after item ...`. A finished run clears the saved position. `--limit`
 does not change the position key, so `--limit 500` batches continue each other.
 
+Kinds that rewrite a page as a coordinated page write (`timeline`,
+`visibility`, `connector-fences`, `take-supersession`, `failed-writes` and the
+fenced pages of `captured-facts`) wait for each publication like any other CLI
+write: 30 s by default, or the value of `--wait <seconds>`,
+`GBRAIN_WRITE_WAIT_MS` or `persistence.write_wait_ms`. `gbrain doctor
+--remediate` applies them with the same wait. `frontmatter`, `loop-facts`,
+`stale-atoms`, `extractor-facts` and the database-only rows of `captured-facts`
+keep their own wait (at most 30 s), which `--wait` does not change. A
+publication that takes longer than its wait stops the run.
+
 Request IDs are derived from the page and its revision, so rerunning after a
 crash replays the same write instead of making a second one. If the run stops
 with "still pending publication" or "the canonical writer ... is held", check
-`gbrain sources writer status <source>`, then rerun the printed apply command.
+`gbrain sources writer status <source>`, then rerun the printed apply command;
+for the coordinated page-write kinds, pass a longer `--wait` if publications on
+that source are slow.
 
 ## Capacity stop
 

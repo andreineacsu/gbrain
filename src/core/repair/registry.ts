@@ -21,6 +21,7 @@
 import type { BrainEngine } from '../engine.ts';
 import type { OperationContext } from '../ops/contract.ts';
 import { loadConfig } from '../config.ts';
+import { currentCliWriteWait } from '../persistence/write-wait.ts';
 import { REPAIR_KINDS, runRepair, type RepairHandler, type RepairKind, type RepairResult, type RepairScope } from './core.ts';
 import { timelineRepair } from './timeline.ts';
 import { visibilityRepair } from './visibility.ts';
@@ -232,11 +233,17 @@ export function repairApplyCommand(kind: RepairKind, opts: { source?: string; no
 
 /**
  * One local, trusted repair context shared by `gbrain repair` and the doctor
- * remediation run: the same config, embedding model and `--no-embed` handling,
- * so a kind previews and applies identically from either entry point.
+ * remediation run: the same config, embedding model, `--no-embed` handling and
+ * write wait, so a kind previews and applies identically from either entry point.
+ * A page or remember write a kind submits with this context waits for its
+ * publication as every CLI write does (`--wait`, GBRAIN_WRITE_WAIT_MS,
+ * persistence.write_wait_ms, else 30 s; #6185); maintenance intents and kinds
+ * that pass their own wait keep it. A preview writes nothing, so it never
+ * resolves the wait.
  */
 export async function repairRunner(engine: BrainEngine, opts: { apply: boolean; noEmbed?: boolean; logger?: OperationContext['logger'] }) {
   const config = loadConfig() ?? { engine: engine.kind };
+  const writeWaitMs = opts.apply ? currentCliWriteWait().waitMs : undefined;
   let embeddingModel: string | undefined;
   try { embeddingModel = config.embedding_disabled ? undefined : (await import('../ai/gateway.ts')).getEmbeddingModel(); } catch { embeddingModel = undefined; }
   const logger = opts.logger ?? { info: console.error, warn: console.error, error: console.error };
@@ -244,7 +251,7 @@ export async function repairRunner(engine: BrainEngine, opts: { apply: boolean; 
     embeddingModel,
     /** `explicit`: the operator named `kind`; required for explicit-only kinds. */
     async run(kind: RepairKind, scope: RepairScope, run: { limit?: number; sourceFlag?: string; explicit?: boolean; expect?: string; includeAmbiguous?: boolean; only?: string[]; skip?: string[] } = {}): Promise<RepairResult> {
-      const ctx = { engine, config, logger, dryRun: !opts.apply, remote: false, sourceId: scope.source_ids[0] } as OperationContext;
+      const ctx = { engine, config, logger, dryRun: !opts.apply, remote: false, sourceId: scope.source_ids[0], writeWaitMs } as OperationContext;
       const spec = repairSpec(kind);
       return runRepair(ctx, spec.handler, scope, { apply: opts.apply, limit: run.limit, embeddingModel, sourceFlag: run.sourceFlag,
         embed: !opts.noEmbed && embeddingModel !== undefined, applyArgs: opts.noEmbed && spec.embeds === 'inline' ? ['--no-embed'] : [],
