@@ -211,8 +211,15 @@ export function parseSeatFlags(rest: string[], harness?: string): { seat?: strin
   return { seat };
 }
 
-/** The seat a prior install of `marker` rendered into this file's hook commands. */
+/**
+ * The seat a prior install of `marker` rendered into this file's hook
+ * commands. Entries carrying the marker decide; marker-less ones (#6092) count
+ * only when none carries it, so a stale copy left beside the marked set never
+ * brings back an old or cleared seat (#6171).
+ */
 function installedSeat(hooks: Record<string, unknown>, marker: string): string | undefined {
+  const marked: string[] = [];
+  const unmarked: string[] = [];
   for (const [event, groups] of Object.entries(hooks)) {
     if (!Array.isArray(groups)) continue;
     for (const group of groups) {
@@ -220,10 +227,13 @@ function installedSeat(hooks: Record<string, unknown>, marker: string): string |
       if (!Array.isArray(entries)) continue;
       for (const entry of entries) {
         if (!isOurs(entry, event, marker) || typeof (entry as HookCommandEntry).command !== 'string') continue;
-        const m = /(?:^| )GBRAIN_SEAT=([a-z0-9][a-z0-9._-]{0,63})(?= )/.exec((entry as HookCommandEntry).command);
-        if (m) return m[1];
+        ((entry as HookCommandEntry)[GBRAIN_HOOK_MARKER_KEY] === marker ? marked : unmarked).push((entry as HookCommandEntry).command);
       }
     }
+  }
+  for (const command of marked.length > 0 ? marked : unmarked) {
+    const m = /(?:^| )GBRAIN_SEAT=([a-z0-9][a-z0-9._-]{0,63})(?= )/.exec(command);
+    if (m) return m[1];
   }
   return undefined;
 }

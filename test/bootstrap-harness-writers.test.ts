@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   addPermissionsAllowEntry,
+  buildClaudeHookCommand,
   removePermissionsAllowEntry,
   removeClaudeHooksAt,
   writeClaudeHooksAt,
@@ -216,6 +217,35 @@ describe('marker-less harness entries (#6092)', () => {
     expect(entryCount(settings)).toBe(CLAUDE_HOOK_EVENTS.length + UNRELATED_ENTRIES);
     expect(r.installed.every((i) => i.command.includes('GBRAIN_SEAT=desk-1'))).toBe(true);
   });
+
+  // #6171: a stale marker-less copy left beside the marked set never decides the seat.
+  for (const c of [
+    { name: "the marked entries' seat is kept", markedSeat: 'desk-2' as string | undefined },
+    { name: 'a seat the marked entries no longer carry stays cleared', markedSeat: undefined },
+  ]) {
+    test(`a re-install over a stale marker-less copy: ${c.name}`, () => {
+      const path = installThenDropMarkers('desk-1');
+      const settings = readJson(path);
+      const hooks = settings.hooks as Record<string, unknown[]>;
+      for (const event of CLAUDE_HOOK_EVENTS) {
+        const env = { GBRAIN_SOURCE: 'default', GBRAIN_HOOK_LANE: 'harness', GBRAIN_SEAT: c.markedSeat };
+        const command = buildClaudeHookCommand(BIN, event, env);
+        hooks[event].push({ hooks: [{ type: 'command', command, [GBRAIN_HOOK_MARKER_KEY]: GBRAIN_HARNESS_MARKER_VALUE }] });
+      }
+      writeFileSync(path, JSON.stringify(settings, null, 2));
+
+      const r = writeClaudeHooksAt(path, {
+        gbrainBin: BIN,
+        env: { GBRAIN_SOURCE: 'default', GBRAIN_HOOK_LANE: 'harness' },
+        marker: GBRAIN_HARNESS_MARKER_VALUE,
+      });
+      expect(r.removedPrior).toBe(2 * CLAUDE_HOOK_EVENTS.length);
+      for (const { command } of r.installed) {
+        if (c.markedSeat) expect(command).toContain(`GBRAIN_SEAT=${c.markedSeat}`);
+        else expect(command).not.toContain('GBRAIN_SEAT=');
+      }
+    });
+  }
 });
 
 describe('broken JSON is fail-closed', () => {
