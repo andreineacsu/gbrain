@@ -8,6 +8,7 @@ import type { BrainEngine } from '../../../core/engine.ts';
 import { resolveHoursEnv } from '../../../core/env-number.ts';
 import type { Check } from '../../doctor.ts';
 import type { Action } from '../../../core/agent-output.ts';
+import { managedPersistenceEnabled } from '../../../core/persistence/ownership.ts';
 import { agentFix, checkError, infoCheck } from '../check-fix.ts';
 
 /** Local alias; the shared warn-once memo lives in core so it can't fork per module. */
@@ -34,6 +35,11 @@ const _resolveSyncFreshnessHours = resolveHoursEnv;
  * Single-source brains get `ok` with a "not applicable" message.
  * SQL error → `warn` (own try/catch, not relying on the outer doctor
  * dispatcher — codex flagged this).
+ *
+ * A managed brain gets `gbrain sync --all --no-pull --hard-deadline 13m`
+ * instead: managed sync refuses a pulling run and --skip-failed
+ * (resolveManagedSyncContext) and takes no per-source lock, and upstream
+ * commits reach a checkout only through `gbrain sources refresh <id>`.
  */
 export async function checkSyncConsolidation(engine: BrainEngine): Promise<Check> {
   try {
@@ -48,6 +54,20 @@ export async function checkSyncConsolidation(engine: BrainEngine): Promise<Check
         name: 'sync_consolidation',
         status: 'ok',
         message: 'Single-source brain — sync --all consolidation not applicable.',
+      };
+    }
+    // A schema without persistence_brain (doctor --no-migrate on a behind brain) is not managed.
+    if (await managedPersistenceEnabled(engine).catch(() => false)) {
+      return {
+        name: 'sync_consolidation',
+        status: 'ok',
+        message:
+          `${sourceCount} active sources detected on a managed brain. Recommended cron: ` +
+          '`gbrain sync --all --no-pull --hard-deadline 13m`, every 15 minutes, on the host that owns the sources. ' +
+          'Managed sync refuses a git pull and --skip-failed and takes no per-source lock, so the deadline keeps two runs apart. ' +
+          'A checkout that tracks a remote takes upstream commits only through `gbrain sources refresh <id>`: ' +
+          'put one per such checkout in front of the sync in the same cron line, and add one when such a checkout is added. ' +
+          'Full recipe: skills/cron-scheduler/SKILL.md.',
       };
     }
     return {

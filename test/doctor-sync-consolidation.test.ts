@@ -8,6 +8,9 @@
 //   - 0 sources → ok with "not applicable" message
 //   - 1 source → ok with "not applicable" message
 //   - 2+ active sources → ok with paste-ready cron command in message
+//   - managed brain, 2+ sources → `sync --all --no-pull --hard-deadline 13m`
+//     plus `sources refresh` (managed sync refuses a pull and --skip-failed)
+//   - managed-state read throws (no persistence_brain) → classic line, ok
 //   - archived sources excluded from the count (codex edge case)
 //   - all sources archived → counts as < 2 → "not applicable"
 //   - SQL throws → status='warn' (own try/catch, not relying on outer doctor catch)
@@ -70,6 +73,32 @@ describe('checkSyncConsolidation (Issue 5)', () => {
     expect(result.status).toBe('ok');
     expect(result.message).toMatch(/3 active sources/);
     // Paste-ready command embedded in message
+    expect(result.message).toMatch(/gbrain sync --all --parallel 4 --workers 4 --skip-failed/);
+    expect(result.message).not.toMatch(/managed/i);
+  });
+
+  test('managed brain with 2 active sources → the cron line is one managed sync accepts', async () => {
+    await addSource('default', { local_path: '/tmp/default-brain' });
+    await addSource('notes-example');
+    await engine.executeRaw('UPDATE persistence_brain SET enabled = true WHERE singleton = 1');
+    const result = await checkSyncConsolidation(engine);
+    expect(result.status).toBe('ok');
+    expect(result.message).toMatch(/2 active sources detected on a managed brain/);
+    // Managed sync refuses a pulling run and --skip-failed (sync-discovery.ts)
+    // and takes no per-source lock, so the line carries a deadline.
+    expect(result.message.match(/Recommended cron: `([^`]+)`/)?.[1]).toBe('gbrain sync --all --no-pull --hard-deadline 13m');
+    expect(result.message).toContain('`gbrain sources refresh <id>`');
+  });
+
+  test('managed-state read fails (schema without persistence_brain) → classic line, still ok', async () => {
+    const preMigrationEngine = {
+      executeRaw: async (sql: string) => {
+        if (sql.includes('persistence_brain')) throw new Error('relation "persistence_brain" does not exist');
+        return [{ id: 'default' }, { id: 'notes-example' }];
+      },
+    } as unknown as PGLiteEngine;
+    const result = await checkSyncConsolidation(preMigrationEngine);
+    expect(result.status).toBe('ok');
     expect(result.message).toMatch(/gbrain sync --all --parallel 4 --workers 4 --skip-failed/);
   });
 
