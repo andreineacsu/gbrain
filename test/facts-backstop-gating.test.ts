@@ -5,7 +5,8 @@
  * the extraction job. The check is exported via test-only access through
  * the operations module — to avoid coupling tests to internals, we exercise
  * it indirectly by inspecting the `facts_backstop` field on put_page
- * responses.
+ * responses. The #6232 opt-out case also reads `persistence_effects` to show
+ * that a skipped write records no extraction effect.
  */
 
 import { describe, test, expect, beforeAll, beforeEach, afterAll } from 'bun:test';
@@ -133,22 +134,6 @@ describe('put_page facts backstop', () => {
       "SELECT data->>'slug' AS slug FROM persistence_effects WHERE kind = 'facts-backstop' AND data->>'slug' = ANY($1::text[])",
       [[transcript, 'meetings/2026-03-02-widget-sync', 'sources/reports/widget-market-notes']]);
     expect(effects.map(e => e.slug).sort()).toEqual(['meetings/2026-03-02-widget-sync', 'sources/reports/widget-market-notes']);
-  });
-
-  test('removing the opt-out queues extraction even when the body is unchanged', async () => {
-    const slug = 'sources/meetings/2026-03-03-widget-review-transcript';
-    const body = 'Speaker A: the widget review moved to Thursday. Speaker B: charlie-example presents. '.repeat(3);
-    expect(await putAndReadBackstop(slug,
-      `---\ntype: source\ntitle: Widget review transcript\nfacts_backstop: false\n---\n${body}`,
-    )).toEqual({ skipped: 'opted_out' });
-    const got = await dispatchToolCall(engine, 'get_page', { slug }, { remote: false, sourceId: 'default' });
-    const { revision } = JSON.parse(got.content[0].text);
-    const r = await dispatchToolCall(engine, 'put_page', {
-      slug, expected_revision: revision,
-      content: `---\ntype: source\ntitle: Widget review transcript\n---\n${body}`,
-    }, { remote: false, sourceId: 'default' });
-    expect(r.isError).toBeFalsy();
-    expect(JSON.parse(r.content[0].text).facts_backstop).toEqual({ queued: true });
   });
 
   test('skipped on non-eligible page kind', async () => {

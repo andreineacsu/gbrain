@@ -198,11 +198,14 @@ test('#6042: only an extraction bound to this page row blocks the skip, not one 
   expect((await rewrite(retitled('Renamed beside a foreign job'))).status).toEqual({ skipped: 'body_unchanged' });
 }));
 
-test('#6042: a page that was ineligible before the write is offered when it becomes eligible with the same body', () => fixture(async () => {
+// #6232: a `facts_backstop: false` opt-out is one of these ineligible states; removing it queues the extraction.
+test.each([
+  ['kind:concept', content.replace('type: note', 'type: concept')],
+  ['opted_out', content.replace('type: note', 'type: note\nfacts_backstop: false')],
+])('#6042: a page that was ineligible (%s) before the write is offered when it becomes eligible with the same body', (reason, ineligible) => fixture(async () => {
   await publish();
   await finishExtractions();
-  const asConcept = content.replace('type: note', 'type: concept');
-  expect((await rewrite(asConcept)).status).toEqual({ skipped: 'kind:concept' });
+  expect(await rewrite(ineligible)).toEqual({ status: { skipped: reason }, effectQueued: false });
   expect(await rewrite(content)).toEqual({ status: { queued: true }, effectQueued: true });
 }));
 
