@@ -13,6 +13,9 @@
 
 import { describe, test, expect } from 'bun:test';
 import { isFactsBackstopEligible } from '../src/core/facts/eligibility.ts';
+import { parseMarkdown } from '../src/core/markdown.ts';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { PageType } from '../src/core/types.ts';
 
 const LONG_BODY = 'x'.repeat(120); // > 80 char threshold
@@ -159,4 +162,29 @@ describe('isFactsBackstopEligible — eligible-types coverage', () => {
       if (!r.ok) expect(r.reason).toBe(`kind:${t}`);
     });
   }
+});
+
+// #6232: the meeting-ingestion skill relies on these literals to keep the raw
+// transcript and the unverified draft out of extraction; pin that they parse
+// to an opt-out, so a typo or a renamed key in the skill fails here.
+describe('meeting-ingestion skill writes opt-outs the predicate honors (#6232)', () => {
+  const skill = readFileSync(join(import.meta.dir, '..', 'skills/meeting-ingestion/SKILL.md'), 'utf8');
+
+  test('the transcript sidecar filing rule names a facts_backstop value that opts out', () => {
+    const rule = skill.split('\n\n').find(p => p.includes('sidecar') && p.includes('`type: source`'));
+    const literal = rule ? /`(facts_backstop: [^`]+)`/.exec(rule)?.[1] : undefined;
+    expect(literal).toBeDefined();
+    const slug = 'sources/meetings/2026-05-09-call-transcript';
+    const page = parseMarkdown(`---\ntype: source\n${literal}\n---\n${LONG_BODY}\n`, `${slug}.md`);
+    expect(isFactsBackstopEligible(slug, page)).toEqual({ ok: false, reason: 'opted_out' });
+  });
+
+  test('the meeting page template drafts the page opted out', () => {
+    const template = /### Phase 5: Create meeting page\s+```markdown\n([\s\S]*?)```/.exec(skill)?.[1];
+    expect(template).toBeDefined();
+    const filled = template!.replace(/\{[^}]*\}/g, 'synthetic filler for this template slot');
+    const page = parseMarkdown(filled, 'meetings/2026-05-09-call.md');
+    expect(page.type).toBe('meeting');
+    expect(isFactsBackstopEligible('meetings/2026-05-09-call', page)).toEqual({ ok: false, reason: 'opted_out' });
+  });
 });
