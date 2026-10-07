@@ -31,6 +31,9 @@
  *   session-end    transcript → secret-scanned corpus file, retention prune,
  *                  parser-drift detection, detached background workspace push
  *                  [S3#2,G3,G15]
+ *   capture-upload INTERNAL (#5577): the detached child stop, compact and
+ *                  session-end spawn on a registered machine; uploads the banked
+ *                  corpus artifacts to the serve (core/context/corpus-upload.ts)
  */
 
 import {
@@ -76,6 +79,8 @@ import {
   segmentHash,
 } from '../core/context/corpus-segments.ts';
 import { hookLaneLabel, resolveSeat, seatReasonHint, writeSeatSidecar } from '../core/context/seat.ts';
+import { openCaptureKinds } from '../core/context/capture-remote.ts';
+import { CAPTURE_UPLOAD_EVENT, CAPTURE_UPLOAD_MARKER_SUFFIX, runCaptureUpload } from '../core/context/corpus-upload.ts';
 import { gateWritebackTurn, WRITEBACK_SKIP_REASONS } from '../core/facts/writeback-gate.ts';
 import { resolveWritebackConfigFromFile } from '../core/facts/writeback-config.ts';
 import { memorableGateAllowed, recordAndRelayReceipt, redactedToolCallsJson } from '../core/context/hook-heartbeat.ts';
@@ -197,6 +202,8 @@ export interface HookIo {
   spawnPush?: (root: string) => void;
   /** TEST SEAM: detached backup-check spawner (default spawnDetachedBackupCheck). */
   spawnBackupCheck?: () => void;
+  /** TEST SEAM: detached capture-upload spawner (default spawnDetachedCaptureUpload); receives the child's gbrain args. */
+  spawnCaptureUpload?: (args: string[]) => void;
   /** TEST SEAM: user-prompt deadline override (wall-clock flake control). */
   userPromptDeadlineMs?: number;
   /** TEST SEAM: compact deadline override (drives the per-step degrade paths). */
@@ -269,13 +276,16 @@ export async function runHook(args: string[], io: HookIo = {}): Promise<number> 
     const v = args[harnessIdx + 1];
     if (v === 'claude-code' || v === 'codex' || v === 'opencode') io = { ...io, harness: v };
   }
-  if (!event || !(HOOK_EVENTS as readonly string[]).includes(event)) {
+  if (!event || !(event === CAPTURE_UPLOAD_EVENT || (HOOK_EVENTS as readonly string[]).includes(event))) {
     process.stderr.write(USAGE + '\n');
     return 1;
   }
   // Kill switch — before any file/socket touch, no heartbeat (the user asked
   // for silence, and a disabled hook writing telemetry would be a lie).
   if (process.env.GBRAIN_HOOKS === '0') return 0;
+  // Not a harness event: the capture event that spawned this child already
+  // passed the lane guard below.
+  if (event === CAPTURE_UPLOAD_EVENT) return hookCaptureUpload(io);
 
   // #4043 harness-lane defer guard: Claude Code MERGES user- and
   // project-scope hook settings, so a machine wired by `bootstrap harness`
@@ -793,14 +803,17 @@ async function repoPhaseComplete(root: string): Promise<boolean> {
  */
 function spawnDetachedPush(root: string): void {
   const exec = process.execPath ?? '';
-  const pushArgs = ['sources', 'push', '--path', root];
-  // Compiled binary: execPath IS gbrain. Dev (bun src/cli.ts): re-exec the
-  // entrypoint — the jobs.ts --detach precedent.
-  const argv = /[/\\]gbrain(\.exe)?$/.test(exec) ? pushArgs : [process.argv[1], ...pushArgs];
+  const argv = gbrainChildArgv(['sources', 'push', '--path', root]);
   // Explicit env: a child spawned without one does not see the parent's
   // cwd-.env quarantine deletions (core/env-trust.ts).
   const child = spawn(exec, argv, { detached: true, stdio: 'ignore', env: process.env });
   child.unref();
+}
+
+/** argv for a detached gbrain child. Compiled binary: execPath IS gbrain. Dev
+ * (bun src/cli.ts): re-exec the entrypoint (the jobs.ts --detach precedent). */
+function gbrainChildArgv(args: string[]): string[] {
+  return /[/\\]gbrain(\.exe)?$/.test(process.execPath ?? '') ? args : [process.argv[1], ...args];
 }
 
 /**
@@ -1067,8 +1080,7 @@ function pendingBackupBanner(): { text: string; record: () => void } | null {
  */
 function spawnDetachedBackupCheck(): void {
   const exec = process.execPath ?? '';
-  const checkArgs = ['backup', 'check', '--quiet'];
-  const argv = /[/\\]gbrain(\.exe)?$/.test(exec) ? checkArgs : [process.argv[1], ...checkArgs];
+  const argv = gbrainChildArgv(['backup', 'check', '--quiet']);
   const child = spawn(exec, argv, {
     detached: true,
     stdio: 'ignore',
@@ -1076,6 +1088,47 @@ function spawnDetachedBackupCheck(): void {
   });
   child.on('error', () => {});
   child.unref();
+}
+
+// ── capture upload (#5577 remote session capture) ───────────────────────────
+
+/**
+ * Fire-and-forget `gbrain hook capture-upload` as a DETACHED child (the
+ * spawnDetachedPush pattern). The args name the event and nothing else: the
+ * child reads the credential file itself, so the bearer is in no command line
+ * and no environment.
+ */
+function spawnDetachedCaptureUpload(args: string[]): void {
+  const child = spawn(process.execPath ?? '', gbrainChildArgv(args), { detached: true, stdio: 'ignore', env: process.env });
+  // An async spawn error (ENOENT) lands after this hook has exited; the next capture event starts another run.
+  child.on('error', () => {});
+  child.unref();
+}
+
+/**
+ * After a capture event banked: on a machine with remote capture configured,
+ * start the upload outside the event's budget. No credential file, or a lane
+ * the host stopped, is a silent no-op (no child, no heartbeat line). Never
+ * throws and never touches the event's exit code or output.
+ */
+async function startCaptureUpload(io: HookIo): Promise<void> {
+  try {
+    if (openCaptureKinds(resolveGbrainHome()).length === 0) return;
+    (io.spawnCaptureUpload ?? spawnDetachedCaptureUpload)(['hook', CAPTURE_UPLOAD_EVENT]);
+  } catch {
+    // The artifacts stay pending; the next capture event starts another run.
+    await writeHeartbeat(io, { ts: new Date().toISOString(), event: CAPTURE_UPLOAD_EVENT, outcome: 'degraded', reason: 'upload_spawn_failed', duration_ms: 0 });
+  }
+}
+
+/** The detached child: one upload run, which records its own heartbeat entry. */
+async function hookCaptureUpload(io: HookIo): Promise<number> {
+  try {
+    await runCaptureUpload({ dir: await corpusDir(loadConfig()) });
+  } catch (e) {
+    await writeHeartbeat(io, { ts: new Date().toISOString(), event: CAPTURE_UPLOAD_EVENT, outcome: 'error', reason: errorCode(e), duration_ms: 0 });
+  }
+  return 0;
 }
 
 // ── user-prompt [ENG-1, S3#8, A9] ───────────────────────────────────────────
@@ -1417,6 +1470,7 @@ async function hookCompact(io: HookIo): Promise<number> {
     reason = errorCode(e); // fail-open: exit 0
   }
   if (outcome === 'ok' && seatReasons.length) { outcome = 'degraded'; reason = seatReasons[0]; }
+  await startCaptureUpload(io);
   const hint = seatReasonHint(reason);
   await writeHeartbeat(io, {
     ts: new Date().toISOString(),
@@ -1462,7 +1516,11 @@ async function hookStop(io: HookIo): Promise<number> {
       // call) — gate, corpus dir, and IPC discovery all share it.
       const cfg = loadConfig();
       const wb = resolveWritebackConfigFromFile(cfg);
-      if (!wb.enabled) return 'wb_off';
+      // #5577: with remote capture configured the HOST's gate decides, so the
+      // turn is banked for upload whatever the local file setting says, until
+      // the host refuses one as writeback_off (capture-remote.ts stop state).
+      const uploadOnly = !wb.enabled && openCaptureKinds(resolveGbrainHome()).includes('writeback');
+      if (!wb.enabled && !uploadOnly) return 'wb_off';
       const sid = sanitizeSessionId(j?.session_id);
       if (sid === 'unknown') return 'no_session';
       const tp = j?.transcript_path;
@@ -1515,7 +1573,8 @@ async function hookStop(io: HookIo): Promise<number> {
         process.env.GBRAIN_SOURCE ?? null,
       );
       if (banked.status !== 'wb_banked' && banked.status !== 'wb_dup') return banked.status;
-      if (banked.status === 'wb_dup') return 'wb_dup';
+      // Upload-only banking asks no local serve to harvest: the local gate is off.
+      if (banked.status === 'wb_dup' || uploadOnly) return banked.status;
       // Prompt-harvest ask over the compact-bank IPC lane — sourceId rides
       // exactly like the compact call (OV2-9/OV-A6); every failure below is
       // degraded-not-blocking: the banked file is the durable artifact and
@@ -1569,6 +1628,7 @@ async function hookStop(io: HookIo): Promise<number> {
       duration_ms: Date.now() - wbT0,
     });
   }
+  await startCaptureUpload(io);
 
   // Per-turn durability push [D3/D17/D20] — its own try/deadline so the
   // buffer append above and the heartbeat below are never at risk.
@@ -1838,6 +1898,7 @@ async function hookSessionEnd(io: HookIo): Promise<number> {
           CORPUS_PROGRESS_SUFFIX,
           CORPUS_PROGRESS_LOCK_SUFFIX,
           HARVEST_RECEIPT_SUFFIX,
+          CAPTURE_UPLOAD_MARKER_SUFFIX,
         ]);
       }
     }
@@ -1845,6 +1906,7 @@ async function hookSessionEnd(io: HookIo): Promise<number> {
     outcome = 'error';
     reason = errorCode(e);
   }
+  await startCaptureUpload(io);
 
   // Best-effort workspace push (the no-daemon persistence backstop, plan D6)
   // — same initialized-manifest gate as session-start [G4]. Spawned DETACHED,

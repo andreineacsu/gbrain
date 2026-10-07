@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import type net from 'node:net';
 
 import { runHook } from '../src/commands/hook.ts';
+import { captureCredentialIdentity, recordCaptureStop, writeCaptureCredential } from '../src/core/context/capture-remote.ts';
 import { readHeartbeatTail } from '../src/core/context/hook-heartbeat.ts';
 import { CLAUDE_CLI_CWD_PREFIX } from '../src/core/ai/providers/claude-cli-scratch.ts';
 import { startResolveIpcServer, ensureIpcSecret, resolveSocketPath, type ContextPackRequest, } from '../src/core/context/resolve-ipc.ts';
@@ -356,5 +357,95 @@ describe('hook stop — gbrain claude-cli self-capture (#5820)', () => {
     expect(await runHook(['stop'], { ...io, transcriptRoot: t.root, stdin: JSON.stringify({ session_id: 's-wb', transcript_path: t.path, cwd }) })).toBe(0);
     expect(bankedTexts()).toEqual([]);
     expect((await wbHeartbeats())[0]?.reason).toBe('self_capture');
+  });
+});
+
+// #5577: on a machine registered for remote capture the HOST's writeback gate
+// decides, so the Stop event banks the gated turn for upload whatever the
+// local file setting says, until the host refuses one as writeback_off.
+// Fails when the local `memory.auto_writeback` setting still gates banking on
+// a registered machine, or when banking continues after the host's refusal.
+describe('hook stop: remote capture decides the writeback lane (#5577)', () => {
+  const TURN = 'I prefer dark mode in every editor, and I want weekly summaries.';
+  const register = () => writeCaptureCredential(home(), { mcp_url: 'https://brain.example/mcp', access_token: 'gbrain_at_synthetic-capture-bearer' });
+  const wbFiles = () => (existsSync(corpus()) ? readdirSync(corpus()).filter((f) => f.includes('.wb-')) : []);
+
+  async function stop(): Promise<void> {
+    const t = writeTranscript(TURN);
+    expect(await runHook(['stop'], {
+      ...io, transcriptRoot: t.root, spawnCaptureUpload: () => {},
+      stdin: JSON.stringify({ session_id: 's-wb', transcript_path: t.path }),
+    })).toBe(0);
+  }
+
+  /** A local serve that records every context_pack ask it receives. */
+  async function listeningServe(dataDir: string): Promise<ContextPackRequest[]> {
+    mkdirSync(dataDir, { recursive: true });
+    const seen: ContextPackRequest[] = [];
+    const server = await startResolveIpcServer(
+      resolveSocketPath(dataDir),
+      {
+        resolve: async () => null,
+        turn_context: async () => null,
+        context_pack: async (req: ContextPackRequest) => {
+          seen.push(req);
+          return { text: '', pointers: [], factsCount: 0, checkpointFlush: { status: 'scheduled' } } as unknown as TurnContextResult;
+        },
+      },
+      { secret: ensureIpcSecret(dataDir) },
+    );
+    expect(server).not.toBeNull();
+    servers.push(server!);
+    return seen;
+  }
+
+  test.each([
+    ['no config file at all, as on a registered machine', () => {}],
+    ['a config with memory.auto_writeback unset', () => { writeConfig({}); }],
+    ['a config with memory.auto_writeback off', () => { writeConfig({ writeback: 'off' }); }],
+  ])('capture configured, %s: the gated turn is banked', async (_label, arrange) => {
+    arrange();
+    register();
+    await stop();
+    expect(wbFiles()).toHaveLength(1);
+    expect(await Bun.file(join(corpus(), wbFiles()[0]!)).text()).toBe(TURN + '\n');
+    expect((await wbHeartbeats()).map((e) => [e.reason, e.outcome])).toEqual([['wb_banked', 'ok']]);
+  });
+
+  test('banking for upload asks no local serve to harvest while the local gate is off', async () => {
+    const seen = await listeningServe(writeConfig({}));
+    register();
+    await stop();
+    expect(wbFiles()).toHaveLength(1);
+    expect(seen).toEqual([]);
+  });
+
+  test('local auto_writeback on: the turn is banked and the local serve is still asked', async () => {
+    const seen = await listeningServe(writeConfig({ writeback: 'salient' }));
+    register();
+    await stop();
+    expect(wbFiles()).toHaveLength(1);
+    expect(seen.map((r) => r.trigger)).toEqual(['writeback-bank']);
+  });
+
+  test.each([
+    ['writeback turns, with its writeback_off refusal', ['writeback'] as const, 'writeback_off'],
+    ['the lane', ['lane'] as const, 'insufficient_scope'],
+  ])('after the host stopped %s the stop event banks none and writes no writeback line', async (_label, scopes, code) => {
+    register();
+    recordCaptureStop(home(), scopes, { code }, captureCredentialIdentity(home())!);
+    await stop();
+    expect(wbFiles()).toEqual([]);
+    expect(await wbHeartbeats()).toEqual([]);
+  });
+
+  test('registering again after the refusal resumes banking', async () => {
+    register();
+    recordCaptureStop(home(), ['writeback'], { code: 'writeback_off' }, captureCredentialIdentity(home())!);
+    await stop();
+    expect(wbFiles()).toEqual([]);
+    register();
+    await stop();
+    expect(wbFiles()).toHaveLength(1);
   });
 });

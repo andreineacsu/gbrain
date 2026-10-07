@@ -70,6 +70,14 @@ export interface HookHeartbeatEntry {
   fingerprint?: string;
   /** Fixed recovery hint for the refusal reason (constant text, never content). */
   hint?: string;
+  /**
+   * #5577 remote session capture, one `capture-upload` run's artifact COUNTS:
+   * stored by the serve, still unsent when the run ended, and refused for
+   * good. `duplicate` (above) counts the ones the serve already held.
+   */
+  sent?: number;
+  pending?: number;
+  refused?: number;
 }
 
 /** The FULL key allowlist — CI greps the fixture against this [S3#7]. */
@@ -77,6 +85,7 @@ export const HEARTBEAT_ALLOWED_KEYS = [
   'ts', 'event', 'outcome', 'reason', 'duration_ms', 'turns', 'bytes', 'redactions',
   'segment', 'inserted', 'duplicate', 'superseded', 'near_duplicate', 'links', 'flush',
   'pattern', 'fingerprint', 'hint', 'core_chars', 'core_revision', 'pressure_pct',
+  'sent', 'pending', 'refused',
 ] as const;
 
 /**
@@ -171,6 +180,9 @@ export async function writeHeartbeat(
       ...(entry.flush !== undefined ? { flush: entry.flush } : {}),
       ...(entry.pattern !== undefined ? { pattern: entry.pattern } : {}),
       ...(entry.fingerprint !== undefined ? { fingerprint: entry.fingerprint } : {}),
+      ...(entry.sent !== undefined ? { sent: entry.sent } : {}),
+      ...(entry.pending !== undefined ? { pending: entry.pending } : {}),
+      ...(entry.refused !== undefined ? { refused: entry.refused } : {}),
       // A seat reason carries its fixed recovery hint even when the writer did not attach one.
       ...((entry.hint ?? seatReasonHint(entry.reason)) !== undefined ? { hint: entry.hint ?? seatReasonHint(entry.reason) } : {}),
     });

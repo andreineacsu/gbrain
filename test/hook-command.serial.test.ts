@@ -7,7 +7,7 @@
  */
 import { describe, test, expect, beforeEach, afterEach } from 'bun:test';
 import {
-  copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync,
+  chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync,
   rmSync, statSync, utimesSync, writeFileSync,
 } from 'node:fs';
 import net from 'node:net';
@@ -26,7 +26,9 @@ import {
   PUSH_ANNOUNCE_REFIRE_MS,
   HOOK_EVENTS,
   type HookHeartbeatEntry,
+  type HookIo,
 } from '../src/commands/hook.ts';
+import { captureCredentialIdentity, captureCredentialPath, recordCaptureStop, writeCaptureCredential } from '../src/core/context/capture-remote.ts';
 import { pushStatusPathForRoot } from '../src/core/workspace-push.ts';
 import {
   ensureIpcSecret,
@@ -1677,5 +1679,150 @@ describe('session-end remainder (cathedral 5 dedup contract)', () => {
     expect(names).not.toContain('gone.txt.progress.lock');
     expect(names).toContain('sess-prog.txt');
     expect(readFileSync(join(corpus(), 'sess-prog.txt.progress'), 'utf8')).toBe('{"generation":1}');
+  });
+});
+
+// ── remote session capture: the upload child (#5577) ────────────────────────
+//
+// Protects: on a machine with a capture credential, stop, compact and
+// session-end each start ONE detached upload child whose arguments name the
+// event and nothing else; without a credential (or with the kill switch, or a
+// lane the host stopped) the events add no child, no file and no heartbeat
+// line. Fails when an event stops spawning, spawns on an unregistered
+// machine, or puts anything but the event name in the child's arguments.
+// The upload run itself is owned by test/corpus-upload.test.ts.
+
+describe('remote capture upload (#5577)', () => {
+  const corpus = () => join(home(), 'transcripts', 'corpus');
+  const BEARER = 'gbrain_at_synthetic-capture-bearer';
+  const register = (url = 'https://brain.example/mcp') => writeCaptureCredential(home(), { mcp_url: url, access_token: BEARER });
+  const CAPTURE_EVENTS = ['stop', 'compact', 'session-end'] as const;
+
+  /** Run the three capture events once each over one small session; returns the upload spawner's calls per event. */
+  async function runCaptureEvents(io: Partial<HookIo> = {}): Promise<Record<string, string[][]>> {
+    const projRoot = join(tmp, 'projects');
+    const transcript = seedTranscript(join(projRoot, 'p1'), 'cap.jsonl', [userLine('a session to capture'), assistantLine('noted')]);
+    const ws = join(tmp, 'ws');
+    mkdirSync(ws, { recursive: true });
+    const spawned: Record<string, string[][]> = {};
+    for (const event of CAPTURE_EVENTS) {
+      spawned[event] = [];
+      const out = collectStdout();
+      const code = await runHook([event], {
+        ...out.io,
+        stdin: JSON.stringify({ session_id: 'sess-cap', transcript_path: transcript, cwd: ws }),
+        transcriptRoot: projRoot, cwd: ws, spawnPush: () => {}, spawnBackupCheck: () => {},
+        spawnCaptureUpload: (args) => { spawned[event]!.push(args); },
+        ...io,
+      });
+      expect(code).toBe(0);
+      expect(out.get()).toBe('');
+    }
+    return spawned;
+  }
+
+  const uploadLines = async () => (await readHeartbeatTail(50)).filter((e) => e.event === 'capture-upload');
+
+  test('configured: stop, compact and session-end each start one upload child, named by the event alone, and finish inside their deadline', async () => {
+    register();
+    const spawned = await runCaptureEvents();
+    for (const event of CAPTURE_EVENTS) expect(spawned[event]).toEqual([['hook', 'capture-upload']]);
+    expect(JSON.stringify(spawned)).not.toContain(BEARER);
+    const tail = await readHeartbeatTail(50);
+    // The events ran to their own end (no deadline code), and the child, not the event, writes the upload line.
+    expect(tail.map((e) => e.reason).filter((r) => r === 'deadline' || r === 'wb_deadline')).toEqual([]);
+    expect(tail.filter((e) => e.event === 'capture-upload')).toEqual([]);
+    expect(readFileSync(await heartbeatPath(), 'utf8')).not.toContain(BEARER);
+  });
+
+  test('not configured: no upload child, no new file, and only the lines the events write today', async () => {
+    const spawned = await runCaptureEvents();
+    for (const event of CAPTURE_EVENTS) expect(spawned[event]).toEqual([]);
+    expect(existsSync(join(home(), 'capture-remote'))).toBe(false);
+    expect(existsSync(join(home(), 'locks'))).toBe(false);
+    const lines = readFileSync(await heartbeatPath(), 'utf8').split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(lines.map((l) => l.event)).toEqual(['stop', 'compact', 'session-end']);
+    for (const line of lines) for (const key of ['sent', 'pending', 'refused']) expect(key in line).toBe(false);
+    expect(readdirSync(corpus()).filter((n) => n.endsWith('.uploaded'))).toEqual([]);
+  });
+
+  test('GBRAIN_HOOKS=0: no upload child, and the internal event itself is silent', async () => {
+    register();
+    process.env.GBRAIN_HOOKS = '0';
+    const spawned = await runCaptureEvents();
+    for (const event of CAPTURE_EVENTS) expect(spawned[event]).toEqual([]);
+    expect(await runHook(['capture-upload'], {})).toBe(0);
+    expect(existsSync(join(home(), 'integrations', 'hooks', 'heartbeat.jsonl'))).toBe(false);
+  });
+
+  test('a lane the host stopped: no upload child and no upload line', async () => {
+    register();
+    recordCaptureStop(home(), ['lane'], { code: 'insufficient_scope' }, captureCredentialIdentity(home())!);
+    const spawned = await runCaptureEvents();
+    for (const event of CAPTURE_EVENTS) expect(spawned[event]).toEqual([]);
+    expect(await uploadLines()).toEqual([]);
+  });
+
+  test('a child that cannot be spawned: the event still exits 0 and one degraded line says so', async () => {
+    register();
+    await runCaptureEvents({ spawnCaptureUpload: () => { throw new Error('synthetic spawn failure'); } });
+    expect((await uploadLines()).map((e) => [e.outcome, e.reason])).toEqual(Array(3).fill(['degraded', 'upload_spawn_failed']));
+  });
+
+  test('the child finds what the events banked and leaves it pending when the serve is unreachable', async () => {
+    // Loopback port 1 has no listener: the default transport is refused at once.
+    register('http://127.0.0.1:1/mcp');
+    await runCaptureEvents();
+    const banked = readdirSync(corpus()).filter((n) => n.endsWith('.txt')).length;
+    expect(banked).toBeGreaterThan(0);
+    expect(await runHook(['capture-upload'], {})).toBe(0);
+    const lines = await uploadLines();
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ outcome: 'degraded', reason: 'upload_unreachable', sent: 0, pending: banked });
+    expect(readFileSync(await heartbeatPath(), 'utf8')).not.toContain(BEARER);
+  });
+
+  test('the child with a credential file readable by others sends nothing and records one code, never the bearer', async () => {
+    register();
+    chmodSync(captureCredentialPath(home()), 0o644);
+    await runCaptureEvents();
+    expect(await runHook(['capture-upload'], {})).toBe(0);
+    expect((await uploadLines()).map((e) => [e.outcome, e.reason])).toEqual([['degraded', 'upload_no_credential']]);
+    expect(readFileSync(await heartbeatPath(), 'utf8')).not.toContain(BEARER);
+  });
+
+  test('the child whose corpus directory cannot be resolved still exits 0 and records one error line', async () => {
+    register();
+    // The configured corpus directory sits under a regular file, so it can be neither created nor read.
+    const blocker = join(tmp, 'not-a-directory');
+    writeFileSync(blocker, 'a regular file');
+    writeFileSync(join(home(), 'config.json'), JSON.stringify({ engine: 'pglite', dream: { synthesize: { session_corpus_dir: join(blocker, 'corpus') } } }));
+    expect(await runHook(['capture-upload'], {})).toBe(0);
+    expect((await uploadLines()).map((e) => [e.outcome, e.reason])).toEqual([['error', 'exception:Error']]);
+    expect(readFileSync(await heartbeatPath(), 'utf8')).not.toContain(BEARER);
+  });
+
+  test('retention: the marker goes with its artifact, and a never-ingested file on a client goes at the existing un-ingested ceiling', async () => {
+    register();
+    mkdirSync(corpus(), { recursive: true });
+    const aged = (name: string, days: number) => {
+      const p = join(corpus(), name);
+      writeFileSync(p, 'banked on a registered machine\n');
+      writeFileSync(`${p}.uploaded`, '{}\n');
+      const at = (Date.now() - days * 24 * 3600 * 1000) / 1000;
+      utimesSync(p, at, at);
+    };
+    // Nothing on a client is ever marked ingested: retention is the un-ingested ceiling, 3x the 30-day default.
+    aged('past-ceiling.txt', 100);
+    aged('inside-ceiling.txt', 40);
+    writeFileSync(join(corpus(), 'reaped-earlier.txt.uploaded'), '{}\n');
+
+    await runCaptureEvents();
+    const names = readdirSync(corpus());
+    expect(names).not.toContain('past-ceiling.txt');
+    expect(names).not.toContain('past-ceiling.txt.uploaded');
+    expect(names).not.toContain('reaped-earlier.txt.uploaded');
+    expect(names).toContain('inside-ceiling.txt');
+    expect(names).toContain('inside-ceiling.txt.uploaded');
   });
 });

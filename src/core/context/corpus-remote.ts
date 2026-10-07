@@ -97,6 +97,13 @@ export function remoteSessionNamespace(principal: CorpusPrincipal): string {
   return `${NAMESPACE_PREFIX}${principalHash(principal).slice(0, NAMESPACE_HASH_LEN)}-`;
 }
 
+const NAMESPACE_RE = new RegExp(`^${NAMESPACE_PREFIX}[0-9a-f]{${NAMESPACE_HASH_LEN}}-`);
+
+/** True for a corpus file name (or stored session id) under some principal's `rc-<16 hex>-` prefix: one this writer stored for a remote grant. */
+export function isRemoteNamespaced(name: string): boolean {
+  return NAMESPACE_RE.test(name);
+}
+
 /**
  * The seat label for a grant: its display name made into a seat label
  * (lowercase, runs of other characters to `-`, at most 64 characters), or
