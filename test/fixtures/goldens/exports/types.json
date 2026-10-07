@@ -4950,6 +4950,13 @@
         ]
       },
       {
+        "kind": "variable",
+        "name": "isTimelineBulletLine",
+        "signature": [
+          "(line: string) => boolean"
+        ]
+      },
+      {
         "kind": "function",
         "name": "makeResolver",
         "signature": [

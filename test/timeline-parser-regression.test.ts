@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { extractLinksFromFile, extractTimelineFromContent } from '../src/commands/extract.ts';
 import { extractEntityRefs, extractPageLinks, parseTimelineEntries } from '../src/core/link-extraction.ts';
 import { stripCodeBlocks } from '../src/core/markdown-code.ts';
-import { parseInlineCitationTimelineEntries } from '../src/core/timeline-citations.ts';
+import { parseInlineCitationTimelineEntries, supersededInlineCitationEntries } from '../src/core/timeline-citations.ts';
 import { emailCitation, timelineLine } from '../src/core/output/scaffold.ts';
 
 describe('timeline prefix compatibility', () => {
@@ -263,6 +263,24 @@ describe('inline citation comments, sources and emphasis (#6184, #6226)', () => 
       expect(extractTimelineFromContent(content, 'people/alice-example')).toEqual(expected.map(entry => ({ ...entry, slug: 'people/alice-example' })));
     });
   }
+
+  // Reconciliation retires stored rows equal to these, so they must be what the
+  // parser filed before the fix, byte for byte, and only rows a current entry
+  // of the same citation replaces (or whose summary was only a comment).
+  test('superseded entries are the replaced rows the parser filed before the fix', () => {
+    const content = (prefix: string) => cases.find(c => c.name.startsWith(prefix))!.content;
+    expect(supersededInlineCitationEntries(content('a citation in its own paragraph'))).toEqual([
+      { date: '2026-01-02', source: 'Slack import', summary: '<!-- AUTO:slack END -->' },
+    ]);
+    expect(supersededInlineCitationEntries(content('a citation ending a bullet'))).toEqual([
+      { date: '2026-01-02', source: 'Slack import', summary: 'Talked with alice-example about the launch. <!-- AUTO:slack END -->' },
+    ]);
+    expect(supersededInlineCitationEntries(content('a multi-source'))).toEqual([
+      { date: '2026-09-28', source: 'meeting transcript, 2026-10-06; Gmail "Intro"', summary: 'Widget-co:** per Alice, builds widgets for small teams.' },
+    ]);
+    // The current reading files nothing for a commented-out citation, so its old row stays.
+    expect(supersededInlineCitationEntries('Kickoff held. <!-- [Source: memo, 2026-01-03] -->')).toEqual([]);
+  });
 });
 
 describe('inline citation link targets (#5483)', () => {

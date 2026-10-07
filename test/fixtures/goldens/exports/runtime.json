@@ -656,6 +656,7 @@
         "isAutoTimelineEnabled",
         "isCrossSourceLinksEnabled",
         "isGlobalBasenameEnabled",
+        "isTimelineBulletLine",
         "makeResolver",
         "normalizeBasename",
         "orientCanonicalAttendance",

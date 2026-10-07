@@ -11,7 +11,8 @@
  * names, so its existing importers are unaffected.
  */
 
-import { parseInlineCitationTimelineEntries, findTimelineSourceDelimiter, parseTimelineEntries } from './link-extraction.ts';
+import { parseInlineCitationTimelineEntries, findTimelineSourceDelimiter, isTimelineBulletLine, parseTimelineEntries } from './link-extraction.ts';
+import { supersededInlineCitationEntries } from './timeline-citations.ts';
 import type { BrainEngine } from './engine.ts';
 import { firstMaterializedMarkerIndex } from './timeline-marker.ts';
 
@@ -29,6 +30,9 @@ export interface ExtractedTimelineEntry {
 // rows must share one (source, summary) shape or the timeline dedup index
 // duplicates every bullet extracted through both paths.
 const findDelimiterOutsideLinks = findTimelineSourceDelimiter;
+
+// A Format 1 bullet line; the inline-citation pass skips it (Format 3 below).
+const bulletLinePattern = /^-\s+\*\*\d{4}-\d{2}-\d{2}\*\*\s*\|/;
 
 /** Extract timeline entries from markdown content */
 export function extractTimelineFromContent(content: string, slug: string): ExtractedTimelineEntry[] {
@@ -87,7 +91,6 @@ export function extractTimelineFromContent(content: string, slug: string): Extra
   // carries its own [Source: ...] citation, and re-extracting it would file
   // a duplicate entry under a different (source, summary) shape that the
   // DB-level uniqueness cannot collapse.
-  const bulletLinePattern = /^-\s+\*\*\d{4}-\d{2}-\d{2}\*\*\s*\|/;
   for (const entry of parseInlineCitationTimelineEntries(content, {
     skipLine: (line) => bulletLinePattern.test(line),
   })) {
@@ -99,6 +102,18 @@ export function extractTimelineFromContent(content: string, slug: string): Extra
 
 type TimelineTuple = Pick<ExtractedTimelineEntry, 'date' | 'source' | 'summary'>;
 const tupleKey = (e: TimelineTuple) => JSON.stringify([e.date, e.source, e.summary]);
+
+/**
+ * Every tuple the inline-citation pass of either parser filed for this text
+ * before #6184 and #6226 that the current reading replaces
+ * (supersededInlineCitationEntries). A stored row equal to one is retired.
+ */
+export function supersededCitationTimeline(content: string): TimelineTuple[] {
+  return [
+    ...supersededInlineCitationEntries(content, { skipLine: (line) => bulletLinePattern.test(line) }),
+    ...supersededInlineCitationEntries(content, { skipLine: isTimelineBulletLine }),
+  ];
+}
 
 /**
  * Every (date, source, summary) tuple a page text yields under either timeline
@@ -117,8 +132,10 @@ function markdownTimelineKeys(text: string, slug: string): Set<string> {
  * an earlier version of the page produced that the current text no longer
  * does (a corrected or deleted dated bullet, however many edits ago). Rows no
  * version of the page ever produced (enrichment, meeting fan-out, inferred
- * anchors) and event-page projections are never touched. The page_versions
- * scan only runs when the page holds a row the current text does not produce.
+ * anchors) and event-page projections are never touched. A row the older
+ * citation reading filed for the current text or any version, and that the
+ * current reading replaces, is retracted too (#6184, #6226). The page_versions scan only
+ * runs when the page holds a row the current text does not produce.
  * Returns the orphaned rows; they are deleted unless `dryRun`.
  */
 export async function retractRemovedTimelineEntries(
@@ -138,9 +155,11 @@ export async function retractRemovedTimelineEntries(
   const versions = await engine.executeRaw<{ compiled_truth: string; timeline: string | null }>(
     `SELECT DISTINCT v.compiled_truth, v.timeline FROM page_versions v JOIN pages p ON p.id = v.page_id
       WHERE p.source_id = $1 AND p.slug = $2`, [sourceId, slug]);
-  const produced = new Set<string>();
+  const produced = new Set(supersededCitationTimeline(currentText).map(tupleKey));
   for (const version of versions) {
-    for (const key of markdownTimelineKeys(`${version.compiled_truth}\n${version.timeline ?? ''}`, slug)) produced.add(key);
+    const text = `${version.compiled_truth}\n${version.timeline ?? ''}`;
+    for (const key of markdownTimelineKeys(text, slug)) produced.add(key);
+    for (const entry of supersededCitationTimeline(text)) produced.add(tupleKey(entry));
   }
   const orphans = extra.filter(row => produced.has(tupleKey(row)));
   if (!orphans.length || opts.dryRun) return orphans;

@@ -17,7 +17,7 @@ import { withCoordinatedWrite } from '../src/core/persistence/context.ts';
 import { TEST_WRITE_ATTRIBUTION } from './helpers/write-attribution.ts';
 import { disposePersistenceConsumer } from '../src/core/persistence/service.ts';
 import { claimWorktree } from '../src/core/persistence/ownership.ts';
-import { materializeTimeline, prepareCanonicalProjections, renderMaterializedBullet, type ProjectionWriter } from '../src/core/persistence/canonical-projections.ts';
+import { materializeTimeline, pendingTimelineRows, prepareCanonicalProjections, renderMaterializedBullet, type ProjectionWriter } from '../src/core/persistence/canonical-projections.ts';
 import { parseTimelineEntries } from '../src/core/link-extraction.ts';
 import { extractTimelineFromContent } from '../src/core/timeline-extract.ts';
 import { sanitizeRemoteBody } from '../src/core/remote-body.ts';
@@ -217,6 +217,69 @@ describe('#5567 database-only rows are materialized as marked bullets', () => {
     });
   });
 
+  // #6184: rows filed from an adjacent HTML comment. Writing one back would put
+  // a second copy of the section's END marker into the page.
+  test('a row whose summary is an HTML comment is kept, never materialized', async () => {
+    await fixture(async f => {
+      const section = (text: string) => `<!-- AUTO:slack -->\n- ${text}\n<!-- AUTO:slack END -->`;
+      await f.put(slug, page(section('Talked with alice-example about the launch.')));
+      const junk = { date: '2026-01-02', source: 'Slack import', summary: '<!-- AUTO:slack END -->' };
+      await f.legacy(slug, junk);
+      await f.put(slug, page(section('Talked with alice-example about the launch date.')), { force: true });
+      const body = await f.body(slug);
+      expect(body).not.toContain('gbrain:materialized');
+      expect(body.match(/AUTO:slack END/g)).toHaveLength(1);
+      expect((await f.timeline(slug)).map(r => r.summary)).toEqual([junk.summary]);
+      const snapshot = (await f.engine.readPageSnapshot(slug, { sourceId: f.sourceId }))!;
+      expect(await pendingTimelineRows(f.engine, { ...snapshot.page, timeline: snapshot.page.timeline ?? '' }))
+        .toEqual({ materializable: 0, unrenderable: 1 });
+    });
+  });
+
+  // #6226: the row the parser filed for a multi-source citation before it split
+  // sources. The citation's current rows replace it; written back, it would be
+  // a misdated bullet.
+  const cited = page('- **Widget-co:** per Alice, builds widgets. [Source: meeting transcript, 2026-10-06; Gmail "Intro", 2026-09-28]');
+  const stale = { date: '2026-09-28', source: 'meeting transcript, 2026-10-06; Gmail "Intro"', summary: 'Widget-co:** per Alice, builds widgets.' };
+
+  test('the older reading of a citation the page carries is replaced by its current rows', async () => {
+    await fixture(async f => {
+      await f.put(slug, page('Draft.'));
+      await f.legacy(slug, stale);
+      await f.put(slug, cited, { force: true });
+      expect(await f.body(slug)).not.toContain('gbrain:materialized');
+      const tuples = (await f.timeline(slug)).map(({ date, source, summary }) => JSON.stringify({ date, source, summary })).sort();
+      expect(tuples).toEqual([
+        { date: '2026-10-06', source: 'meeting transcript', summary: 'Widget-co: per Alice, builds widgets.' },
+        { date: '2026-09-28', source: 'Gmail "Intro"', summary: 'Widget-co: per Alice, builds widgets.' },
+      ].map(row => JSON.stringify(row)).sort());
+      const snapshot = (await f.engine.readPageSnapshot(slug, { sourceId: f.sourceId }))!;
+      expect(await pendingTimelineRows(f.engine, { ...snapshot.page, timeline: snapshot.page.timeline ?? '' }))
+        .toEqual({ materializable: 0, unrenderable: 0 });
+    });
+  });
+
+  test('a write that removes the citation deletes its older reading with its current rows', async () => {
+    await fixture(async f => {
+      await f.put(slug, cited);
+      await f.legacy(slug, stale);
+      await f.put(slug, page('Rewritten without the citation.'), { expected_revision: await f.revision(slug) });
+      expect(await f.timeline(slug)).toEqual([]);
+      await f.put(slug, page('Rewritten again.'), { expected_revision: await f.revision(slug) });
+      expect(await f.body(slug)).not.toContain('gbrain:materialized');
+    });
+  });
+
+  test('a database-only row sharing a citation\'s date and source is still materialized', async () => {
+    await fixture(async f => {
+      await f.put(slug, page('Draft.'));
+      const added = { date: '2026-10-06', source: 'meeting transcript', summary: 'Hired a new head of sales.' };
+      await f.legacy(slug, added);
+      await f.put(slug, page('Met the team. [Source: meeting transcript, 2026-10-06]'), { force: true });
+      expect(await f.body(slug)).toContain(`${materializedMarker(added)}\n- **2026-10-06** | meeting transcript — Hired a new head of sales.`);
+    });
+  });
+
   test('a markdown rebuild keeps markers and their protection', async () => {
     await fixture(async f => {
       await f.put(slug, page('Draft.'));
@@ -315,6 +378,7 @@ describe('#5567 marker parsing', () => {
     expect(renderMaterializedBullet({ date: '2026-07-01', source: '', summary: 'x' }, slug)).toBeNull();
     expect(renderMaterializedBullet({ date: '2026-07-01', source: 'a — b', summary: 'x' }, slug)).toBeNull();
     expect(renderMaterializedBullet({ date: '2026-07-01', source: 'markdown', summary: 'Referenced in [X](x.md)' }, slug)).toBeNull();
+    expect(renderMaterializedBullet({ date: '2026-07-01', source: 'Slack import', summary: '<!-- AUTO:slack END -->' }, slug)).toBeNull();
     expect(renderMaterializedBullet({ date: '2026-07-01', source: 'notes', summary: 'x', detail: '**2026-07-02** | nested' }, slug)).toBeNull();
   });
 });

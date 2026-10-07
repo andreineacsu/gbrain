@@ -7,7 +7,7 @@ import { TAKES_FENCE_BEGIN, TAKES_FENCE_END, parseTakesFence } from '../takes-fe
 import { extractFactsFromFenceText } from '../facts/extract-from-fence.ts';
 import { takesPreparation } from '../takes-write.ts';
 import { parseTimelineEntries } from '../link-extraction.ts';
-import { extractTimelineFromContent, type ExtractedTimelineEntry } from '../timeline-extract.ts';
+import { extractTimelineFromContent, supersededCitationTimeline, type ExtractedTimelineEntry } from '../timeline-extract.ts';
 import { sanitizeRemoteBody } from '../remote-body.ts';
 import { sanitizeForJsonb } from '../batch-rows.ts';
 import { materializedMarker, materializedMarkerHash, timelineKey, timelineKeyHash } from '../timeline-marker.ts';
@@ -51,10 +51,12 @@ export type ProjectionWriter = 'editing' | 'preserving' | 'file' | 'immutable';
  * How one stored timeline row relates to the write, judged at preparation:
  * `in_body` exactly matches a new bullet, `drifted` matches one only after
  * normalization, `removed` / `removed_marked` had an unmarked / materialized
- * bullet in the prior body that the new body dropped, and `database_only`
+ * bullet in the prior body that the new body dropped, `superseded` is an
+ * older reading of a citation in either body that the current reading
+ * replaces (#6184, #6226: `supersededCitationTimeline`), and `database_only`
  * has no bullet in either body.
  */
-export type TimelineRowState = 'in_body' | 'drifted' | 'removed' | 'removed_marked' | 'database_only';
+export type TimelineRowState = 'in_body' | 'drifted' | 'removed' | 'removed_marked' | 'superseded' | 'database_only';
 export type TimelineRowAction = 'refresh_detail' | 'delete' | 'keep' | 'materialize';
 
 /**
@@ -64,6 +66,7 @@ export type TimelineRowAction = 'refresh_detail' | 'delete' | 'keep' | 'material
  *   drifted        | delete         | delete         | delete         | delete
  *   removed        | delete         | delete         | delete         | delete
  *   removed_marked | delete         | materialize    | delete         | keep
+ *   superseded     | delete         | delete         | delete         | delete
  *   database_only  | materialize    | materialize    | keep           | keep
  *
  * A coordinated write deletes only rows whose bullet the writer can see in the
@@ -71,16 +74,17 @@ export type TimelineRowAction = 'refresh_detail' | 'delete' | 'keep' | 'material
  * a revision or file preimage that contained it; a preserving writer renders it
  * again. Writers that render from the database write bullet-less rows back into
  * the page (`materialize`); rows that fail the render round trip, and every
- * `materialize` row a caller did not render, are kept. `put_page` with the
- * current revision is the supported way to delete a materialized row. Deletes
- * and detail refreshes also require the row id and detail pinned at
- * preparation, so rows that change afterwards are left alone.
+ * `materialize` row a caller did not render, are kept. A `superseded` row is
+ * never written back: the citation files its current entries in its place.
+ * `put_page` with the current revision is the supported way to delete a
+ * materialized row. Deletes and detail refreshes also require the row id and
+ * detail pinned at preparation, so rows that change afterwards are left alone.
  */
 const TIMELINE_DECISIONS: Record<ProjectionWriter, Record<TimelineRowState, TimelineRowAction>> = {
-  editing: { in_body: 'refresh_detail', drifted: 'delete', removed: 'delete', removed_marked: 'delete', database_only: 'materialize' },
-  preserving: { in_body: 'refresh_detail', drifted: 'delete', removed: 'delete', removed_marked: 'materialize', database_only: 'materialize' },
-  file: { in_body: 'refresh_detail', drifted: 'delete', removed: 'delete', removed_marked: 'delete', database_only: 'keep' },
-  immutable: { in_body: 'refresh_detail', drifted: 'delete', removed: 'delete', removed_marked: 'keep', database_only: 'keep' },
+  editing: { in_body: 'refresh_detail', drifted: 'delete', removed: 'delete', removed_marked: 'delete', superseded: 'delete', database_only: 'materialize' },
+  preserving: { in_body: 'refresh_detail', drifted: 'delete', removed: 'delete', removed_marked: 'materialize', superseded: 'delete', database_only: 'materialize' },
+  file: { in_body: 'refresh_detail', drifted: 'delete', removed: 'delete', removed_marked: 'delete', superseded: 'delete', database_only: 'keep' },
+  immutable: { in_body: 'refresh_detail', drifted: 'delete', removed: 'delete', removed_marked: 'keep', superseded: 'delete', database_only: 'keep' },
 };
 
 export function timelineRowAction(writer: ProjectionWriter, state: TimelineRowState): TimelineRowAction {
@@ -158,16 +162,23 @@ export async function unrecordedCanonicalTimeline(engine: BrainEngine, pageId: n
   return [...canonicalTimeline(body, slug)].filter(([key]) => !stored.has(key)).map(([, entry]) => entry);
 }
 
+/** Keys of the rows an older citation reading filed for the body and the current one replaces. */
+function supersededTimeline(body: CanonicalBody): Set<string> {
+  return new Set(supersededCitationTimeline(safeBody(body)).map(t => timelineKey(t)));
+}
+
 /** Classify stored rows against a new body and the writer's prior snapshot. */
 function classifyTimeline(rows: StoredTimelineRow[], body: CanonicalBody, prior: CanonicalBody | null, slug: string, writer: ProjectionWriter) {
   const timeline = canonicalTimeline(body, slug);
   const exactIncoming = new Map([...timeline.values()].map(t => [exactTimelineKey(t), sanitizeForJsonb(t.detail ?? '')]));
   const priorTimeline = prior ? new Set(canonicalTimeline(prior, slug).keys()) : new Set<string>();
   const priorMarked = prior ? markedTimeline(prior, slug) : new Set<string>();
+  const superseded = new Set([...supersededTimeline(body), ...(prior ? supersededTimeline(prior) : [])]);
   const pinned = rows.map(row => {
     const key = timelineKey(row);
     const state: TimelineRowState = exactIncoming.has(exactTimelineKey(row)) ? 'in_body' : timeline.has(key) ? 'drifted'
-      : priorMarked.has(key) ? 'removed_marked' : priorTimeline.has(key) ? 'removed' : 'database_only';
+      : priorMarked.has(key) ? 'removed_marked' : priorTimeline.has(key) ? 'removed'
+      : superseded.has(key) ? 'superseded' : 'database_only';
     return { ...row, key, state, action: timelineRowAction(writer, state) };
   });
   return { timeline, exactIncoming, pinned };
@@ -186,6 +197,9 @@ export function renderMaterializedBullet(row: { date: string; source: string; su
   const detail = collapse(row.detail ?? '');
   // Pre-#4277 backlink receipts are graph noise the extractors deliberately skip.
   if (/^Referenced in\s+\[/i.test(tuple.summary)) return null;
+  // #6184: a summary carrying an HTML comment (a section END marker the
+  // citation parser once filed) would put a second copy of the marker in the page.
+  if (tuple.summary.includes('<!--')) return null;
   const block = [materializedMarker(tuple), `- **${tuple.date}** | ${tuple.source} — ${tuple.summary}`, ...(detail ? [`  ${detail}`] : [])].join('\n');
   const extracted = [...canonicalTimeline({ compiled_truth: block, timeline: '' }, slug).values()];
   if (extracted.length !== 1) return null;

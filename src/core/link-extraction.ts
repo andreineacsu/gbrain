@@ -1943,6 +1943,8 @@ const TIMELINE_LINE_RE = /^\s*(?:-\s*)?\*\*(\d{4}-\d{2}-\d{2})\*\*\s*([|\-–—
 // 年/月 markers so plain ASCII `- 2020-01-02 - text` does NOT match — non-bold
 // ASCII dates were never timeline entries and must stay that way.
 const TIMELINE_LINE_RE_CN = /^\s*(?:-\s*)?(?:\*\*)?(\d{4})年(\d{1,2})月(\d{1,2})日?(?:\*\*)?\s*([|\-–—]+)\s*(.+?)\s*$/;
+// Lines the dated-bullet pass reads; the inline-citation pass skips them.
+export const isTimelineBulletLine = (line: string) => TIMELINE_LINE_RE.test(line) || TIMELINE_LINE_RE_CN.test(line);
 
 // `### YYYY-MM-DD — summary` headings, as the FS extractor (timeline-extract.ts Format 2) accepts.
 const TIMELINE_HEADING_RE = /^\s*###\s+(\d{4}-\d{2}-\d{2})\s*[\-–—]+\s*(.+?)\s*$/;
@@ -2044,9 +2046,7 @@ export function parseTimelineEntries(content: string): TimelineCandidate[] {
   // timeline coverage. Kept in sync with extractTimelineFromContent's
   // Format 3 (the fs-source path). Blocks already captured by the timeline
   // bullet pass are skipped (a bullet often carries its own citation).
-  for (const entry of parseInlineCitationTimelineEntries(content, {
-    skipLine: (line) => TIMELINE_LINE_RE.test(line) || TIMELINE_LINE_RE_CN.test(line),
-  })) {
+  for (const entry of parseInlineCitationTimelineEntries(content, { skipLine: isTimelineBulletLine })) {
     // #3957: carry the citation's source label in `source` (the dedup-key
     // column) so the row shape matches the FS extractor's Format 3; the
     // human-readable detail is kept for existing consumers.

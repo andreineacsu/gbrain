@@ -131,6 +131,21 @@ describe('full-walk extract', () => {
     await runExtract(engine, ['timeline', '--source', 'db', '--source-id', 'db', '--json']);
     expect(await timeline('db', 'people/dana-example')).toEqual(['2024-06-01 Left widget-co']);
   }, 60_000);
+
+  // #6184/#6226: a row filed under the parser's older citation reading is
+  // retracted, whether its citation is in the current text or only in a version.
+  test('DB-source walk replaces an older citation reading with the current one', async () => {
+    const dir = brainDir();
+    const olderReading = { date: '2024-03-01', source: 'call, 2024-03-02; memo', summary: 'Widget-co:** builds widgets.' };
+    await writeAndImport(dir, 'db', 'notes/widget.md', note('- **Widget-co:** builds widgets. [Source: call, 2024-03-02; memo, 2024-03-01]'));
+    await engine.addTimelineEntry('notes/widget', olderReading, { sourceId: 'db' });
+    await runExtract(engine, ['timeline', '--source', 'db', '--source-id', 'db', '--json']);
+    expect((await timeline('db', 'notes/widget')).sort()).toEqual(['2024-03-01 Widget-co: builds widgets.', '2024-03-02 Widget-co: builds widgets.']);
+    await engine.addTimelineEntry('notes/widget', olderReading, { sourceId: 'db' });
+    await writeAndImport(dir, 'db', 'notes/widget.md', note('- **Widget-co:** builds widgets.'));
+    await runExtract(engine, ['timeline', '--source', 'db', '--source-id', 'db', '--json']);
+    expect(await timeline('db', 'notes/widget')).toEqual([]);
+  }, 60_000);
 });
 
 describe('sync inline extraction after unextracted edits', () => {

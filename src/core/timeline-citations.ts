@@ -22,11 +22,13 @@ function startsMarkdownBlock(line: string): boolean {
 }
 
 /**
- * `content` with code and every closed HTML comment masked (#6184). Masking
- * keeps offsets and line breaks. An unclosed `<!--` stays text and hides
- * nothing, as before: CommonMark renders one inside a line literally.
+ * `content` with code masked and, for the current reading, every closed HTML
+ * comment too (#6184). Masking keeps offsets and line breaks. An unclosed
+ * `<!--` stays text and hides nothing, as before: CommonMark renders one
+ * inside a line literally.
  */
-function visibleText(content: string): string {
+function visibleText(content: string, hideComments: boolean): string {
+  if (!hideComments) return stripCodeBlocks(content);
   let unclosed = -1;
   const masked = stripCodeBlocks(content, { onHtmlComment: (start) => {
     if (content.indexOf('-->', start + 4) === -1) unclosed = start;
@@ -34,7 +36,7 @@ function visibleText(content: string): string {
   return unclosed === -1 ? masked : masked.slice(0, unclosed) + stripCodeBlocks(content.slice(unclosed));
 }
 
-function citationParagraphs(content: string, opts: CitationOpts): CitationParagraph[] {
+function citationParagraphs(content: string, opts: CitationOpts, hideComments: boolean): CitationParagraph[] {
   const paragraphs: CitationParagraph[] = [];
   let lines: string[] = [];
   let skippedBlock = false;
@@ -46,7 +48,7 @@ function citationParagraphs(content: string, opts: CitationOpts): CitationParagr
   };
 
   const codeOnly = stripCodeBlocks(content).split(/\r?\n/);
-  visibleText(content).split(/\r?\n/).forEach((line, i) => {
+  visibleText(content, hideComments).split(/\r?\n/).forEach((line, i) => {
     if (line.trim().length === 0) {
       // A comment-only line drops out without ending the paragraph, so a
       // citation keeps the text it annotates across one.
@@ -76,6 +78,12 @@ function citationSources(body: string): Array<{ date: string; source: string }> 
     .filter((s) => s.source);
 }
 
+/** The whole citation body as one source with its final date: the reading before #6226. */
+function wholeCitationSource(body: string): Array<{ date: string; source: string }> {
+  const m = /^(.+?),\s*(\d{4}-\d{2}-\d{2})$/s.exec(body);
+  return m ? [{ date: m[2], source: m[1].trim().slice(0, 200) }] : [];
+}
+
 /**
  * Paired Markdown emphasis unwrapped to its text (#6226): `**strong**`,
  * `__strong__`, `*em*`, `_em_`. A star with a space after it or an underscore
@@ -95,29 +103,49 @@ function stripEmphasis(text: string): string {
   return text;
 }
 
-export function parseInlineCitationTimelineEntries(
-  content: string,
-  opts: { skipLine?: (line: string) => boolean } = {},
-): InlineCitationTimelineCandidate[] {
+function readCitations(content: string, opts: CitationOpts, legacy: boolean): InlineCitationTimelineCandidate[] {
   const result: InlineCitationTimelineCandidate[] = [];
   // #6184: HTML comments are markup, never part of a summary.
-  for (const paragraph of citationParagraphs(content, opts)) {
+  for (const paragraph of citationParagraphs(content, opts, !legacy)) {
     const matches = [...paragraph.text.matchAll(CITATION_TIMELINE_RE)];
     if (matches.length === 0) continue;
     const text = paragraph.text.replace(/\[Source:[^\]]*\](?:\((?:[^()]|\([^()]*\))*\))?/g, '');
-    const summary = stripEmphasis(text)
+    const summary = (legacy ? text : stripEmphasis(text))
       .replace(/^[-*>#\s]+/, '')
       .replace(/\s+/g, ' ')
       .trim()
       .slice(0, 300);
     if (!summary) continue;
     for (const m of matches) {
-      for (const { date, source } of citationSources(m[1])) {
+      for (const { date, source } of legacy ? wholeCitationSource(m[1]) : citationSources(m[1])) {
         if (isValidDate(date)) result.push({ date, source, summary });
       }
     }
   }
   return result;
+}
+
+export function parseInlineCitationTimelineEntries(
+  content: string,
+  opts: { skipLine?: (line: string) => boolean } = {},
+): InlineCitationTimelineCandidate[] {
+  return readCitations(content, opts, false);
+}
+
+/**
+ * The entries this parser filed for `content` before #6184 and #6226 (HTML
+ * comments read as text, emphasis kept, a multi-source citation read as one
+ * source with its final date) that the current reading replaces: the same
+ * citation files a current entry, or the old summary held only HTML comments.
+ * A stored row equal to one of these can be retired without losing an event.
+ */
+export function supersededInlineCitationEntries(
+  content: string,
+  opts: { skipLine?: (line: string) => boolean } = {},
+): InlineCitationTimelineCandidate[] {
+  const current = new Set(readCitations(content, opts, false).map((e) => JSON.stringify([e.date, e.source])));
+  return readCitations(content, opts, true).filter((e) => !e.summary.replace(/<!--[\s\S]*?-->/g, '').trim()
+    || citationSources(`${e.source}, ${e.date}`).some((s) => current.has(JSON.stringify([s.date, s.source]))));
 }
 
 function isValidDate(s: string): boolean {
