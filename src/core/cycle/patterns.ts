@@ -41,15 +41,16 @@ import type { Page, PageType } from '../types.ts';
 // data-dir, on Postgres because the parent phase itself occupies a worker
 // slot and can deadlock a fully-occupied worker (#2050). synthesize.ts
 // drains its own children the same way.
-import { loadAllowedSlugPrefixes, loadOutputRoot, runSubagentsInline } from './synthesize.ts';
+import { CHARS_PER_TOKEN, loadAllowedSlugPrefixes, loadOutputRoot, runSubagentsInline } from './synthesize.ts';
 import { stampDreamProvenance } from './dream-provenance.ts';
-import { probeChatModel } from '../ai/gateway.ts';
+import { getChatFallbackChain, probeChatModel } from '../ai/gateway.ts';
 import { normalizeModelId } from '../model-id.ts';
 import { throwIfAborted } from '../abort-check.ts';
 import { resolveCycleDate } from './cycle-date.ts';
 import { clearPatternsSourceDeaths, patternsBreakerRefusal } from './dream-breaker.ts';
 import { resolveChatContextTokens } from '../ai/model-resolver.ts';
 import { AIConfigError } from '../ai/errors.ts';
+import { countWithheldResults } from '../minions/transcript-budget.ts';
 import { publishOrHold } from '../persistence/accepted-pending.ts';
 
 export interface PatternsPhaseOpts {
@@ -123,20 +124,34 @@ export const MIN_PATTERNS_SUBAGENT_BUDGET_MS = 2 * 60 * 1000;
  * prompt and the model's own turns.
  */
 const PATTERNS_WINDOW_SHARE = 0.4;
-/** Characters per token, the conservative ratio synthesize's chunk budget uses. */
-const PATTERNS_CHARS_PER_TOKEN = 3.5;
 /** Window assumed for a model whose provider declares none. */
 const UNDECLARED_WINDOW_TOKENS = 200_000;
 
-/** The patterns child's `max_transcript_chars`: its share of the model's declared window. */
-export function patternsTranscriptBudgetChars(model: string): number {
-  let windowTokens: number | undefined;
+/**
+ * The patterns child's `max_transcript_chars`: its share of the smallest
+ * declared window among the models that may run its turns (the patterns
+ * model, then the gateway's chat fallback chain).
+ */
+export function patternsTranscriptBudgetChars(models: string[]): number {
+  const windows = models.map(model => {
+    try {
+      return resolveChatContextTokens(normalizeModelId(model)) ?? UNDECLARED_WINDOW_TOKENS;
+    } catch (error) {
+      if (error instanceof AIConfigError) return UNDECLARED_WINDOW_TOKENS;
+      throw error;
+    }
+  });
+  return Math.floor(Math.min(...windows) * PATTERNS_WINDOW_SHARE * CHARS_PER_TOKEN);
+}
+
+/** The gateway's chat fallback chain, or none when the gateway is not configured. */
+function chatFallbackModels(): string[] {
   try {
-    windowTokens = resolveChatContextTokens(normalizeModelId(model));
+    return getChatFallbackChain();
   } catch (error) {
-    if (!(error instanceof AIConfigError)) throw error;
+    if (error instanceof AIConfigError) return [];
+    throw error;
   }
-  return Math.floor((windowTokens ?? UNDECLARED_WINDOW_TOKENS) * PATTERNS_WINDOW_SHARE * PATTERNS_CHARS_PER_TOKEN);
 }
 
 /**
@@ -288,7 +303,7 @@ export async function runPhasePatterns(
       prompt: buildPatternsPrompt(reflections, config.minEvidence, config.sourceSlugPrefix, config.outputSlugPrefix, cycleDate),
       model: config.model,
       max_turns: 30,
-      max_transcript_chars: patternsTranscriptBudgetChars(config.model), // #6236: the replayed transcript fits the window
+      max_transcript_chars: patternsTranscriptBudgetChars([config.model, ...chatFallbackModels()]), // #6236: the replayed transcript fits
       // #4217/CDX-12: a patterns child whose every put_page failed must
       // dead-letter (its whole purpose is writing pattern pages), not report
       // completed with zero pages. #5540: a clean finish that examined the
@@ -396,7 +411,7 @@ export async function runPhasePatterns(
       : await reverseWriteRefs(engine, opts.brainDir, writtenRefs, cycleSourceId, opts.signal);
     const details = { reflections_considered: reflections.length, patterns_written: finalized.length,
       ...(quoteVerify ? { quote_verify: quoteVerify } : {}), reverse_write_count: reverseWriteCount, publish_deferred: held,
-      child_outcome: outcome, job_id: job.id };
+      child_outcome: outcome, job_id: job.id, transcript_withheld: await countWithheldResults(engine, job.id) };
 
     // #2782: the phase status must reflect the child outcome. Pre-fix this
     // returned status:ok even when the subagent timed out (e.g. no

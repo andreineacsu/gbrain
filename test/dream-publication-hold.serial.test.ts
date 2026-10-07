@@ -33,9 +33,10 @@ const failFor = (slug: string) => {
   if (error !== undefined) throw error;
 };
 
-mock.module('../src/core/ai/gateway.ts', () => ({ probeChatModel: () => ({ ok: true }) }));
+mock.module('../src/core/ai/gateway.ts', () => ({ probeChatModel: () => ({ ok: true }), getChatFallbackChain: () => [] }));
 mock.module('../src/core/cycle/synthesize-concepts.ts', () => ({ resolveSynthMaxOutputTokens: () => 2048 }));
 mock.module('../src/core/cycle/synthesize.ts', () => ({
+  CHARS_PER_TOKEN: 3.5,
   loadAllowedSlugPrefixes: async () => ['wiki/personal/patterns/*'],
   loadOutputRoot: async () => 'wiki',
   runSubagentsInline: async () => undefined,

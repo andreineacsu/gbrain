@@ -6,6 +6,7 @@
  * model's window and the run dies after it has paid for every turn. With
  * `max_transcript_chars` set, the prompt and the tool results stay under it:
  * a read-only tool's result that would cross it is replaced by a notice
+ * (`{ result_withheld: <text> }`, JSON so every persistence path stores it)
  * telling the model to finish with what it has read. Any other tool's result
  * always passes, because the model must see a write's receipt, and still
  * counts. The notice is the persisted output, so a replay shows the model
@@ -13,6 +14,9 @@
  */
 import type { BrainEngine } from '../engine.ts';
 import type { SubagentHandlerData, ToolDef } from './types.ts';
+
+/** Key of the notice object that replaces a withheld result. */
+export const WITHHELD_RESULT_KEY = 'result_withheld';
 
 export interface TranscriptBudget {
   readonly maxChars: number;
@@ -35,25 +39,44 @@ export function parseTranscriptBudget(value: unknown): number | null {
   return value;
 }
 
-/** A budget seeded with the prompt and the results a resumed job already holds. */
+/**
+ * A budget seeded with the prompt and the results a resumed job already
+ * holds, measured like live results: a stored string by its own length,
+ * anything else by its JSON text. Withheld notices count, as the model saw them.
+ */
 export async function loadTranscriptBudget(engine: BrainEngine, jobId: number, maxChars: number, promptChars: number): Promise<TranscriptBudget> {
   const [row] = await engine.executeRaw<{ chars: number | string | null }>(
-    `SELECT COALESCE(SUM(length(output::text)), 0) AS chars
+    `SELECT COALESCE(SUM(length(output #>> '{}')), 0) AS chars
        FROM subagent_tool_executions WHERE job_id = $1 AND status = 'complete'`, [jobId]);
   return { maxChars, usedChars: promptChars + Number(row?.chars ?? 0) };
 }
 
-function withheldNotice(toolName: string, chars: number, budget: TranscriptBudget): string {
-  return `Result withheld: this ${toolName} result is ${chars} characters, more than the ${Math.max(0, budget.maxChars - budget.usedChars)} `
+/** Results a job's budget withheld, from its persisted notices. */
+export async function countWithheldResults(engine: BrainEngine, jobId: number): Promise<number> {
+  const [row] = await engine.executeRaw<{ n: number | string }>(
+    `SELECT count(*)::int AS n FROM subagent_tool_executions
+      WHERE job_id = $1 AND status = 'complete' AND output->>$2::text IS NOT NULL`, [jobId, WITHHELD_RESULT_KEY]);
+  return Number(row?.n ?? 0);
+}
+
+function withheldNotice(toolName: string, chars: number, budget: TranscriptBudget): { [WITHHELD_RESULT_KEY]: string } {
+  return { [WITHHELD_RESULT_KEY]: `this ${toolName} result is ${chars} characters, more than the ${Math.max(0, budget.maxChars - budget.usedChars)} `
     + `left of this run's ${budget.maxChars}-character transcript budget. Every turn re-sends the whole conversation, so adding it `
-    + 'could overflow the model\'s context window. Do not retry it; finish the task with what you have already read.';
+    + 'could overflow the model\'s context window. Do not retry it, and do not replace a page you could not read; '
+    + 'finish the task with what you have already read.' };
 }
 
 export function withTranscriptBudget(tools: ToolDef[], budget: TranscriptBudget): ToolDef[] {
   return tools.map(tool => ({ ...tool, async execute(input, ctx) {
     const output = await tool.execute(input, ctx);
     const chars = toolResultChars(output);
-    if (tool.read_only === true && budget.usedChars + chars > budget.maxChars) return withheldNotice(tool.name, chars, budget);
+    if (tool.read_only === true && budget.usedChars + chars > budget.maxChars) {
+      const notice = withheldNotice(tool.name, chars, budget);
+      process.stderr.write(`[subagent:${ctx.jobId}] withheld a ${chars}-character ${tool.name} result `
+        + `(transcript ${budget.usedChars} of ${budget.maxChars} characters)\n`);
+      budget.usedChars += toolResultChars(notice);
+      return notice;
+    }
     budget.usedChars += chars;
     return output;
   } }));

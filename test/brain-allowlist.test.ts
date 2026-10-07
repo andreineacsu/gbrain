@@ -109,6 +109,12 @@ describe('buildBrainTools', () => {
     expect(tools.every(t => t.idempotent === true)).toBe(true);
   });
 
+  test('#6236: only the two writing tools are not read_only, so a transcript budget never withholds a write receipt', () => {
+    const tools = buildBrainTools({ subagentId: 1, engine, config });
+    expect(tools.filter(t => t.read_only !== true).map(t => t.name).sort()).toEqual(['brain_add_timeline_entry', 'brain_put_page']);
+    expect(tools.find(t => t.name === 'brain_get_page')!.read_only).toBe(true);
+  });
+
   test('tools carry the op description verbatim', () => {
     const tools = buildBrainTools({ subagentId: 1, engine, config });
     const getPage = tools.find(t => t.name === 'brain_get_page');

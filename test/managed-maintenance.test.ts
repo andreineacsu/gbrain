@@ -605,7 +605,7 @@ test('#6236: managed patterns stops after three dead runs under changing keys, a
         for (let n = 0; n < 2; n++) await dead(n, "now() - interval '2 hours'");
         expect(await sourceCount()).toBe(2);
         const completed = await runPhasePatterns(engine, { brainDir: root, sourceId, dryRun: false, once: true, cycleDate: '2026-10-07' });
-        expect(completed.details.child_outcome).toBe('completed');
+        expect(completed.details).toMatchObject({ child_outcome: 'completed', transcript_withheld: 0 });
         await dead(2, "now() + interval '1 second'");
         expect(await sourceCount()).toBe(1);
       });
