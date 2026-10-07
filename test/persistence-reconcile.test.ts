@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from 'bun:test';
 import { randomUUID } from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -44,12 +44,16 @@ afterAll(async () => {
   });
   await closePostgres?.(); rmSync(home, { recursive: true, force: true });
 });
-async function fixture(engine: BrainEngine, enabled = false, body = 'A useful durable example observation.', slug = 'notes/example') {
+/** `layout.scope`: the source root is that subdirectory of a Git checkout, with `layout.slugRootMode` pinned. */
+async function fixture(engine: BrainEngine, enabled = false, body = 'A useful durable example observation.', slug = 'notes/example',
+  layout: { scope?: string; slugRootMode?: 'git-root' | 'source-root' } = {}) {
   await disposePersistenceConsumer(engine);
   await engine.executeRaw('UPDATE persistence_brain SET enabled=false WHERE singleton=1');
-  const id = `reconcile-${randomUUID().slice(0, 12)}`, root = join(home, id);
+  const id = `reconcile-${randomUUID().slice(0, 12)}`, root = layout.scope ? join(home, id, layout.scope) : join(home, id);
   mkdirSync(join(root, 'notes'), { recursive: true });
-  await engine.executeRaw('INSERT INTO sources(id,name,local_path,config) VALUES($1,$1,$2,\'{}\')', [id, root]);
+  if (layout.scope) mkdirSync(join(home, id, '.git'));
+  await engine.executeRaw('INSERT INTO sources(id,name,local_path,config) VALUES($1,$1,$2,$3::text::jsonb)',
+    [id, root, JSON.stringify(layout.slugRootMode ? { slug_root_mode: layout.slugRootMode } : {})]);
   const content = `---\ntype: note\ntitle: Example\ncustom_database: kept\nprofile:\n  role: example-role\n---\n${body}\n`;
   await importFromContent(engine, slug, content, { sourceId: id, sourcePath: `${slug}.md`, noEmbed: true });
   const snapshot = (await engine.readPageSnapshot(slug, { sourceId: id }))!;
@@ -612,13 +616,25 @@ test('shared provenance URI does not override distinct explicit canonical paths'
 }), 120_000);
 
 test('genuine shared-file origins through explicit paths or URI fallback still refuse reconciliation', async () => isolated(async engine => {
-  for (const enabled of [false, true]) for (const origin of ['path', 'dot-path', 'repeated-separators', 'uri']) {
+  const origins: Array<{ sourcePath: (file: string) => string | null; uri?: boolean; slug?: string }> = [
+    { sourcePath: () => 'notes/example.md' },
+    { sourcePath: () => './notes/example.md' },
+    { sourcePath: () => 'notes//example.md' },
+    // A historical basename-only origin resolves through its slug directory, here notes/.
+    { sourcePath: () => 'example.md', slug: 'notes/legacy-twin' },
+    // A source_path the resolver cannot use (none, not Markdown, absolute, a drive, a ..
+    // segment) falls back to the file URI.
+    { sourcePath: () => null, uri: true },
+    { sourcePath: () => 'notes/example.txt', uri: true },
+    { sourcePath: file => file, uri: true },
+    { sourcePath: () => 'C:/vault/notes/example.md', uri: true },
+    { sourcePath: () => '../elsewhere/example.md', uri: true },
+  ];
+  for (const enabled of [false, true]) for (const origin of origins) {
     const f = await fixture(engine, enabled), raw = readFileSync(f.file), uri = pathToFileURL(f.file).href;
     await engine.transaction(tx => withCoordinatedWrite(tx, [f.id], async () => {
-      const sourcePath = origin === 'uri' ? null : origin === 'dot-path' ? './notes/example.md'
-        : origin === 'repeated-separators' ? 'notes//example.md' : 'notes/example.md';
-      await tx.putPage('other/collision', { type: 'note', title: 'Collision', compiled_truth: 'Another page claiming the same file.',
-        frontmatter: {}, source_path: sourcePath, source_uri: origin === 'uri' ? uri : null }, { sourceId: f.id });
+      await tx.putPage(origin.slug ?? 'other/collision', { type: 'note', title: 'Collision', compiled_truth: 'Another page claiming the same file.',
+        frontmatter: {}, source_path: origin.sourcePath(f.file), source_uri: origin.uri ? uri : null }, { sourceId: f.id });
     }, TEST_WRITE_ATTRIBUTION));
     const snapshot = await engine.readPageSnapshot(f.slug, { sourceId: f.id });
     await local(engine, f.registration, async () => {
@@ -633,16 +649,75 @@ test('genuine shared-file origins through explicit paths or URI fallback still r
 
 test('candidate-origin fanout stops at a bounded verification limit rather than scanning the source', async () => isolated(async engine => {
   const f = await fixture(engine), uri = pathToFileURL(f.file).href;
+  // Pages with no source_path fall back to their file URI, so each of these can name the file.
   await engine.transaction(tx => withCoordinatedWrite(tx, [f.id], async () => {
     await tx.executeRaw('UPDATE pages SET source_uri=$3 WHERE source_id=$1 AND slug=$2', [f.id, f.slug, uri]);
     await tx.executeRaw(`INSERT INTO pages(source_id,slug,type,title,compiled_truth,frontmatter,source_path,source_uri)
-      SELECT $1,'other/candidate-'||n,'note','Independent origin','Independent candidate '||n,'{}'::jsonb,'other/candidate-'||n||'.md',$2
+      SELECT $1,'other/candidate-'||n,'note','Independent origin','Independent candidate '||n,'{}'::jsonb,NULL,$2
       FROM generate_series(1,101) n`, [f.id, uri]);
   }, TEST_WRITE_ATTRIBUTION));
   await local(engine, f.registration, async () => {
     await expect(runReconcilePreview(engine, { source_id: f.id, slug: f.slug })).rejects.toMatchObject({
       code: 'source_changed', message: 'Too many candidate page origins to verify this exact file safely.' });
     expect(await engine.executeRaw('SELECT id FROM persistence_requests WHERE source_id=$1', [f.id])).toHaveLength(0);
+  });
+}), 120_000);
+
+// #6222: a page is a candidate only when its recorded origin can name this file. Sharing the
+// file name (channels/<name>/2015-09.md) or the ingestion provenance URI alone does not count.
+test('pages sharing only the file name or provenance URI do not block reconciliation', async () => isolated(async engine => {
+  for (const enabled of [false, true]) for (const shared of ['file-name', 'basename-in-other-slug-directories', 'provenance-uri']) {
+    const f = await fixture(engine, enabled), uri = pathToFileURL(f.file).href;
+    for (let n = 1; n <= 101; n++) {
+      mkdirSync(join(f.root, 'channels', `c${n}`), { recursive: true });
+      writeFileSync(join(f.root, 'channels', `c${n}`, 'example.md'), `---\ntitle: Channel ${n}\n---\nIndependent channel ${n}.\n`);
+    }
+    const sourcePath = shared === 'file-name' ? `'channels/c'||n||'/example.md'` : shared === 'provenance-uri' ? `'other/candidate-'||n||'.md'` : `'example.md'`;
+    await engine.transaction(tx => withCoordinatedWrite(tx, [f.id], async () => {
+      if (shared === 'provenance-uri') await tx.executeRaw('UPDATE pages SET source_uri=$3 WHERE source_id=$1 AND slug=$2', [f.id, f.slug, uri]);
+      await tx.executeRaw(`INSERT INTO pages(source_id,slug,type,title,compiled_truth,frontmatter,source_path,source_uri)
+        SELECT $1,'channels/c'||n||'/example','note','Channel '||n,'Independent channel '||n,'{}'::jsonb,${sourcePath},$2
+        FROM generate_series(1,101) n`, [f.id, shared === 'provenance-uri' ? uri : null]);
+    }, TEST_WRITE_ATTRIBUTION));
+    await local(engine, f.registration, async () => {
+      const result = await runReconcilePreview(engine, { source_id: f.id, slug: f.slug });
+      expect(result).toMatchObject({ status: 'ready', relative_path: 'notes/example.md' });
+      expect((await runReconcileApply(engine, { source_id: f.id, slug: f.slug, preview: result.preview, request_id: randomUUID() })).state).toBe('committed');
+      expect(readFileSync(join(f.root, 'channels', 'c1', 'example.md'), 'utf8')).toContain('Independent channel 1.');
+    });
+  }
+}), 120_000);
+
+test.each([
+  // The page records the file through a symlinked directory; the other page records its real path.
+  { name: 'real path of a symlinked origin', layout: {}, link: true, target: 'linked/example.md', other: 'notes/example.md', refuses: true },
+  // The stated limit of assertSoleFileClaim: from the real-path side, a page reaching the file
+  // only through a symlinked directory is not a candidate. Reconciling that page refuses (above).
+  { name: 'path through another symlinked directory', layout: {}, link: true, target: 'notes/example.md', other: 'linked/example.md', refuses: false },
+  // Git-root mode reads a <scope>/ prefix as the Git-root spelling of the source-relative path.
+  { name: 'Git-root spelling', layout: { scope: 'brain', slugRootMode: 'git-root' as const }, link: false, target: 'notes/example.md', other: 'brain/notes/example.md', refuses: true },
+  { name: 'source-relative spelling', layout: { scope: 'brain', slugRootMode: 'git-root' as const }, link: false, target: 'brain/notes/example.md', other: 'notes/example.md', refuses: true },
+  // ... and strips the same prefix from a basename-only origin's slug directory.
+  { name: 'basename in a Git-root slug directory', layout: { scope: 'brain', slugRootMode: 'git-root' as const }, link: false, target: 'notes/example.md', other: 'example.md', otherSlug: 'brain/notes/twin', refuses: true },
+  // Source-root mode reads the same prefix as a nested directory: a different file.
+  { name: 'nested directory', layout: { scope: 'brain', slugRootMode: 'source-root' as const }, link: false, target: 'notes/example.md', other: 'brain/notes/example.md', refuses: false },
+  // One file on a case-insensitive filesystem (macOS, Windows), two files elsewhere.
+  { name: 'letter-case variant', layout: {}, link: false, target: 'notes/example.md', other: 'NOTES/Example.md', refuses: 'case-insensitive' },
+  // A basename-only origin names the file at the source root before its slug directory.
+  { name: 'basename at the source root', layout: {}, link: false, slug: 'example', target: 'example.md', other: 'example.md', refuses: true },
+].map(c => [c.name, c] as const))('another spelling of the same file still refuses reconciliation: %s', async (_name, c) => isolated(async engine => {
+  const f = await fixture(engine, false, undefined, c.slug, c.layout);
+  if (c.link) symlinkSync(join(f.root, 'notes'), join(f.root, 'linked'), 'dir');
+  const refuses = c.refuses === 'case-insensitive' ? existsSync(join(f.root, c.other)) : c.refuses;
+  await engine.transaction(tx => withCoordinatedWrite(tx, [f.id], async () => {
+    await tx.executeRaw('UPDATE pages SET source_path=$3 WHERE source_id=$1 AND slug=$2', [f.id, f.slug, c.target]);
+    await tx.putPage(c.otherSlug ?? 'other/collision', { type: 'note', title: 'Collision', compiled_truth: 'Another page recording a path.',
+      frontmatter: {}, source_path: c.other }, { sourceId: f.id });
+  }, TEST_WRITE_ATTRIBUTION));
+  await local(engine, f.registration, async () => {
+    const preview = runReconcilePreview(engine, { source_id: f.id, slug: f.slug });
+    if (refuses) await expect(preview).rejects.toMatchObject({ code: 'source_changed', message: 'Several pages claim the recorded canonical file.' });
+    else expect((await preview).status).toBe('ready');
   });
 }), 120_000);
 

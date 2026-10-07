@@ -1270,6 +1270,10 @@ export function resolvePageFilePath(
  * Returns null for an unsafe or non-markdown source path. Callers must still
  * enforce their normal realpath containment check before a write.
  *
+ * The reconcile candidate query (`assertSoleFileClaim`,
+ * persistence/reconcile-state.ts) re-reads these rules in SQL to find every
+ * page whose source_path can resolve to one file; keep it a superset of them.
+ *
  * Segment splitting is platform-aware (`pathSep`), not a blanket
  * `[\\/]+` split: on POSIX, `\` is a legal filename character (real
  * gbrain data has Apple Notes titles containing one), not a directory

@@ -1,5 +1,5 @@
 import { lstatSync, readFileSync, realpathSync } from 'node:fs';
-import { basename, join, relative } from 'node:path';
+import { basename, join, relative, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { BrainEngine } from '../engine.ts';
 import { loadConfig, loadConfigWithEngine } from '../config.ts';
@@ -10,7 +10,7 @@ import { OperationError, opError } from '../ops/contract.ts';
 import { readFix } from '../ops/op-fix.ts';
 import type { PageSnapshot } from '../page-state/types.ts';
 import { isWriteTargetContained } from '../path-confine.ts';
-import { recordedPathFromFileUri, scannerSlugRootMode } from '../write-through.ts';
+import { recordedPathFromFileUri, scannerSlugRootMode, scannerSourcePath } from '../write-through.ts';
 import { localHostId } from './identity.ts';
 import { isDatabaseOnlyPage, slugDerivedOrigin } from './unbound-pages.ts';
 import { isUnboundSourcePage } from './unbound-source.ts';
@@ -65,6 +65,17 @@ export async function reconcilePolicyDigest(engine: BrainEngine, sourceId: strin
 export function staleReconcile(what: string): never {
   throw new OperationError('source_changed', `Reconciliation preview is stale: ${what}.`, 'Generate a fresh preview; submit a corrected intent with a new request ID.');
 }
+/**
+ * The recorded spellings of the file at `paths` (its lexical and physical locations): each
+ * source-relative path, plus the Git-root form `<scope>/<path>` that resolveSourceLocalFilePath
+ * strips, and the directories a basename-only origin's slug must name to reach it.
+ */
+function originSpellings(root: string, paths: string[]): { origins: string[]; directories: string[] } {
+  const scope = scannerSourcePath(root, root);
+  const scoped = (rel: string) => scope ? [rel, `${scope}/${rel}`] : [rel];
+  const rels = [...new Set(paths.map(path => relative(root, path).split(sep).join('/')))];
+  return { origins: rels.flatMap(scoped), directories: rels.flatMap(rel => rel.includes('/') ? scoped(rel.slice(0, rel.lastIndexOf('/'))) : []) };
+}
 function recordedReconcilePath(root: string, page: { slug: string; source_path?: string | null; source_uri?: string | null },
   mode: 'git-root' | 'source-root'): string | null {
   const path = resolveSourceLocalFilePath(root, page.source_path, page.slug, mode);
@@ -72,17 +83,43 @@ function recordedReconcilePath(root: string, page: { slug: string; source_path?:
   const recorded = recordedPathFromFileUri(page.source_uri, root);
   return recorded ? join(root, recorded) : null;
 }
-/** Refuses when another page of the source records the reconciled file as its own. */
+/**
+ * Refuses when another page of the source records the reconciled file as its own.
+ *
+ * #6222: candidates are the pages whose recorded origin can name this file the way
+ * recordedReconcilePath reads it, not every page sharing its file name: a source_path
+ * spelling of its lexical or real path (case folded), a basename-only legacy path whose
+ * slug directory leads to it, or, when the source_path cannot resolve, the file URI
+ * fallback. Only rows that contain the file name or match the URI reach the path
+ * normalization, and realpath decides each candidate. Not found from this side: a page
+ * whose path reaches the file only through another symlinked directory (or a Unicode
+ * normalization variant of a directory name) while this page records the real path.
+ * Finding it would take a filesystem lookup per same-named page; sync, import and
+ * canonical publication never record or follow such a path, and reconciling that page
+ * itself still refuses, since its real path names this page's origin.
+ */
 async function assertSoleFileClaim(engine: BrainEngine, target: { sourceId: string; slug: string; pageId: number; recordedUri: string | null;
   root: string; mode: 'git-root' | 'source-root'; path: string; canonicalPath: string }): Promise<void> {
   const { sourceId, slug, root, mode, path, canonicalPath } = target;
   const fileName = basename(path), uriName = pathToFileURL(path).pathname.split('/').pop()!;
+  const { origins, directories } = originSpellings(root, [path, canonicalPath]);
   const candidates = await engine.executeRaw<{ slug: string; source_path: string | null; source_uri: string | null }>(
-    `SELECT slug,source_path,source_uri FROM pages WHERE source_id=$1 AND id<>$2 AND (
-      regexp_replace(CASE WHEN $7::boolean THEN replace(btrim(source_path),chr(92),'/') ELSE btrim(source_path) END,'^.*/','')=$3
-      OR source_uri LIKE 'file:%' AND (right(source_uri,length($4::text))=$4 OR right(source_uri,length($5::text))=$5)
-      OR source_uri=$6) ORDER BY id LIMIT 101`,
-    [sourceId, target.pageId, fileName, `/${fileName}`, `/${uriName}`, target.recordedUri, process.platform === 'win32']);
+    `SELECT slug,source_path,source_uri FROM (
+      SELECT id,slug,source_path,source_uri,uri_names_file,
+        lower(array_to_string(array_remove(array_remove(string_to_array(path,'/'),''),'.'),'/')) AS origin,
+        lower(regexp_replace(array_to_string(array_remove(array_remove(string_to_array(btrim(slug),'/'),''),'.'),'/'),'/?[^/]*$','')) AS slug_dir,
+        path IS NULL OR path !~* '\\.mdx?$' OR left(path,1) IN ('/',chr(92)) OR path ~ '^[A-Za-z]:'
+          OR '/'||replace(path,chr(92),'/')||'/' LIKE '%/../%' AS uri_fallback
+      FROM (SELECT id,slug,source_path,source_uri,
+          regexp_replace(CASE WHEN $7::boolean THEN replace(source_path,chr(92),'/') ELSE source_path END,'^[[:space:]]+|[[:space:]]+$','','g') AS path,
+          source_uri LIKE 'file:%' AND (right(source_uri,length($4::text))=$4 OR right(source_uri,length($5::text))=$5) OR source_uri=$6 AS uri_names_file
+        FROM pages WHERE source_id=$1 AND id<>$2) p
+      WHERE position(lower($3) IN lower(path))>0 OR uri_names_file) c
+    WHERE origin IN (SELECT lower(o) FROM unnest($8::text[]) o)
+      OR origin=lower($3) AND slug_dir IN (SELECT lower(d) FROM unnest($9::text[]) d)
+      OR uri_fallback AND uri_names_file
+    ORDER BY id LIMIT 101`,
+    [sourceId, target.pageId, fileName, `/${fileName}`, `/${uriName}`, target.recordedUri, process.platform === 'win32', origins, directories]);
   if (candidates.length > 100) throw new OperationError('source_changed', 'Too many candidate page origins to verify this exact file safely.',
     'Review the recorded source paths before retrying this exact-page reconciliation.');
   for (const candidate of candidates) {
