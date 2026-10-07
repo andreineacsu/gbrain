@@ -17,8 +17,11 @@ export interface OnboardRecommendation extends RemediationStep {
   /**
    * A8 tiered apply policy:
    *   'auto_apply'      — autopilot may run unattended; runs under --auto
-   *   'prompt_required' — autopilot must skip; runs under --auto --yes
-   *   'manual_only'     — never runs unattended; CLI prompts user
+   *   'prompt_required' — meant to need --yes; onboard --auto does not read
+   *                       --yes yet, so it runs under --auto as well
+   *   'manual_only'     — never submitted by an automatic run (onboard
+   *                       --auto, MCP run_onboard, autopilot's targeted
+   *                       dispatch); the user runs the job
    * Default 'prompt_required' when omitted.
    */
   apply_policy?: 'auto_apply' | 'prompt_required' | 'manual_only';

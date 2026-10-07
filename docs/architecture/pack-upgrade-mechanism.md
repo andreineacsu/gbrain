@@ -141,6 +141,11 @@ The shipped onboard contract has 3 apply_policy values:
 | `prompt_required` | Autopilot in `--auto-with-prompt` mode prompts user |
 | `manual_only` | Autopilot NEVER auto-fires; user must explicitly submit |
 
+No automatic run submits a `manual_only` step: `runRemediation` (behind
+`gbrain onboard --auto` and MCP `run_onboard`) lists it in
+`manual_only_skipped`, `onboard --auto` prints the `gbrain jobs submit`
+command that runs it, and autopilot's targeted dispatch leaves it out.
+
 `pack_upgrade_available` emits a `RemediationStep` with `protected:
 true` + `job: 'unify-types'`. `toOnboardRecommendation` in
 `src/core/onboard/render.ts` maps this to `manual_only` via the
