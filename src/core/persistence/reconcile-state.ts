@@ -72,6 +72,33 @@ function recordedReconcilePath(root: string, page: { slug: string; source_path?:
   const recorded = recordedPathFromFileUri(page.source_uri, root);
   return recorded ? join(root, recorded) : null;
 }
+/** Refuses when another page of the source records the reconciled file as its own. */
+async function assertSoleFileClaim(engine: BrainEngine, target: { sourceId: string; slug: string; pageId: number; recordedUri: string | null;
+  root: string; mode: 'git-root' | 'source-root'; path: string; canonicalPath: string }): Promise<void> {
+  const { sourceId, slug, root, mode, path, canonicalPath } = target;
+  const fileName = basename(path), uriName = pathToFileURL(path).pathname.split('/').pop()!;
+  const candidates = await engine.executeRaw<{ slug: string; source_path: string | null; source_uri: string | null }>(
+    `SELECT slug,source_path,source_uri FROM pages WHERE source_id=$1 AND id<>$2 AND (
+      regexp_replace(CASE WHEN $7::boolean THEN replace(btrim(source_path),chr(92),'/') ELSE btrim(source_path) END,'^.*/','')=$3
+      OR source_uri LIKE 'file:%' AND (right(source_uri,length($4::text))=$4 OR right(source_uri,length($5::text))=$5)
+      OR source_uri=$6) ORDER BY id LIMIT 101`,
+    [sourceId, target.pageId, fileName, `/${fileName}`, `/${uriName}`, target.recordedUri, process.platform === 'win32']);
+  if (candidates.length > 100) throw new OperationError('source_changed', 'Too many candidate page origins to verify this exact file safely.',
+    'Review the recorded source paths before retrying this exact-page reconciliation.');
+  for (const candidate of candidates) {
+    const candidatePath = recordedReconcilePath(root, candidate, mode);
+    if (!candidatePath || !isWriteTargetContained(candidatePath, root)) continue;
+    let canonicalCandidate: string;
+    try { canonicalCandidate = realpathSync(candidatePath); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw opError('source_changed', 'A candidate canonical file origin could not be verified.',
+        `Nothing changed. Page ${candidate.slug} in '${sourceId}' records a file that could not be resolved; check that the source checkout is readable, then preview ${slug} again.`);
+    }
+    if (canonicalCandidate === canonicalPath) throw opError('source_changed', 'Several pages claim the recorded canonical file.',
+      `Nothing changed. Pages ${slug} and ${candidate.slug} in '${sourceId}' both record the same file, so reconcile cannot tell which owns it; decide with the user which page owns the file before reconciling either.`);
+  }
+}
 export async function readReconcileState(engine: BrainEngine, sourceId: string, slug: string, assessmentAt = new Date().toISOString()): Promise<ReconcileState> {
   const binding = await getWorktreeBinding(engine, sourceId);
   if (!binding?.local_path || binding.owner_host_id !== localHostId() || binding.state !== 'active') {
@@ -111,29 +138,9 @@ export async function readReconcileState(engine: BrainEngine, sourceId: string, 
     throw opError('request_too_large', 'The canonical file exceeds reconciliation capacity.',
       `Nothing changed. The canonical file of ${slug} in '${sourceId}' is larger than the journal's request and recovery limits; tell the user the page needs a manual edit of that file.`);
   }
-  const fileName = basename(path), uriName = pathToFileURL(path).pathname.split('/').pop()!;
-  const candidates = await engine.executeRaw<{ slug: string; source_path: string | null; source_uri: string | null }>(
-    `SELECT slug,source_path,source_uri FROM pages WHERE source_id=$1 AND id<>$2 AND (
-      regexp_replace(CASE WHEN $7::boolean THEN replace(btrim(source_path),chr(92),'/') ELSE btrim(source_path) END,'^.*/','')=$3
-      OR source_uri LIKE 'file:%' AND (right(source_uri,length($4::text))=$4 OR right(source_uri,length($5::text))=$5)
-      OR source_uri=$6) ORDER BY id LIMIT 101`,
-    [sourceId, snapshot.page.id, fileName, `/${fileName}`, `/${uriName}`, recorded ? snapshot.page.source_uri : null, process.platform === 'win32']);
-  if (candidates.length > 100) throw new OperationError('source_changed', 'Too many candidate page origins to verify this exact file safely.',
-    'Review the recorded source paths before retrying this exact-page reconciliation.');
   const canonicalPath = realpathSync(path);
-  for (const candidate of candidates) {
-    const candidatePath = recordedReconcilePath(root, candidate, mode);
-    if (!candidatePath || !isWriteTargetContained(candidatePath, root)) continue;
-    let canonicalCandidate: string;
-    try { canonicalCandidate = realpathSync(candidatePath); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
-      throw opError('source_changed', 'A candidate canonical file origin could not be verified.',
-        `Nothing changed. Page ${candidate.slug} in '${sourceId}' records a file that could not be resolved; check that the source checkout is readable, then preview ${slug} again.`);
-    }
-    if (canonicalCandidate === canonicalPath) throw opError('source_changed', 'Several pages claim the recorded canonical file.',
-      `Nothing changed. Pages ${slug} and ${candidate.slug} in '${sourceId}' both record the same file, so reconcile cannot tell which owns it; decide with the user which page owns the file before reconciling either.`);
-  }
+  await assertSoleFileClaim(engine, { sourceId, slug, pageId: snapshot.page.id, recordedUri: recorded ? snapshot.page.source_uri ?? null : null,
+    root, mode, path, canonicalPath });
   const raw = readFileSync(path), text = raw.toString('utf8');
   if (!Buffer.from(text).equals(raw)) throw opError('invalid_params', 'The canonical file must contain valid UTF-8.',
     `Nothing changed. Re-save the canonical file of ${slug} in '${sourceId}' as UTF-8, then preview the page again.`);
