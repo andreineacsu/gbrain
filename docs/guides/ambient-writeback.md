@@ -103,6 +103,16 @@ bank remains harmless — the target serve's own DB gate decides.
    (`--url` to a non-loopback serve) never installs instruction blocks: the
    local setting speaks for the local brain, and the remote brain's own MCP
    instructions carry the contract when *its* operator enables writeback.
+   When that operator gives the machine's grant the `session_capture` scope
+   (on source `default`), registrar mode wires the Stop, PreCompact and
+   SessionEnd hooks for
+   [remote session capture](bootstrap.md#remote-session-capture-registrar-mode):
+   the Stop backstop below then banks writeback turns for upload whatever
+   the local `memory.auto_writeback` says, because the host's gate decides. A
+   host with writeback off refuses them (`writeback_off`) and the machine
+   stops sending them; a host whose sweep is bound to another source refuses
+   session files and checkpoint segments while writeback turns still land
+   (`source_not_ingestable:sweep_source` in the client heartbeat).
 3. **The Claude Code Stop-hook backstop.** After each assistant turn, the
    hook gates the user's message through a deterministic, zero-LLM filter
    (min length — CJK-aware, pasted blocks removed, ack/greeting lexicon,

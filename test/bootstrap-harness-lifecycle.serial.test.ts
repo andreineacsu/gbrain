@@ -28,7 +28,9 @@ import { join } from 'path';
 import { runBootstrap } from '../src/commands/bootstrap.ts';
 import type { ExecRunner } from '../src/core/bootstrap/repo.ts';
 import { readHarnessReceiptState, writeHarnessReceipt } from '../src/core/bootstrap/format.ts';
+import { parseCaptureGrant, planRemoteCapture, readGrantCapabilities } from '../src/core/bootstrap/harness-capture.ts';
 import { CODEX_TOML_BLOCK_BEGIN } from '../src/core/bootstrap/host-specs.ts';
+import { captureCredentialPath, writeCaptureCredential } from '../src/core/context/capture-remote.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 const PORT = 19741; // unique to this suite (19735 = connect-bearer, 19131 = oauth)
@@ -41,6 +43,7 @@ describe('bootstrap harness lifecycle E2E (PGLite + real serve --http)', () => {
   let stubBin: string; // sandbox bin dir carrying a no-op `claude` (#4325)
   let server: ChildProcess | null = null;
   let token = '';
+  let captureToken = ''; // read,write,session_capture: the grant a registered machine captures with (#5577)
   let serverReady = false;
 
   const userSettings = () => join(sandboxHome, '.claude', 'settings.json');
@@ -153,6 +156,13 @@ describe('bootstrap harness lifecycle E2E (PGLite + real serve --http)', () => {
     token = (authOut.match(/gbrain_[a-f0-9]{64}/) ?? [''])[0];
     if (!token) throw new Error(`auth create did not yield a token:\n${authOut}`);
     expect(authOut).toContain('scopes=["read","write"]');
+    const captureOut = execFileSync(
+      'bun',
+      ['run', 'src/cli.ts', 'auth', 'create', 'capture-laptop', '--scopes', 'read,write,session_capture'],
+      { cwd: process.cwd(), env, encoding: 'utf8' },
+    );
+    captureToken = (captureOut.match(/gbrain_[a-f0-9]{64}/) ?? [''])[0];
+    if (!captureToken) throw new Error(`auth create did not yield a capture token:\n${captureOut}`);
 
     server = spawn('bun', [
       'run', 'src/cli.ts', 'serve', '--http',
@@ -267,8 +277,33 @@ describe('bootstrap harness lifecycle E2E (PGLite + real serve --http)', () => {
     } finally { writeHarnessReceipt(home, state.receipt); }
   }, 60_000);
 
+  test('#5577 the real gbrain://capabilities read: the session_capture grant can capture, the read,write one gets the rescope line', async () => {
+    expect(serverReady).toBe(true);
+    const mcpUrl = `${BASE}/mcp`;
+    const scoped = parseCaptureGrant(await readGrantCapabilities(mcpUrl, captureToken));
+    expect(scoped.ok && scoped.grant).toMatchObject({ transport: 'legacy', clientId: 'capture-laptop', allowedOperations: null, sourceId: 'default' });
+    expect(scoped.ok && scoped.grant.availableOperations).toContain('corpus_append');
+    // The decision itself, through the same read (loopback HTTP passes the endpoint check).
+    const plan = async (bearer: string) => {
+      const lines: string[] = [];
+      const p = await planRemoteCapture({
+        registrarMode: true, wireClaude: true, noHooks: false, noCapture: false, url: mcpUrl, token: bearer,
+        home: join(parent, '.gbrain'), prior: null, userSettingsPath: join(sandboxHome, 'none', 'settings.json'), projects: [], fileConfig: null,
+      }, { readCapabilities: (u, t) => readGrantCapabilities(u, t), log: (l) => lines.push(l) });
+      return { p, lines };
+    };
+    expect((await plan(captureToken)).p).toMatchObject({ on: true, grant: 'capture-laptop' });
+    const unscoped = await plan(token);
+    expect(unscoped.p).toEqual({ on: false, reason: 'scope_missing' });
+    expect(unscoped.lines.at(-1)).toContain("gbrain auth rescope --token bootstrap-harness --scopes 'read,write,session_capture'");
+    const bad = await plan(`gbrain_${'0'.repeat(64)}`);
+    expect(bad.p).toEqual({ on: false, reason: 'grant_auth' });
+  }, 60_000);
+
   test('--remove: host wiring cleared, codex config byte-identical to pre-apply, receipt consumed', async () => {
     const { runner } = makeClaudeRunner();
+    // #5577: a capture credential this receipt does not record goes with the install.
+    writeCaptureCredential(join(parent, '.gbrain'), { mcp_url: 'https://brain.example.test/mcp', access_token: captureToken });
     const { result } = await withEnv(envFor(), () =>
       capture(() => runBootstrap(['harness', '--remove', '--yes'], { runner, harnessDetect: HARNESS_DETECT })),
     );
@@ -278,6 +313,7 @@ describe('bootstrap harness lifecycle E2E (PGLite + real serve --http)', () => {
     expect(settings.permissions).toBeUndefined();
     expect(settings.hooks).toBeUndefined();
     expect(readHarnessReceiptState(join(parent, '.gbrain'))).toEqual({ state: 'absent' });
+    expect(existsSync(captureCredentialPath(join(parent, '.gbrain')))).toBe(false);
   }, 60_000);
 
   test('scoped token is honored end-to-end: an admin-scope op is refused over MCP', async () => {

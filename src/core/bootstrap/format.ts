@@ -226,11 +226,14 @@ export function writeReceipt(gbrainHomeDir: string, receipt: InstallReceipt): vo
 // completes. A crash at any step leaves a receipt --remove can consume.
 // ---------------------------------------------------------------------------
 
-// 'instructions' (the ambient-writeback managed block) is ADDITIVE under
-// harness_receipt_version 1 — a version bump would make older binaries refuse
-// the whole receipt (bricking --remove of EVERY target), so instead older
-// binaries simply won't unwire this kind on --remove: a documented limitation.
-export type HarnessTargetKind = 'mcp' | 'permission' | 'hooks' | 'instructions';
+// 'instructions' (the ambient-writeback managed block) and 'capture' (the
+// registrar-mode upload credential, #5577; `path` is the credential file, never
+// its content) are ADDITIVE under harness_receipt_version 1 — a version bump
+// would make older binaries refuse the whole receipt (bricking --remove of
+// EVERY target), so instead older binaries simply won't unwire these kinds on
+// --remove: a documented limitation. A receipt without a 'capture' target
+// records capture off.
+export type HarnessTargetKind = 'mcp' | 'permission' | 'hooks' | 'instructions' | 'capture';
 export type HarnessTargetState = 'pending' | 'confirmed' | 'failed';
 
 export interface HarnessTarget {
@@ -247,8 +250,10 @@ export interface HarnessTarget {
   entry?: string;
   /** Hook marker value (hooks targets). */
   marker?: string;
-  /** Write mechanism note, e.g. 'toml-block' vs 'claude-cli'. */
+  /** Write mechanism note, e.g. 'toml-block' vs 'claude-cli'; 'capture' on the hooks targets of remote capture. */
   mechanism?: string;
+  /** The grant the host attributes uploaded sessions to, as the serve reported it (capture targets). */
+  grant?: string;
   /** One-line failure reason when state === 'failed'. */
   error?: string;
 }

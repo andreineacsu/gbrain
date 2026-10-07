@@ -240,7 +240,7 @@ mode wires them in one command, with no `agent.json` and no interview:
   also enabled, two `gbrain` servers exist in different layers — the wire
   proceeds with a loud WARNING and `gbrain doctor` reports the collision
   (`plugin_lane_collision`); keep one (`codex plugin remove gbrain@gbrain`, or
-  `--remove` here). Unless `--no-hooks`, the harness lane also installs the
+  `--remove` here). Unless `--no-hooks` or registrar mode, the harness lane also installs the
   codex SessionEnd capture hook — the user-global `hooks.json` entry plus its
   `config.toml` trust entry beside the target config (codex hooks are silently
   inert without the trust pair; the write backs the config up to
@@ -272,8 +272,9 @@ mode wires them in one command, with no `agent.json` and no interview:
   goes to stderr).
 - The full flag surface lives in `gbrain bootstrap --help`: `--url`/`--port`
   point at a non-default serve (a non-loopback `--url` is refused unless you
-  also pass `--token`, which flips into registrar mode — MCP wiring only, no
-  hooks, nothing minted), `--force` replaces a foreign same-name MCP
+  also pass `--token`, which flips into registrar mode — MCP wiring, nothing
+  minted, and hooks only for [remote session capture](#remote-session-capture-registrar-mode)
+  when the host granted it), `--force` replaces a foreign same-name MCP
   registration, `--name` renames the server, `--harness` picks the hosts,
   and `--no-hooks` skips hook wiring entirely.
 - `--remove` tears down exactly what the machine-level receipt
@@ -297,6 +298,99 @@ binary without token scoping verifies every scoped token as FULL-ACCESS (its
 verify path never reads the scopes column). If you
 downgrade after a harness install, revoke the scoped tokens first
 (`gbrain auth revoke` with the id flag) and re-mint once you upgrade again.
+
+### Remote session capture (registrar mode)
+
+A machine registered against another machine's serve (`--url https://…/mcp
+--token <bearer>`) sends its Claude Code sessions to that brain once the host
+operator gives the grant the `session_capture` scope. Without the scope the
+machine stays MCP only. The host decides: the command wires capture only when
+the serve reports that the grant may call `corpus_append`.
+
+**Say to your agent:** *"Send this laptop's Claude Code sessions to my brain on
+the other machine"*. On the registered machine the agent runs
+`gbrain bootstrap harness --url https://your-machine.your-tailnet.ts.net/mcp --token <bearer> --harness claude-code`
+and relays the consent block to you.
+
+1. **On the brain host**, give this machine's grant the scope. `--scopes`
+   replaces the set, so list the grant's current scopes too; a grant with an
+   operation snapshot also needs the operation. `gbrain auth list` prints
+   each token's scopes and `gbrain auth clients --json` each OAuth client's
+   stored grant (scopes, source, operation snapshot), and the
+   `capture not wired` line on the registered machine names the exact
+   command for its grant:
+
+   ```bash
+   # a token from gbrain auth create (no operation snapshot): the secret stays the same
+   gbrain auth rescope --token laptop-example --scopes read,write,session_capture
+   # a token with an operation snapshot: also add the operation to it
+   gbrain auth rescope --token laptop-example --scopes read,write,session_capture --refresh-operations --add corpus_append
+   # an OAuth client: --scopes takes the client's complete list from
+   # gbrain auth clients --json (an access token can carry fewer),
+   # --operations replaces the snapshot when it has one; then issue a new
+   # access token (a token keeps the scopes it was issued with)
+   gbrain auth rescope --client CLIENT_ID --scopes <complete scope list>,session_capture --operations <current list>,corpus_append
+   ```
+
+   Use one grant per machine: the host attributes every uploaded session to
+   the grant that sent it, so two machines sharing a grant cannot be told
+   apart. The grant must write to source `default` (a token the serve reports
+   no source for counts as `default`); a grant on another source is refused.
+2. **On the registered machine**, run the command above. It reads the grant
+   through the bearer (`gbrain://capabilities`) and, when the grant may
+   capture, wires the Stop, PreCompact and SessionEnd hooks (never
+   SessionStart or UserPromptSubmit, which need a local serve) and stores the
+   serve URL and bearer in `<gbrain home>/capture-remote/credentials.json`
+   (0600). The consent block states the upload, the hooks, the credential
+   path, and that the first upload includes every session artifact already in
+   this machine's session corpus directory (the upload spool). The consent
+   request declares the `egress` effect, so a `persistent_install`
+   preapproval alone does not cover it and a non-interactive run needs
+   `--yes`. The summary names the grant the host attributes sessions to.
+3. **Confirm** with `gbrain bootstrap harness --status`: it prints
+   `remote capture: ON` with the grant and the sessions the capture hooks
+   reach (every one on the machine, or only those in the `--project` dirs)
+   and names any artifact kind the host stopped, and reads `failed` (exit 1)
+   when the credential is missing or names another serve, or when the host
+   stopped every upload, the whole lane or each artifact kind (nothing
+   uploads until you re-run the registration after the host-side fix, which
+   clears the stop). Each upload run appends one
+   line (event `capture-upload`, sent/pending/refused counts and one reason
+   code, never content or the bearer) to
+   `<gbrain home>/integrations/hooks/heartbeat.jsonl`.
+
+When capture stays off, the run keeps the MCP registration and `--json`
+carries `remote_capture: {state: "off", reason}`. When the grant, the URL or
+another install keeps it off, the run also prints the registrar note and one
+line `capture not wired (<reason>): …` with the step that turns it on:
+`scope_missing`, `operation_not_granted`, `operation_unavailable`
+(a serve older than this gbrain, a narrowed `--surface`, a slug-prefix-bound
+grant), `grant_source` (with the step that binds the grant to `default`),
+`grant_unreadable` and `grant_auth` (the grant could not be read; hooks are
+never wired on a guess), `insecure_endpoint` (plain HTTP on a non-loopback
+host, decided before the grant is read) and `local_hooks_present` (harness
+hooks another gbrain install wrote into the same settings file would
+double-fire). Three reasons print no `capture not wired` line: `opted_out`
+(`--no-capture`, which still prints the registrar note, or `--no-hooks`,
+which prints neither), `claude_code_not_wired` (a registrar run that wires no
+Claude Code, such as `--harness codex`) and `not_registrar` (a local-mode run).
+
+- A host whose sweep is bound to another source stores no session files or
+  checkpoint segments from this machine while writeback turns still land; the
+  heartbeat records that as `source_not_ingestable:sweep_source`.
+- Registrar mode wires no Codex SessionEnd hook, and removes the one an
+  earlier harness run on this gbrain home wrote beside a recorded codex
+  config. The spool is still the whole directory: a session anything else
+  banks there is uploaded too.
+- The install is all or nothing: a credential that cannot be written, a
+  failed smoke test or a Claude Code MCP registration that did not land
+  removes the capture wiring the run added and marks its targets failed.
+- Re-running is idempotent. A re-run whose grant lost the scope, `--no-capture`,
+  `--no-hooks` and a local-mode run remove the capture hooks and the
+  credential; `--remove` removes both with the rest of the install, and a
+  removal that fails stays on the receipt as a failed target.
+- `--seat` keeps its meaning for local hooks; the host stamps uploaded
+  sessions from the grant instead.
 
 ## Multi-device
 

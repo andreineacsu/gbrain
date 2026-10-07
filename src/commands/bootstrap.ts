@@ -154,6 +154,11 @@ Subcommands (run \`gbrain bootstrap status\` first — it is the resume entrypoi
                                   pre-approval, lifecycle hooks (user scope, or per --project
                                   dir), codex config block, opencode config entry. No
                                   agent.json needed. Idempotent; --remove tears it down.
+                                  A non-loopback HTTPS --url with --token registers a remote
+                                  serve (registrar mode): MCP only, plus the Stop/PreCompact/
+                                  SessionEnd capture hooks that upload this machine's sessions
+                                  when the serve reports the grant holds session_capture on
+                                  source default (--no-capture opts out; --status shows it).
                                   --source ID: the source the hooks + token bind to
                                   (default: sources.default, else the sole populated
                                   non-default source, else default).
@@ -229,6 +234,8 @@ const SUBCOMMAND_HELP: Record<string, string> = {
     '                       [--seat <label> | --no-seat]\n' +
     '  Wire framework-spawned Claude Code / Codex / opencode sessions to a RUNNING `gbrain serve --http`\n' +
     '  on this box (#4043). Idempotent; --remove tears it down. (--local is an accepted no-op alias.)\n' +
+    '  Registrar mode (non-loopback --url + --token): MCP only, plus the three capture hooks when the serve\n' +
+    '  reports the grant holds session_capture on source default (--no-capture opts out).\n' +
     '  See `gbrain bootstrap --help` for the per-flag description.',
 };
 

@@ -16,11 +16,13 @@ export interface HarnessConsentInput {
   skillsPolicy: 'follow' | 'memory-only';
   wireHooks: boolean;
   hookScope: string;
+  /** #5577 registrar-mode capture statement (harness-capture.ts captureConsentStatement); planned capture adds the `egress` effect. */
+  capture?: string;
 }
 
 /** Resolves true when authorized; false after the refusal was printed. */
 export async function askHarnessConsent(input: HarnessConsentInput, d: { isTTY: boolean; prompt: (q: string) => Promise<string> }): Promise<boolean> {
-  const { flags, url, harnesses, wireHooks, hookScope } = input;
+  const { flags, url, harnesses, wireHooks, hookScope, capture } = input;
   const argv = ['gbrain', 'bootstrap', 'harness'];
   for (let i = 0; i < flags.raw.length; i++) {
     const a = flags.raw[i]!;
@@ -31,13 +33,15 @@ export async function askHarnessConsent(input: HarnessConsentInput, d: { isTTY: 
   const scopes = input.skillsPolicy === 'follow' ? 'read, write, skills_member_self' : 'read, write';
   const auth = await consentGate({
     command: 'bootstrap harness',
-    effects: flags.token === undefined ? ['persistent_install', 'credentials'] : ['persistent_install'],
+    // Session upload leaves the machine: `egress` keeps a persistent_install
+    // preapproval alone from authorizing it, so a non-interactive run needs --yes.
+    effects: [...(flags.token === undefined ? ['persistent_install', 'credentials'] as const : ['persistent_install'] as const), ...(capture ? ['egress'] as const : [])],
     actor: 'agent',
     what: `Wire ${harnesses} to the gbrain serve at ${url}`,
     why: 'Registers the brain\'s memory tools (and the session hooks) in the agent harness so new sessions recall from and save to this brain.',
     risk: `${flags.token === undefined ? `Mints a bearer token "${flags.tokenName}" with scopes ${scopes} and stores it in the harness config. ` : 'Stores the supplied token in the harness config (pass the same --token again). '}`
-      + `Changes the harness configuration persistently${wireHooks ? `, including session hooks (${hookScope})` : ''}. Undo: gbrain bootstrap harness --remove.`,
-    user_message: `Connect ${harnesses} to your brain at ${url}? It adds gbrain's memory tools${wireHooks ? ' and session hooks' : ''} to the harness configuration; gbrain bootstrap harness --remove undoes it.`,
+      + `Changes the harness configuration persistently${wireHooks ? `, including session hooks (${hookScope})` : ''}.${capture ? ` ${capture}` : ''} Undo: gbrain bootstrap harness --remove.`,
+    user_message: `Connect ${harnesses} to your brain at ${url}? It adds gbrain's memory tools${wireHooks ? ' and session hooks' : ''} to the harness configuration; gbrain bootstrap harness --remove undoes it.${capture ? ` ${capture}` : ''}`,
     argv,
     args: flags.yes ? ['--yes'] : [],
   }, {

@@ -352,7 +352,9 @@ Per-client notes:
 - **Coding agents on another tailnet machine** — for the private machine
   path, use `gbrain connect <url> --harness <id> --credentials-file <private-file> --install`.
   Native OAuth uses the native registration/settings path instead
-  ([Claude Code](../mcp/CLAUDE_CODE.md), [Codex](../mcp/CODEX.md)).
+  ([Claude Code](../mcp/CLAUDE_CODE.md), [Codex](../mcp/CODEX.md)). To also
+  send that machine's Claude Code sessions to this brain, see
+  [capture sessions from another machine](#capture-sessions-from-another-machine).
 - **ChatGPT, Perplexity, Claude Cowork** — cloud connectors: `--funnel`, then
   the client guide ([ChatGPT](../mcp/CHATGPT.md),
   [Perplexity](../mcp/PERPLEXITY.md), [Cowork](../mcp/CLAUDE_COWORK.md)).
@@ -379,6 +381,39 @@ Removing the exposure/service does not revoke client registrations or erase
 brain data. To end one client's access, follow the distinct preview/revision
 flows for token invalidation, revocation, or deletion in
 [MCP administration](../mcp/ADMIN.md#invalidate-tokens-revoke-or-delete).
+
+### Capture sessions from another machine
+
+A Claude Code machine registered against this server with
+`gbrain bootstrap harness --url <https url> --token <bearer>` gets MCP only,
+until you give its grant the `session_capture` scope here. Then the same
+command also wires the Stop, PreCompact and SessionEnd hooks there, and each
+session is secret-scanned on that machine and uploaded into this brain's
+session corpus, attributed to the grant, for the sweep and dream synthesis.
+
+**Say to your agent:** *"send my laptop's Claude Code sessions to my brain"*.
+
+```bash
+# On this host: --scopes replaces the set (keep the current scopes). A token
+# from gbrain auth create has no operation snapshot:
+gbrain auth rescope --token laptop-example --scopes read,write,session_capture
+# A token with an operation snapshot also needs corpus_append in it:
+gbrain auth rescope --token laptop-example --scopes read,write,session_capture --refresh-operations --add corpus_append
+# (An OAuth client takes its complete scope list, then a new access token.)
+# On the other machine (HTTPS only):
+gbrain bootstrap harness --url https://your-machine.your-tailnet.ts.net/mcp --token <bearer> --harness claude-code --yes
+gbrain bootstrap harness --status   # "remote capture: ON" and the grant
+```
+
+Use one grant per machine so their sessions can be told apart, on source
+`default`: a grant on another source is not captured, and a server whose
+sweep is bound to another source stores no session files or checkpoint
+segments (writeback turns still land; the client's heartbeat records
+`source_not_ingestable:sweep_source`). Upload outcomes are in the other
+machine's `<gbrain home>/integrations/hooks/heartbeat.jsonl` (event
+`capture-upload`). Without the scope the command prints one line naming the
+exact host command; details in
+[remote session capture](bootstrap.md#remote-session-capture-registrar-mode).
 
 ## Writing many pages
 

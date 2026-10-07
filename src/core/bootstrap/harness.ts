@@ -42,6 +42,8 @@
 
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { askHarnessConsent } from './harness-consent.ts';
+import * as remoteCapture from './harness-capture.ts';
+import { writeCaptureCredential } from '../context/capture-remote.ts';
 import { CONFIRMATION_REQUIRED_EXIT_CODE } from '../exit-codes.ts';
 import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -340,6 +342,9 @@ export interface HarnessDeps {
   resolveHookSource?: (explicit: string | null) => Promise<HookSourceBinding>;
   /** Live-PGLite-serve pre-probe for the revoke lane [C9]. */
   pgliteLiveServe?: () => boolean;
+  /** #5577 registrar-mode capture: the supplied bearer's `gbrain://capabilities` read, and the credential writer. Tests inject both. */
+  readCapabilities?: (url: string, token: string) => Promise<unknown>;
+  writeCaptureCredential?: (home: string, input: { mcp_url: string; access_token: string }) => string;
   detectClaude?: () => boolean;
   detectCodex?: () => boolean;
   detectOpencode?: () => boolean;
@@ -383,6 +388,8 @@ export function resolveHarnessDeps(deps: HarnessDeps): Required<Omit<HarnessDeps
     revokeById: deps.revokeById ?? defaultRevokeById,
     resolveHookSource: deps.resolveHookSource ?? defaultResolveHookSource,
     pgliteLiveServe: deps.pgliteLiveServe ?? defaultPgliteLiveServe,
+    readCapabilities: deps.readCapabilities ?? remoteCapture.readGrantCapabilities,
+    writeCaptureCredential: deps.writeCaptureCredential ?? writeCaptureCredential,
     // #4325: config-dir fallback mirrors detectCodex/detectOpencode below —
     // CI runners and alias-only shells don't expose a `claude` binary on the
     // probing process's PATH even when Claude Code is configured.
@@ -550,6 +557,8 @@ export function buildConsentBlock(p: {
    * apply will write [X7 parity]. */
   instructionsPaths?: string[];
   skills?: 'follow' | 'memory-only';
+  /** #5577 registrar-mode capture plan: replaces the local hook lines with the capture lines. */
+  remoteCapture?: Extract<remoteCapture.RemoteCapturePlan, { on: true }>;
 }): string {
   const lines: string[] = [
     'gbrain bootstrap harness — wire framework-spawned coding sessions to this brain',
@@ -557,10 +566,12 @@ export function buildConsentBlock(p: {
     'Will do, on this machine:',
   ];
   let n = 1;
+  // Every private file the supplied bearer is copied into besides the host registrations.
+  const copies = [...(p.skills === 'follow' ? ['a private 0600 enrollment cleanup credential'] : []), ...(p.remoteCapture ? [`the session-capture credential ${p.remoteCapture.credentialPath} (0600)`] : [])];
   lines.push(
     p.tokenSupplied
-      ? `  ${n++}. Use the supplied bearer token — written ${p.skills === 'follow' ? 'into' : 'ONLY into'} the host registrations below ` +
-          `${p.skills === 'follow' ? 'and a private 0600 enrollment cleanup credential' : '(gbrain keeps no copy)'}. ` +
+      ? `  ${n++}. Use the supplied bearer token — written ${copies.length > 0 ? 'into' : 'ONLY into'} the host registrations below ` +
+          `${copies.length > 0 ? `and ${copies.join(' and ')}` : '(gbrain keeps no copy)'}. ` +
           `The remove flow does NOT revoke supplied tokens (they are not ours to revoke).`
       : `  ${n++}. Mint an independent bearer token per harness under '${p.tokenName}' (scopes: ${p.scopes.join('+')}; sees takes marked 'world'; ` +
           `reads span this brain's federated sources). Any prior harness token is revoked ` +
@@ -574,7 +585,8 @@ export function buildConsentBlock(p: {
       `  ${n++}. Claude Code (user scope): register MCP server '${p.name}' -> ${p.url}, and ` +
         `pre-approve its tools for headless runs (permissions.allow entry 'mcp__${p.name}' in ${p.userSettingsPath}).`,
     );
-    if (p.hooks) {
+    if (p.remoteCapture) for (const line of remoteCapture.captureConsentLines(p.remoteCapture, p.hookScope)) lines.push(`  ${n++}. ${line}`);
+    else if (p.hooks) {
       lines.push(
         `  ${n++}. Wire the five lifecycle hooks (SessionStart/UserPromptSubmit/Stop/SessionEnd/PreCompact) in ${p.hookScope}.`,
       );
@@ -619,6 +631,7 @@ export function buildConsentBlock(p: {
   const hosts = `EVERY ${hostNames.join(' and ')} session`;
   const hookLine = !p.wireClaude || !p.hooks
     ? 'No hooks are wired by this invocation.'
+    : p.remoteCapture ? `Capture hooks run in ${remoteCapture.captureHookReach(p.remoteCapture)} and upload to ${p.remoteCapture.url}.`
     : p.capture
       ? 'Hooks run in every Claude Code session (context injection + transcript capture); auto-commit/push lanes stay inert outside gbrain agent workspaces.'
       : 'Hooks run in every Claude Code session (context injection only — capture is OFF); auto-commit/push lanes stay inert outside gbrain agent workspaces.';
@@ -636,6 +649,7 @@ export function buildConsentBlock(p: {
     'framework-spawned agent — can read AND write this brain through these tools.',
     hookLine,
     `Off-ramps: ${offRamps.join(', ')}.`,
+    ...(p.remoteCapture ? [remoteCapture.CAPTURE_OFF_RAMPS] : []),
   );
   return lines.join('\n');
 }
@@ -927,15 +941,10 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
     return 2;
   }
   // [X13] Registrar mode: a non-loopback --url + --token registers a REMOTE
-  // serve, but hooks always talk to the LOCAL brain (gbrain bin + local
-  // config) — wiring them here would split-brain the box. MCP only.
+  // serve, but the context hooks talk to the LOCAL brain (gbrain bin + local
+  // config) — wiring them here would split-brain the box. MCP only, plus the
+  // three capture hooks when the serve says the grant may capture (#5577).
   const registrarMode = flags.url !== undefined && !isLoopbackHostname(hostname);
-  if (registrarMode && !flags.noHooks && wireClaude) {
-    d.log(
-      'registrar mode (non-loopback url): hooks are NOT wired — they would talk to the LOCAL brain, ' +
-        'not the registered remote serve. MCP registration only.',
-    );
-  }
   const health = await probeServeHealth(url, d.fetchFn);
   if (!health.ok) {
     d.logError(
@@ -944,6 +953,10 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
     );
     return 1;
   }
+  const priorState = readHarnessReceiptState(d.gbrainHome);
+  const prior = priorState.state === 'ok' ? priorState.receipt : null;
+  const remote = await remoteCapture.planRemoteCapture({ registrarMode, wireClaude, noHooks: flags.noHooks, noCapture: flags.noCapture, url,
+    token: flags.token, home: d.gbrainHome, prior, userSettingsPath: d.userSettingsPath, projects: flags.projects, fileConfig: d.loadFileConfig() }, d);
 
   // 2b. Ambient-writeback gate (WP3): resolved from the FILE plane only —
   // this lane is engine-free by design (the DB plane stays authoritative for
@@ -970,9 +983,7 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
     : [];
 
   // 3. Consent (connect --install shape; never the interview/A8 ledger).
-  const wireHooks = wireClaude && !flags.noHooks && !registrarMode;
-  const priorState = readHarnessReceiptState(d.gbrainHome);
-  const prior = priorState.state === 'ok' ? priorState.receipt : null;
+  const wireHooks = (wireClaude && !flags.noHooks && !registrarMode) || remote.on;
   const skillsPolicy = flags.skills ?? prior?.skills_policy ?? (priorState.state === 'absent' ? 'follow' : 'memory-only');
   const hookScope = flags.projects.length > 0 ? `${flags.projects.length} project dir(s)` : 'user scope';
   const consent = buildConsentBlock({
@@ -992,10 +1003,12 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
     codexConfig: d.codexConfig,
     opencodeConfig: d.opencodeConfig,
     ...(instructionsPaths.length > 0 ? { instructionsPaths } : {}),
+    ...(remote.on ? { remoteCapture: remote } : {}),
   });
   d.log(consent);
   const harnesses = [wireClaude ? 'Claude Code' : null, wireCodex ? 'Codex' : null, wireOpencode ? 'opencode' : null].filter(Boolean).join(', ');
-  if (!(await askHarnessConsent({ flags, url, harnesses, skillsPolicy, wireHooks, hookScope }, d))) return CONFIRMATION_REQUIRED_EXIT_CODE;
+  if (!(await askHarnessConsent({ flags, url, harnesses, skillsPolicy, wireHooks, hookScope,
+    capture: remote.on ? remoteCapture.captureConsentStatement(remote) : undefined }, d))) return CONFIRMATION_REQUIRED_EXIT_CODE;
 
   // Prior receipt: carries the previous minted token for post-wire rotation
   // [C7], and the prior hook-scope for the user-XOR-project exclusivity check
@@ -1191,6 +1204,7 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
       mechanism: 'jsonc-entry',
     });
   }
+  remoteCapture.planCaptureTargets(targets, remote);
   // [X4] EVERY unrevoked prior minted id is carried — on the --token lane
   // too. A failed rotation must never forget the token before last.
   const carriedPreviousIds = [...new Set([
@@ -1280,12 +1294,14 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
     save();
     d.logError(`FAILED (${t.host}/${t.kind}${t.scope !== 'user' ? ` ${t.scope}` : ''}): ${err}`);
   };
+  // #5577: capture converges off before any hook is written, so none uploads under a credential this receipt omits.
+  const captureOffFailure = await remoteCapture.convergeBeforeApply({ plan: remote, registrarMode, prior }, { home: d.gbrainHome, log: d.log, logError: d.logError });
 
   // 6. Claude Code wiring — under a config-dir lock [X11]: serializes gbrain
   // writers (even with different GBRAIN_HOMEs) against the same user-scope
   // files. The race with Claude Code ITSELF is irreducible by any lock we
   // hold; the docs say so.
-  const hookEvents: ClaudeHookEvent[] = flags.noCapture
+  const hookEvents: ClaudeHookEvent[] = remote.on ? [...remoteCapture.CAPTURE_HOOK_EVENTS] : flags.noCapture
     ? ([...CLAUDE_HOOK_EVENTS].filter((e) => e !== 'Stop' && e !== 'SessionEnd') as ClaudeHookEvent[])
     : [...CLAUDE_HOOK_EVENTS];
   // [X5] Captured for rollback: the previous working claude registration and
@@ -1411,6 +1427,8 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
         installAmbientWritebackBlockAt(t.path, ambientBody);
         confirm(t);
         d.log(`ambient-writeback instruction block installed in ${t.path} (mode: ${wb.mode}).`);
+      } else if (t.kind === 'capture') {
+        remoteCapture.wireCaptureCredential(t, targets, { home: d.gbrainHome, url, token, write: d.writeCaptureCredential, confirm, failTarget, log: d.log });
       } else {
         const settingsPath = t.scope === 'user' ? d.userSettingsPath : t.path!;
         const env: ClaudeHookEnv = {
@@ -1537,9 +1555,9 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
       // Codex SessionEnd capture (v1: session-end only): user-global
       // hooks.json + its config.toml trust entry via the ONE writer
       // (codex-hooks.ts) — idempotent, so a workspace-lane bootstrap and this
-      // harness lane converge on the same entry. No GBRAIN_SOURCE in the
-      // command (machine-global file; session-end resolves from the payload).
-      if (!flags.noHooks) {
+      // harness lane converge on the same entry. No GBRAIN_SOURCE (machine-global
+      // file; session-end resolves from the payload). None in registrar mode [X13].
+      if (!flags.noHooks && !registrarMode) {
         const hooksBin = flags.gbrainBin ?? d.gbrainBin;
         if (!hooksBin) {
           d.logError('codex hooks skipped: cannot resolve an absolute gbrain binary path — pass --gbrain-bin <abs path>.');
@@ -1784,6 +1802,7 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
         failTarget(it, 'smoke failed and the instruction block could not be removed — run `gbrain bootstrap harness --remove` to converge');
       }
     }
+    remoteCapture.undoCaptureWiring(targets, { home: d.gbrainHome, failTarget, log: d.log }, 'capture removed after the failed smoke');
     // The fresh mint was sent to an endpoint that failed verification — a
     // possible impostor now holds a live credential. Retire it immediately
     // (we minted it, so the engine is reachable); the receipt keeps the id,
@@ -1818,6 +1837,8 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
   // failures append as failed targets (blocking the rotation gate below) so
   // --remove or a re-run retries them. Runs under the config-dir lock: it
   // mutates the same user-scope files the apply loop serializes on [X11].
+  // Capture converges off first, smoke or not: removing it never disconnects.
+  if (!remote.on) await remoteCapture.convergeCaptureOff(prior, receipt, captureOffFailure, { userSettingsPath: d.userSettingsPath, log: d.log, logError: d.logError, save });
   if (prior && smokeOk) {
     const cfgDir = dirname(d.userSettingsPath);
     mkdirSync(cfgDir, { recursive: true });
@@ -1982,7 +2003,8 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
     );
   }
 
-  // 11. Degradation + skew honesty.
+  // 11. Degradation + skew honesty; the grant captured sessions are attributed to [#5577 R9].
+  if (remote.on) d.log(remoteCapture.captureStatusLine(targets, d.gbrainHome, url) ?? '');
   if (health.engine === 'postgres') {
     d.log(
       '\nNote: this brain runs on Postgres — per-turn hook injection needs a running `gbrain serve` for this ' +
@@ -2013,6 +2035,7 @@ export async function applyHarness(flags: HarnessFlags, rawDeps: HarnessDeps): P
           shared_skills: receipt.shared_skills,
           degraded_per_turn: health.engine === 'postgres',
           smoke_ok: smokeOk,
+          remote_capture: remoteCapture.captureJson(remote, targets),
           receipt_path: harnessReceiptPath(d.gbrainHome),
         },
         null,
@@ -2029,17 +2052,20 @@ export async function removeHarness(flags: HarnessFlags, rawDeps: HarnessDeps): 
   const d = resolveHarnessDeps(rawDeps);
   const state = readHarnessReceiptState(d.gbrainHome);
   if (state.state === 'absent') {
+    const orphan = remoteCapture.removeOrphanCaptureCredential(d.gbrainHome, d.log);
+    if (orphan) d.logError(`could not remove the capture credential at ${orphan.path}: ${orphan.error}`);
     d.log('nothing harness-installed on this machine (no harness receipt).');
-    return 0;
+    return orphan ? 1 : 0;
   }
   if (state.state === 'newer') {
     d.logError('the harness receipt was written by a newer gbrain — upgrade gbrain before removing.');
     return 1;
   }
   if (state.state === 'invalid') {
+    const orphan = remoteCapture.removeOrphanCaptureCredential(d.gbrainHome, d.log, 'the receipt that would record it is unreadable');
     d.logError(
       `the harness receipt at ${harnessReceiptPath(d.gbrainHome)} is unreadable — fix or delete it, then ` +
-        'remove any stragglers by hand (claude mcp remove / the codex config block / hook entries).',
+        `remove any stragglers by hand (claude mcp remove / the codex config block / hook entries${orphan ? ` / the capture credential at ${orphan.path} (${orphan.error})` : ''}).`,
     );
     return 1;
   }
@@ -2084,6 +2110,8 @@ export async function removeHarness(flags: HarnessFlags, rawDeps: HarnessDeps): 
               : `no ambient-writeback block in ${t.path} — counted as removed.`,
           );
         }
+      } else if (t.kind === 'capture') {
+        d.log(remoteCapture.removeCaptureCredential(d.gbrainHome) ? `capture credential removed (${t.path}).` : `no capture credential at ${t.path} (counted as removed).`);
       } else if (t.host === 'claude-code' && t.kind === 'mcp') {
         // [C8] Only remove what points at OUR url.
         const get = await d.runner(['claude', 'mcp', 'get', t.name ?? 'gbrain']);
@@ -2211,6 +2239,9 @@ export async function removeHarness(flags: HarnessFlags, rawDeps: HarnessDeps): 
   } finally {
     rmCfgLock.release();
   }
+  // A credential no receipt entry records (a crashed apply) goes too.
+  const orphan = receipt.targets.some((t) => t.kind === 'capture') ? null : remoteCapture.removeOrphanCaptureCredential(d.gbrainHome, d.log);
+  if (orphan) { remaining.push(orphan); d.logError(`could not remove claude-code/capture: ${orphan.error}`); }
   receipt.targets = remaining;
   save();
 
@@ -2380,7 +2411,7 @@ export async function statusHarness(flags: HarnessFlags, rawDeps: HarnessDeps): 
     }
   }
   const liveTargets = receipt.targets.map((t) =>
-    t === claudeMcp && claudeLiveError ? { ...t, state: 'failed' as const, error: claudeLiveError } : t,
+    t === claudeMcp && claudeLiveError ? { ...t, state: 'failed' as const, error: claudeLiveError } : remoteCapture.liveCaptureTarget(t, d.gbrainHome, receipt.url),
   );
   if (!token) {
     const codexMcp = receipt.targets.find((t) => t.host === 'codex' && t.kind === 'mcp');
@@ -2516,6 +2547,8 @@ export async function statusHarness(flags: HarnessFlags, rawDeps: HarnessDeps): 
     for (const t of liveTargets) {
       d.log(`  ${t.host}/${t.kind} (${t.scope}): ${t.state}${t.error ? ` — ${t.error}` : ''}`);
     }
+    const captureLine = remoteCapture.captureStatusLine(liveTargets, d.gbrainHome, receipt.url);
+    if (captureLine) d.log(captureLine);
     for (const p of instructionsProbes) {
       d.log(
         `  ambient-writeback block (${p.host}): ${p.probe}${p.path ? ` — ${p.path}` : ''}` +
