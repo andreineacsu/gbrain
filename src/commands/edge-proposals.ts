@@ -13,6 +13,7 @@
  * date (from relationship-specific evidence) and why. gbrain never invents a
  * date: undated pairs wait for `date`.
  */
+import { intFlagValue } from '../cli/flag-values.ts';
 import type { BrainEngine } from '../core/engine.ts';
 import { applyEdgeProposal, rejectEdgeProposal, undoEdgeProposal, DREAM_TIMELINE_SOURCE } from '../core/cycle/edge-contradictions.ts';
 import { isCalendarDate, dateKey } from '../core/link-validity.ts';
@@ -67,8 +68,12 @@ export async function runEdgeProposals(engine: BrainEngine, args: string[]): Pro
   if (sub === 'list') {
     const status = flag('--status');
     if (status && status !== 'all' && !STATUSES.includes(status)) { console.error(`Unknown status ${status}. One of: ${STATUSES.join(', ')}, all`); setCliExitVerdict(2); return; }
-    const list = status === 'all' ? await rows(engine, 'TRUE', [], Number(flag('--limit') ?? 50))
-      : await rows(engine, 'p.status = ANY($1::text[])', [status ? [status] : ['proposed', 'undated_unresolved']], Number(flag('--limit') ?? 50));
+    // `--limit N` or `--limit=N`. A bad value is a usage error (exit 2); a valid one above 1000 is still capped by rows().
+    const limitArg = rest.find(a => a === '--limit' || a.startsWith('--limit='));
+    const limit = limitArg === undefined ? 50
+      : intFlagValue(limitArg === '--limit' ? flag('--limit') : limitArg.slice('--limit='.length), '--limit', { min: 1, example: 50 });
+    const list = status === 'all' ? await rows(engine, 'TRUE', [], limit)
+      : await rows(engine, 'p.status = ANY($1::text[])', [status ? [status] : ['proposed', 'undated_unresolved']], limit);
     out(list, list.length ? list.map(describe).join('\n') + '\n\nNext: gbrain edge-proposals accept <id> | reject <id>' : 'No open relationship proposals.');
     return;
   }
