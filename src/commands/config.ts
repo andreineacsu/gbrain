@@ -391,6 +391,11 @@ async function setConfigWithDecideHooks(engine: BrainEngine, key: string, value:
     const err = validateFactsDrainConfigValue(key, value);
     if (err) { console.error(`[config] ${err}`); process.exit(1); }
   }
+  if (key === 'facts.page_write_notability_filter') {
+    const { validateNotabilityFilterConfigValue } = await import('../core/facts/notability-filter.ts');
+    const err = validateNotabilityFilterConfigValue(key, value);
+    if (err) { console.error(`[config] ${err}`); process.exit(1); }
+  }
   await engine.setConfig(key, value);
   if (key === 'auto_chronicle') await acknowledgeAutoChronicle(engine, value);
   if (!key.startsWith('decide.slots.')) return;

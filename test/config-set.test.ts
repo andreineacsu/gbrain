@@ -347,6 +347,18 @@ describe('#2753 — the doctor-proposed gateway-loop command is accepted by `con
     expect(setCalls).toEqual([]);
   });
 
+  // #6231: every page write's facts dispatch reads this key, so a value that is not a filter is refused here.
+  test.each([
+    ['high-only', null], [' ALL ', null], ['medium-and-up', null], ['low', 1], ['medium', 1],
+  ] as const)('facts.page_write_notability_filter %p: exit %p (#6231)', async (value, code) => {
+    const { engine, setCalls } = setStubEngine();
+    const { errs, exit } = await runConfigCapture(engine, ['set', 'facts.page_write_notability_filter', value]);
+    expect(exit).toBe(code);
+    expect(setCalls).toEqual(code === null ? [['facts.page_write_notability_filter', value]] : []);
+    expect(errs).toEqual(code === null ? [] : [`[config] facts.page_write_notability_filter must be all, high-only, medium-and-up `
+      + `(which facts a page write's extraction keeps; default medium-and-up) (got '${value}'). Nothing was written.`]);
+  });
+
   test('cycle.timezone: accepts a valid IANA timezone (#4348)', async () => {
     const { engine, setCalls } = setStubEngine();
     const { errs, exit } = await runConfigCapture(

@@ -102,7 +102,8 @@ export interface FactsBackstopCtx {
   /** Execution mode — D8. Default 'queue' (fire-and-forget). */
   mode?: 'queue' | 'inline';
   /** Notability filter — D4. Default 'all'; sync uses 'high-only'; the
-   * ambient-writeback lane uses 'medium-and-up' in salient mode. */
+   * ambient-writeback lane uses 'medium-and-up' in salient mode; page-write
+   * jobs carry `facts.page_write_notability_filter` (notability-filter.ts). */
   notabilityFilter?: FactNotabilityFilter;
   /** Abort signal for shutdown propagation. */
   abortSignal?: AbortSignal;

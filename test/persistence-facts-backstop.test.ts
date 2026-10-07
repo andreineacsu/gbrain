@@ -73,6 +73,20 @@ test('page receipt and bounded extraction debt commit together; durable handoff 
   expect((await engine.readPageSnapshot(row.slug, { sourceId: row.source_id }))?.revision).toBe(current.revision);
 }));
 
+// #6231: the job a page write queues carries the brain's page-write filter, read when the effect dispatches.
+test.each([
+  [null, 'medium-and-up'],
+  ['high-only', 'high-only'],
+  ['all', 'all'],
+  [' Medium-And-Up ', 'medium-and-up'],
+  ['every-tier', 'medium-and-up'],
+] as const)('#6231: facts.page_write_notability_filter %p queues facts-absorb with %p', (setting, expected) => fixture(async () => {
+  const row = await publish(); const effect = await claimFacts(row);
+  if (setting !== null) await engine.setConfig('facts.page_write_notability_filter', setting);
+  await dispatchFactsBackstopEffect(engine, effect, localHostId());
+  expect((await jobs()).map(job => job.data.notabilityFilter)).toEqual([expected]);
+}));
+
 test('activation between preparation and publication retains durable coordinated extraction debt', () => fixture(async () => {
   const input = await prepare();
   await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');

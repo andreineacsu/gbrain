@@ -2,6 +2,8 @@
 
 **Say to your agent:** *"Remember my preference for short recommendations, but keep this session's setup and credentials out of shared memory."*
 
+**Say to your agent:** *"Keep every fact my page writes mention, even the minor ones."*
+
 GBrain can carry durable facts and preferences between agents that have access to
 the same brain and source. It does not replace the harness's identity,
 instructions, configuration, or permission controls.
@@ -35,7 +37,12 @@ just after the save). With default settings each saved page of an
 extraction-eligible type (note, meeting, email and similar) also gets one facts
 extraction call after it is saved; it runs as a queued job, is attributed to the
 write that caused it, and stops with `gbrain config set facts.extraction_enabled
-false`. Image OCR, when turned on (`embedding_image_ocr`), runs before the save.
+false`. That extraction keeps high- and medium-notability facts (life events,
+commitments, durable preferences and beliefs) and skips low ones (logistics,
+routine scheduling); `gbrain config set facts.page_write_notability_filter all`
+keeps every tier and `high-only` keeps only the high tier, as sync does. A tier
+left out is not saved from that write; no background pass extracts it later.
+Image OCR, when turned on (`embedding_image_ocr`), runs before the save.
 Set `GBRAIN_AI_CALL_LOG=<path>` to record every model call a process makes (kind,
 model, tokens, duration, and the write request, job or cycle phase it served; no
 prompt or response text).
