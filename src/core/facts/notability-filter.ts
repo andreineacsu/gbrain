@@ -20,9 +20,9 @@ export function coerceNotabilityFilter(v: unknown): FactNotabilityFilter {
  * #6231: which facts the extraction queued by a page write (put_page,
  * capture, edit_page) keeps. The default keeps high and medium facts (life
  * events, major commitments, durable preferences and beliefs) and skips low
- * ones (logistics, routine scheduling). No background pass extracts a page's
- * prose later, so sync's 'high-only' would lose the medium tier for good;
- * 'all' keeps every tier.
+ * ones (logistics, routine scheduling). No default cycle phase extracts a
+ * page's prose later, so sync's 'high-only' would lose the medium tier for
+ * good; 'all' keeps every tier.
  */
 export const PAGE_WRITE_NOTABILITY_FILTER_KEY = 'facts.page_write_notability_filter';
 export const PAGE_WRITE_NOTABILITY_FILTER_DEFAULT: FactNotabilityFilter = 'medium-and-up';

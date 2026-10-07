@@ -80,6 +80,7 @@ test.each([
   ['all', 'all'],
   [' Medium-And-Up ', 'medium-and-up'],
   ['every-tier', 'medium-and-up'],
+  ['', 'medium-and-up'],
 ] as const)('#6231: facts.page_write_notability_filter %p queues facts-absorb with %p', (setting, expected) => fixture(async () => {
   const row = await publish(); const effect = await claimFacts(row);
   if (setting !== null) await engine.setConfig('facts.page_write_notability_filter', setting);

@@ -29,8 +29,10 @@
  *     MCP op so tool-call responses carry truthful numbers.
  *
  * Notability filter (D4): per-caller policy via FactsBackstopCtx.notabilityFilter.
- * Sync passes 'high-only' (HIGH lands now, MEDIUM waits for the dream
- * cycle, LOW dropped at LLM layer). Other surfaces default to 'all'.
+ * Sync passes 'high-only' (no default cycle phase extracts the MEDIUM and LOW
+ * facts it leaves out); page-write jobs carry facts.page_write_notability_filter
+ * (default 'medium-and-up', notability-filter.ts). A caller that passes none
+ * gets 'all'.
  *
  * Failure modes route to ingest_log (D5) via writeFactsAbsorbLog (lands
  * in PR1 commit 13). For PR1 commit 6 the absorb writer is a placeholder;
