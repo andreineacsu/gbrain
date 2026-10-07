@@ -70,6 +70,41 @@ a crontab edit. Concurrency budget: `parallel × workers × 2 ≈ 32`
 connections during the wave (each per-file worker opens its own
 2-connection pool). Stay under your Postgres `max_connections` setting.
 
+**Managed brain** (`gbrain sources writer status --json` reports
+`"mode": "managed"`): managed sync refuses a Git pull and `--skip-failed`,
+so the line above fails for every source with `writer_coordinator_required`.
+Install this line instead, on the host that owns the sources
+(`gbrain sources writer status --source <id> --json` names a source's
+owner host):
+
+```cron
+*/15 * * * * gbrain sources refresh <id>; gbrain sync --all --no-pull --hard-deadline 13m
+```
+
+- `gbrain sync --all --no-pull` imports each checkout as it stands, one
+  source at a time. Managed sync takes no per-source lock, so two runs at
+  once would drain side by side and stall each other. The 15-minute
+  interval with a 13-minute `--hard-deadline` keeps runs apart: the drain
+  stops itself shortly before the deadline as `resumable`, with its cursor
+  and accepted writes intact, and the next tick continues it.
+- `gbrain sources refresh <id>` is how a managed checkout takes new
+  upstream commits: it fast-forwards the checkout and syncs every source
+  bound to it. Put one refresh per checkout that tracks a remote (any
+  source id on that checkout) in front of the sync, in the same line, so
+  the jobs run one after another. Leave the refresh out when no checkout
+  tracks a remote, and add one when such a checkout is added.
+- A source another host owns refuses with `owner_unavailable`: give it its
+  own line on its owner host, with `--source <id>` in place of `--all`.
+- A file that fails to import stays failed: managed sync never skips it,
+  and a refresh of its checkout refuses with `sync_in_progress` until the
+  file is fixed and retried with the `--retry-failed` command the failure
+  prints.
+
+On a PGLite brain while `gbrain serve` runs, sync runs inside the serve
+one source at a time and refuses `--all`, in either mode. There, chain one
+`gbrain sync --source <id>` per source in the line (with `--no-pull` on a
+managed brain).
+
 **Avoid (legacy)**: separate `gbrain sync --source default` and
 `gbrain sync --source zion-brain` entries staggered by 5 minutes. They
 require manual deconfliction every time a new source is added, and a
@@ -78,14 +113,17 @@ lock (v0.40.3.0+ uses per-source `gbrain-sync:<sourceId>` locks but the
 per-source cron pattern doesn't benefit from the parallelism that
 `--all --parallel` actually delivers).
 
-`gbrain doctor` surfaces the recommended line as a `sync_consolidation`
-check whenever it detects 2+ active sources. Paste-ready from there.
+`gbrain doctor` surfaces the recommended line for the brain's mode as a
+`sync_consolidation` check whenever it detects 2+ active sources.
+Paste-ready from there.
 
 ## When it fails
 
 Follow the [agent operator protocol](../../docs/protocol/AGENT_OPERATOR_v1.md) for any gbrain error `code`, exit code, `[AGENT]` block or notice block. Specific to this skill:
 
-- A scheduled `gbrain sync` hits `sync_in_progress` / `lock_busy`: an earlier tick still runs. Widen the interval or stagger the job; never add a second overlapping schedule.
+- A scheduled `gbrain sync` hits `sync_in_progress` / `lock_busy`: an earlier tick still runs. Widen the interval or stagger the job; never add a second overlapping schedule. On a managed brain, a scheduled `sources refresh` that refuses with `sync_in_progress` names an unfinished or failed sync of its checkout: run the command it prints, and the next tick refreshes.
+- A scheduled `gbrain sync` refuses with `writer_coordinator_required` and asks for `--no-pull`, or refuses `--skip-failed`: the brain is managed. Replace the line with the managed form under "Multi-source brains".
+- A managed sync stops with `worktree_refreshing` after waiting about 5 minutes: a refresh of that checkout was still running. Keep the refresh and the sync in one line so they run one after another.
 - Doctor reports a stale source after the cron change: check `gbrain sources status <id>` for held items or errors before changing the schedule again.
 - `checkpoint_validation_timeout` in a sync log: run the retry command the error prints; do not cancel the request.
 
@@ -97,5 +135,6 @@ Follow the [agent operator protocol](../../docs/protocol/AGENT_OPERATOR_v1.md) f
 - Jobs that produce different output on re-run (not idempotent)
 - Sending notifications during quiet hours (save to held queue instead)
 - Separate per-source `gbrain sync --source <id>` cron entries when
-  `gbrain sync --all --parallel N --workers N` would replace them with
-  one line that auto-picks-up future sources.
+  one `--all` line would replace them and auto-pick-up future sources
+  (`gbrain sync --all --parallel N --workers N` on an unmanaged brain,
+  `gbrain sync --all --no-pull` on a managed one).
