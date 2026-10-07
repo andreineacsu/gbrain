@@ -2,8 +2,8 @@
   "golden": {
     "exitCode": 0,
     "stderr": "",
-    "stdoutBytes": 207549,
-    "stdoutSha256": "ba03674e7846f4d445030acf6a2bb53cd5544abdff7f8d28e480903f1e852586",
+    "stdoutBytes": 209084,
+    "stdoutSha256": "1113e2c0e04d39cfc4c344464a5da788c1ee30f2b28b02658a4641708798228c",
     "toolNames": [
       "remember",
       "entity",
@@ -114,6 +114,7 @@
       "get_recent_salience",
       "find_anomalies",
       "get_recent_transcripts",
+      "corpus_append",
       "connectors_status",
       "connector_sync",
       "chronicle_day",
@@ -4655,6 +4656,49 @@
           "type": "object"
         },
         "scope": "read"
+      },
+      {
+        "description": "Transport for the capture hooks on a registered machine (remote session capture), not a conversation tool. Stores one redacted session-corpus artifact on the brain host, where its sweep extracts facts and dream synthesis reads it. The host scans the text again, files it under this grant's source and credits this grant as its seat. Idempotent: the same content again returns status duplicate. Needs the session_capture scope.",
+        "idempotent": true,
+        "local_only": false,
+        "mutating": true,
+        "name": "corpus_append",
+        "parameters": {
+          "kind": "string",
+          "session_id": "string",
+          "text": "string"
+        },
+        "required_scopes": [
+          "session_capture"
+        ],
+        "schema": {
+          "properties": {
+            "kind": {
+              "description": "session (a session-end corpus file), segment (a checkpoint segment) or writeback (one user turn).",
+              "enum": [
+                "session",
+                "segment",
+                "writeback"
+              ],
+              "type": "string"
+            },
+            "session_id": {
+              "description": "The client's session id: 1-100 letters, digits, dot, underscore or hyphen.",
+              "type": "string"
+            },
+            "text": {
+              "description": "The artifact's redacted text, at most 1,572,864 UTF-8 bytes; the host scans it again before storing it.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "session_id",
+            "text"
+          ],
+          "type": "object"
+        },
+        "scope": "write"
       },
       {
         "description": "Per-provider chat-connector status: strategies, whether a credential is present and from where (env/file — never the value), token expiry, last_sync_at, auth_error_at, auto_sync, and the incremental watermark. Local-only; credentials never cross the wire.",

@@ -46,6 +46,14 @@ const _cache = new Map<string, CacheEntry>();
 const _generations = new WeakMap<object, number>();
 
 /**
+ * Mutating ops that write no row hot memory reads and whose reply no agent
+ * reads: dispatch keeps the cache across them and this hook builds nothing
+ * for their reply. `corpus_append` (#5577) stores a session-corpus file; the
+ * capture hook sends one on every Stop event and discards the reply.
+ */
+export const HOT_MEMORY_EXEMPT_OPS: ReadonlySet<string> = new Set(['corpus_append']);
+
+/**
  * Drop every cached payload built from `engine` and bump its generation, so
  * a build that read the database before the write cannot store its stale
  * result afterwards.
@@ -100,7 +108,7 @@ export async function getBrainHotMemoryMeta(
   // Don't inject on tool calls that themselves manipulate hot memory —
   // the agent doesn't need the brain's hot memory wrapped around its own
   // recall response.
-  if (name === 'recall' || name === 'extract_facts' || name === 'forget_fact') return undefined;
+  if (name === 'recall' || name === 'extract_facts' || name === 'forget_fact' || HOT_MEMORY_EXEMPT_OPS.has(name)) return undefined;
 
   const sourceId = ctx.sourceId ?? 'default';
   // CX2-11: session identity is the TYPED OperationContext.sessionId field,

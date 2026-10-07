@@ -308,7 +308,10 @@ async function callMcpTool(ctx: ServeHttpContext, state: McpRequestState, reques
   // an op listed for an agent-only token must not scope-deny at call time.
   const scopeSatisfied = operationScopesAllowed(authInfo.scopes, op);
   if (!scopeSatisfied) {
-    return rejectInsufficientMcpScope(ctx, state, name, requiredScope);
+    // Name every scope the grant is missing (a capability scope such as
+    // session_capture too), so the denial's why and fix can actually grant it.
+    const unmet = (op.requiredScopes ?? []).filter(s => !hasScope(authInfo.scopes, s));
+    return rejectInsufficientMcpScope(ctx, state, name, [...new Set([requiredScope, ...unmet])]);
   }
 
   // F8: redact request payload by default (declared keys only via the
@@ -326,10 +329,13 @@ async function callMcpTool(ctx: ServeHttpContext, state: McpRequestState, reques
   // 'tools/list'. Pre-existing string-shaped rows are normalized by
   // migration v41 in src/core/migrate.ts.
   const safeParamsSummary = summarizeMcpParams(name, params);
-  const logParamsObj: unknown = logFullParams
+  // #5577: corpus_append's text is a session transcript (up to 1.5 MiB) the
+  // host has not scanned yet, so it stays on the summary even under the flag.
+  const fullParams = logFullParams && name !== 'corpus_append';
+  const logParamsObj: unknown = fullParams
     ? (params || null)
     : (safeParamsSummary || null);
-  const broadcastParams = logFullParams ? (params || {}) : safeParamsSummary;
+  const broadcastParams = fullParams ? (params || {}) : safeParamsSummary;
 
   // v0.31 (D12 / eE1): refactor the inlined op.handler call to go through
   // src/mcp/dispatch.ts so HTTP MCP shares the same dispatch path as
@@ -479,7 +485,7 @@ async function rejectInsufficientMcpScope(
   ctx: ServeHttpContext,
   state: McpRequestState,
   name: string,
-  requiredScope: string,
+  required: readonly string[],
 ): Promise<ToolResult> {
   const { engine, broadcastEvent } = ctx;
   const { authInfo, agentName, startTime } = state;
@@ -497,7 +503,7 @@ async function rejectInsufficientMcpScope(
       engine,
       `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, error_message, params)
        VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
-      [authInfo.clientId, agentName, name, latency, 'denied_after_list', `insufficient_scope: requires '${requiredScope}'`],
+      [authInfo.clientId, agentName, name, latency, 'denied_after_list', `insufficient_scope: requires '${required.join("', '")}'`],
       [null],
     );
   } catch { /* best effort */ }
@@ -507,10 +513,10 @@ async function rejectInsufficientMcpScope(
     scopes: authInfo.scopes.join(','),
     latency_ms: latency,
     status: 'denied_after_list',
-    error: { code: 'insufficient_scope', message: `requires '${requiredScope}'` },
+    error: { code: 'insufficient_scope', message: `requires '${required.join("', '")}'` },
     timestamp: new Date().toISOString(),
   });
-  const denial = scopeDeniedError({ op: name, required: [requiredScope], auth: authInfo, transport: 'http' });
+  const denial = scopeDeniedError({ op: name, required, auth: authInfo, transport: 'http' });
   const envelope = toAgentError(denial, { transport: 'http', op: name, render: dispatchRenderContext({ remote: true, transport: 'http', auth: authInfo }) });
   return { content: [{ type: 'text', text: JSON.stringify({ ...envelope, your_scopes: authInfo.scopes }) }], isError: true };
 }

@@ -344,6 +344,8 @@ const EXPECTED_OUTCOME: Record<string, Outcome> = {
   delete_page: 'ok',
   restore_page: 'ok',
   capture: 'ok',
+  // #5577: needs the session_capture scope no sweep fixture grant holds, and returns no stored text.
+  corpus_append: 'error',
   add_tag: 'ok',
   remove_tag: 'ok',
   add_link: 'ok',

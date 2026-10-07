@@ -84,11 +84,46 @@ export function isVolunteerProbeShaped(req: {
   );
 }
 
+/** The serve in this process and the source it bound, from the bind call until that binding closes. */
+let serveBound: { sourceId: string } | null = null;
+
+/**
+ * The source the serve in this process bound at start, or null when no serve
+ * bound one (local CLI, tests). The delegated sync and sweep keep that value
+ * for the serve's life while the source ladder can move under it, so a caller
+ * asking where this serve's sweep files things (`corpus_append`, #5577) reads
+ * it here instead of resolving the ladder again.
+ */
+export const serveBoundSourceId = (): string | null => serveBound?.sourceId ?? null;
+
+/**
+ * Records `defaultSource` as this serve's bound source, then binds the
+ * listeners. The record holds on every outcome, a skipped or failed bind
+ * included, and only the returned binding's `close()` releases it.
+ */
 export async function bindResolveIpcForServe(
   engine: BrainEngine,
   defaultSource: string,
   persistenceProvider?: PersistenceIpcProvider,
   opts: { rememberCallable?: boolean | (() => boolean) } = {},
+): Promise<ResolveIpcBinding> {
+  const record = { sourceId: defaultSource };
+  serveBound = record;
+  const binding = await bindListeners(engine, defaultSource, persistenceProvider, opts);
+  return {
+    ...binding,
+    close: () => {
+      if (serveBound === record) serveBound = null;
+      binding.close();
+    },
+  };
+}
+
+async function bindListeners(
+  engine: BrainEngine,
+  defaultSource: string,
+  persistenceProvider: PersistenceIpcProvider | undefined,
+  opts: { rememberCallable?: boolean | (() => boolean) },
 ): Promise<ResolveIpcBinding> {
   let persistence: PersistenceIpcBinding | null = null;
   try {

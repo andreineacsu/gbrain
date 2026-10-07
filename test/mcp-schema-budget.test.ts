@@ -38,6 +38,9 @@
  * disclosure), get_write_request (poll cadence and final states),
  * add_timeline_entry (when no call is needed) and the instructions (write
  * guidance); the served list still fits 25,000 model-visible characters.
+ * #5577 added corpus_append (1,060 measured): listed only to a grant holding the
+ * session_capture scope, so the served starter list measured here (no grant)
+ * is unchanged.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
@@ -64,7 +67,7 @@ const PARAM_DESCRIPTION_HARD_CAP = 200;
  * served starter list stays under 25,000 next to #6007's put_page growth.
  */
 const TOOL_BUDGETS: Record<string, number> = {
-  add_timeline_entry: 680, cancel_job: 270, cancel_write_request: 350, capture: 1250, context_pack: 760,
+  add_timeline_entry: 680, cancel_job: 270, cancel_write_request: 350, capture: 1250, context_pack: 760, corpus_append: 1080,
   delete_skill: 810, delta: 830, edit_page: 1090, entity: 470, find_anomalies: 520, forget: 560, get_agent_job: 270,
   get_backlinks: 770, get_ingest_log: 280, get_page: 930, get_recent_salience: 660, get_skill: 910,
   get_skill_asset: 790, get_write_request: 360, join_brain: 560, leave_brain: 540, list_brain_skillpack: 230,

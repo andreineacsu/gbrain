@@ -39,7 +39,7 @@ import {
 import { backupCheckDisabled, backupNagGate, backupNoticeText, loadBackupStatus } from '../core/backup/status-file.ts';
 import { maybeRefreshBackupStatusInProcess } from '../core/backup/coverage.ts';
 import { operationScopesAllowed } from '../core/scope.ts';
-import { invalidateHotMemoryForEngine } from '../core/facts/meta-hook.ts';
+import { HOT_MEMORY_EXEMPT_OPS, invalidateHotMemoryForEngine } from '../core/facts/meta-hook.ts';
 import { admittedPendingReceipt, type WriteReceipt } from '../core/persistence/types.ts';
 import { currentVerifiedLocalWriter, readLocalWriter, verifyLocalWriter, withVerifiedLocalRegistration } from '../core/persistence/identity.ts';
 
@@ -873,7 +873,8 @@ export async function dispatchToolCall(
       }
       if (!operationScopesAllowed(scopes ?? [], op)) {
         throw scopeDeniedError({ op: name, required: op.requiredScopes, auth: ctx.auth ? { ...ctx.auth, scopes: scopes ?? [] } : { clientId: '', scopes: scopes ?? [] },
-          transport: ctx.transport === 'stdio' ? 'stdio' : 'http', message: 'This operation requires an explicit shared-skills grant.', legacy_error: 'permission_denied' });
+          transport: ctx.transport === 'stdio' ? 'stdio' : 'http', legacy_error: 'permission_denied',
+          message: `This operation requires an explicit ${op.requiredScopes.map(s => `'${s}'`).join(' and ')} grant.` });
       }
     }
     // Fail-closed gate for slug-bound OAuth clients, applied here because
@@ -900,7 +901,7 @@ export async function dispatchToolCall(
       })
       : await op.handler(ctx, safeParams);
     // Hot memory built before a write (forget, remember, …) is never served after it, on every transport.
-    if (op.mutating) invalidateHotMemoryForEngine(engine);
+    if (op.mutating && !HOT_MEMORY_EXEMPT_OPS.has(name)) invalidateHotMemoryForEngine(engine);
     // [E4] verb success metrics: budget drops + entity hit/miss when present.
     {
       const r = result as { dropped_count?: number; found?: boolean; status?: string } | null;
@@ -979,7 +980,7 @@ export async function dispatchToolCall(
     return out;
   } catch (e: unknown) {
     logVerb(false);
-    if (op.mutating) invalidateHotMemoryForEngine(engine); // a failed write may have committed part of its work
+    if (op.mutating && !HOT_MEMORY_EXEMPT_OPS.has(name)) invalidateHotMemoryForEngine(engine); // a failed write may have committed part of its work
     // Agent contract v1 (A1): every failure — OperationError, classified DB
     // access errors, uncaught throws — goes through the one total normaliser,
     // which redacts raw messages, keeps verbs on their frozen v1 codes, and

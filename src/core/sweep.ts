@@ -130,6 +130,19 @@ export interface SweepReport {
 }
 
 /**
+ * The corpus dir the corpus pass reads: dream's session corpus
+ * (`dream.synthesize.session_corpus_dir`, transcripts.ts precedent), default
+ * ~/.gbrain/transcripts/corpus (GBRAIN_HOME-aware via configDir). Shared with
+ * `corpus_append` (#5577) so an uploaded artifact lands where this pass reads.
+ */
+export async function resolveSweepCorpusDir(engine: Pick<BrainEngine, 'getConfig'>): Promise<string> {
+  const configured = await engine.getConfig('dream.synthesize.session_corpus_dir');
+  if (configured) return configured;
+  const { configDir } = await import('./config.ts');
+  return join(configDir(), 'transcripts', 'corpus');
+}
+
+/**
  * Run one bounded maintenance sweep. Never throws — failures land in
  * report.skipped with a per-pass reason.
  */
@@ -585,13 +598,7 @@ async function runCorpusIngestPass(
 ): Promise<void> {
   const { sourceId, batchLimit, overBudget, signal, report, skip, log } = ctx;
 
-  // Corpus dir: dream's session corpus (transcripts.ts:66 precedent);
-  // default ~/.gbrain/transcripts/corpus (GBRAIN_HOME-aware via configDir).
-  let dir = await engine.getConfig('dream.synthesize.session_corpus_dir');
-  if (!dir) {
-    const { configDir } = await import('./config.ts');
-    dir = join(configDir(), 'transcripts', 'corpus');
-  }
+  const dir = await resolveSweepCorpusDir(engine);
 
   let entries: string[];
   try {
@@ -973,11 +980,7 @@ export interface CorpusDrainOpts {
 
 /** True when the corpus dir holds a `.txt` with no `.ingested` sidecar. Missing dir = false. */
 async function corpusHasPendingFiles(engine: BrainEngine): Promise<boolean> {
-  let dir = await engine.getConfig('dream.synthesize.session_corpus_dir');
-  if (!dir) {
-    const { configDir } = await import('./config.ts');
-    dir = join(configDir(), 'transcripts', 'corpus');
-  }
+  const dir = await resolveSweepCorpusDir(engine);
   const names = await readdir(dir).catch(() => [] as string[]);
   const present = new Set(names);
   return names.some(n => n.endsWith('.txt') && !present.has(n + CORPUS_INGESTED_SUFFIX));

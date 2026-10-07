@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import net from 'node:net';
 import { once } from 'node:events';
-import { bindResolveIpcForServe } from '../src/mcp/resolve-ipc-binding.ts';
+import { bindResolveIpcForServe, serveBoundSourceId } from '../src/mcp/resolve-ipc-binding.ts';
 import { resolveSocketPath, socketHasLiveListener } from '../src/core/context/resolve-ipc.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
 import { withEnv } from './helpers/with-env.ts';
@@ -105,6 +105,24 @@ describe('bindResolveIpcForServe (#4474)', () => {
       expect(binding.server).toBeNull();
       expect(binding.socketPath).toBeNull();
       binding.close(); // no-op, must not throw
+    });
+  });
+
+  it('records the bound source until its binding closes, a null binding included, and only that binding releases it', async () => {
+    mkdirSync(join(tmp, '.gbrain'), { recursive: true });
+    writeFileSync(join(tmp, '.gbrain', 'config.json'), JSON.stringify({ engine: 'pglite' }));
+    await withEnv({ GBRAIN_HOME: tmp, GBRAIN_DATABASE_URL: undefined, DATABASE_URL: undefined }, async () => {
+      expect(serveBoundSourceId()).toBeNull();
+      const first = await bindResolveIpcForServe({} as unknown as BrainEngine, 'side-source');
+      expect(first.server).toBeNull();
+      expect(serveBoundSourceId()).toBe('side-source');
+      first.close();
+      expect(serveBoundSourceId()).toBeNull();
+      const next = await bindResolveIpcForServe({} as unknown as BrainEngine, 'side-source');
+      first.close(); // an older binding's repeated close leaves the live serve's record alone
+      expect(serveBoundSourceId()).toBe('side-source');
+      next.close();
+      expect(serveBoundSourceId()).toBeNull();
     });
   });
 });

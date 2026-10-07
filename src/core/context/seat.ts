@@ -57,7 +57,8 @@ export function seatReasonHint(reason: string | undefined): string | undefined {
 export interface SeatSidecar {
   version: 1;
   seat: string;
-  seat_source: 'env' | 'harness_home';
+  /** `grant`: a remote upload (#5577), labelled by the host from the authenticated grant. */
+  seat_source: 'env' | 'harness_home' | 'grant';
   hook_lane: string;
   harness: string;
   first_seen: string;

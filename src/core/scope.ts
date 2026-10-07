@@ -22,7 +22,7 @@
  * vs user-account-mgmt — neither implies the other).
  */
 
-export type Scope = 'read' | 'write' | 'admin' | 'sources_admin' | 'users_admin' | 'agent' | 'skill_editor' | 'skill_publisher' | 'skills_member_self';
+export type Scope = 'read' | 'write' | 'admin' | 'sources_admin' | 'users_admin' | 'agent' | 'skill_editor' | 'skill_publisher' | 'skills_member_self' | 'session_capture';
 
 export const ALLOWED_SCOPES: ReadonlySet<Scope> = new Set<Scope>([
   'read',
@@ -34,6 +34,7 @@ export const ALLOWED_SCOPES: ReadonlySet<Scope> = new Set<Scope>([
   'skill_editor',
   'skill_publisher',
   'skills_member_self',
+  'session_capture',
 ]);
 
 /**
@@ -44,6 +45,7 @@ export const ALLOWED_SCOPES_LIST: ReadonlyArray<Scope> = Object.freeze([
   'admin',
   'agent',
   'read',
+  'session_capture',
   'skill_editor',
   'skill_publisher',
   'skills_member_self',
@@ -143,6 +145,9 @@ const IMPLIES: Record<Scope, ReadonlySet<Scope>> = {
   skill_editor: new Set(['skill_editor']),
   skill_publisher: new Set(['skill_publisher']),
   skills_member_self: new Set(['skills_member_self']),
+  // #5577: remote session capture (corpus_append), implied by nothing (admin
+  // included), so no existing grant starts uploading session corpus on upgrade.
+  session_capture: new Set(['session_capture']),
 };
 
 /**

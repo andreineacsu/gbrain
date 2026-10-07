@@ -131,6 +131,7 @@ const LEDGER: Record<string, string> = {
   get_recent_salience: 'test/salience-source-scope.test.ts',
   find_anomalies: 'test/salience-source-scope.test.ts',
   get_recent_transcripts: 'test/v0_29-tool-surfaces.test.ts',
+  corpus_append: 'test/session-capture-operation.test.ts',
   chronicle_day: 'test/chronicle-delight.test.ts',
   chronicle_on_this_day: 'test/chronicle-delight.test.ts',
   chronicle_since: 'test/operations-source-isolation-matrix.test.ts',

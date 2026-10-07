@@ -11,6 +11,7 @@ import {
   filterAllowedScopes,
   InvalidScopeError,
   parseScopeString,
+  operationScopesAllowed,
   type Scope,
 } from '../src/core/scope.ts';
 
@@ -134,7 +135,7 @@ describe('F3 refresh-token subset semantics under hasScope', () => {
 
 describe('ALLOWED_SCOPES — exact list pinned', () => {
   test('contains the 6 canonical scopes (v0.38: agent added)', () => {
-    expect(ALLOWED_SCOPES.size).toBe(9);
+    expect(ALLOWED_SCOPES.size).toBe(10);
     expect(ALLOWED_SCOPES.has('read')).toBe(true);
     expect(ALLOWED_SCOPES.has('write')).toBe(true);
     expect(ALLOWED_SCOPES.has('admin')).toBe(true);
@@ -144,12 +145,14 @@ describe('ALLOWED_SCOPES — exact list pinned', () => {
     expect(ALLOWED_SCOPES.has('skill_editor')).toBe(true);
     expect(ALLOWED_SCOPES.has('skill_publisher')).toBe(true);
     expect(ALLOWED_SCOPES.has('skills_member_self')).toBe(true);
+    expect(ALLOWED_SCOPES.has('session_capture')).toBe(true);
   });
   test('list is sorted alphabetically (deterministic for wire/drift check)', () => {
     expect([...ALLOWED_SCOPES_LIST]).toEqual([
       'admin',
       'agent',
       'read',
+      'session_capture',
       'skill_editor',
       'skill_publisher',
       'skills_member_self',
@@ -157,6 +160,34 @@ describe('ALLOWED_SCOPES — exact list pinned', () => {
       'users_admin',
       'write',
     ]);
+  });
+});
+
+// #5577: session_capture is a narrow capability no other scope implies, so no
+// existing grant (admin included) starts uploading session corpus on upgrade.
+describe('session_capture: implied by nothing, implies nothing else', () => {
+  test('no other scope implies it', () => {
+    for (const granted of ALLOWED_SCOPES_LIST.filter(s => s !== 'session_capture')) {
+      expect(hasScope([granted], 'session_capture')).toBe(false);
+    }
+    expect(hasScope(['admin', 'write', 'read', 'agent', 'skills_member_self'], 'session_capture')).toBe(false);
+  });
+  test('it grants only itself', () => {
+    expect(hasScope(['session_capture'], 'session_capture')).toBe(true);
+    for (const required of ALLOWED_SCOPES_LIST.filter(s => s !== 'session_capture')) {
+      expect(hasScope(['session_capture'], required)).toBe(false);
+    }
+  });
+  test('the capture operation needs its base write scope and session_capture together', () => {
+    const op = { scope: 'write', requiredScopes: ['session_capture'] };
+    expect(operationScopesAllowed(['read', 'write', 'session_capture'], op)).toBe(true);
+    expect(operationScopesAllowed(['read', 'write'], op)).toBe(false);
+    expect(operationScopesAllowed(['admin'], op)).toBe(false);
+    expect(operationScopesAllowed(['read', 'session_capture'], op)).toBe(false);
+  });
+  test('dynamic client registration cannot grant it', () => {
+    expect(dcrScopeViolation(['read', 'write', 'session_capture'], ['authorization_code', 'refresh_token'])).toContain('session_capture');
+    expect(scopesSupportedForDiscovery({ enableDcr: true })).not.toContain('session_capture');
   });
 });
 
@@ -244,7 +275,7 @@ describe('scopesSupportedForDiscovery', () => {
   });
   test('DCR off: every scope except operator-only agent (the pre-ceiling advertisement)', () => {
     const list = scopesSupportedForDiscovery({ enableDcr: false });
-    expect(list).toEqual(['admin', 'read', 'skill_editor', 'skill_publisher', 'skills_member_self', 'sources_admin', 'users_admin', 'write']);
+    expect(list).toEqual(['admin', 'read', 'session_capture', 'skill_editor', 'skill_publisher', 'skills_member_self', 'sources_admin', 'users_admin', 'write']);
     expect(list).toEqual(ALLOWED_SCOPES_LIST.filter((s) => s !== 'agent'));
   });
   test('neither list advertises agent (delegation bindings are operator-only)', () => {

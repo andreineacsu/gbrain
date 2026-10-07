@@ -107,6 +107,10 @@ export const STARTER_OPS: ReadonlySet<string> = new Set([
   'join_brain', 'sync_brain_skills', 'leave_brain', 'put_skill', 'delete_skill',
   // The dismissal for the coaching notices starter sessions receive (onboarding, features).
   'mute_notice',
+  // #5577: the capture hooks' upload transport on a registered machine, whose
+  // grants pin starter. Listed and callable only for a grant holding the
+  // session_capture scope (requiredScopes); no other scope implies it.
+  'corpus_append',
 ]);
 
 /**

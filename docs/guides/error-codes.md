@@ -2080,6 +2080,14 @@ Reasons: `rename_source_changed`.
 |---|---|---|---|---|---|---|
 | The exact authorized revision is unavailable. | A capability this request needs is not configured or not reachable on this brain. | A required capability is not available on this brain. Run `gbrain doctor --json` to see what is missing. | agent | `gbrain doctor --json` | 1 | no |
 
+### scan_unavailable
+
+<a id="scan_unavailable"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The brain host's secret scanner could not load, so it refused to store the uploaded session-corpus artifact; nothing was written. | A capability this request needs is not configured or not reachable on this brain. | Keep the artifact and send it again after the host operator repairs the install; the brain host's server log gives the scanner error's class and any code it carries, not its message. | agent | `gbrain doctor --json` | 1 | no |
+
 ### scope_denied
 
 <a id="scope_denied"></a>
@@ -2205,6 +2213,16 @@ More: [docs/guides/shared-brain-skills.md#troubleshoot-leave-and-recover](../../
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | This source already exists and does not match this exact admitted request. | The request itself was wrong or no longer matches the brain; nothing was changed. | Correct the request using the message above, then retry. | agent | `repeat the read that failed` | 1 | no |
+
+### source_not_ingestable
+
+<a id="source_not_ingestable"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| Remote session capture stored nothing: the grant is not on the default source, so no kind is stored (reason grant_source), or the serve's sweep ingests another source, so session files and checkpoint segments are refused, and writeback turns land only while ambient writeback is on (reason sweep_source). | Only the operator of the brain host can change what blocks this. | Only the brain host's operator can resolve this. Tell the user the message and run `gbrain doctor --json` on the brain host. | host_admin | `gbrain doctor --json` | 1 | no |
+
+Reasons: `grant_source`, `sweep_source`.
 
 ### source_not_ready
 
@@ -2511,6 +2529,24 @@ More: [docs/guides/google-connect.md#troubleshooting](../../docs/guides/google-c
 | Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
 |---|---|---|---|---|---|---|
 | The write was accepted and is still pending; it may commit later. | A temporary condition (a lock, a pending write, a rate limit); the same request can succeed later. | Wait briefly, then retry the same request (writes: reuse the same request_id). | agent | `repeat the read that failed` | 10 | yes |
+
+### writeback_gate_unresolved
+
+<a id="writeback_gate_unresolved"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| The brain host could not resolve its ambient-writeback setting, so it neither accepted nor refused the writeback turn; send it again later. | A temporary condition (a lock, a pending write, a rate limit); the same request can succeed later. | Wait briefly, then retry the same request (writes: reuse the same request_id). | agent | `repeat the read that failed` | 1 | yes |
+
+Reasons: `read_error`, `plane_drift`, `mode_invalid`.
+
+### writeback_off
+
+<a id="writeback_off"></a>
+
+| Meaning | Why | Next step | Who acts · consent | Verify | Exit | Retryable |
+|---|---|---|---|---|---|---|
+| Ambient writeback is off on the brain host, so it refuses uploaded writeback turns; this setting does not affect session files or checkpoint segments. | Only the operator of the brain host can change what blocks this. | Only the brain host's operator can resolve this. Tell the user the message and run `gbrain doctor --json` on the brain host. | host_admin | `gbrain doctor --json` | 1 | no |
 
 ### writer_admin_intent_required
 
