@@ -35,11 +35,15 @@ just after the save). With default settings each saved page of an
 extraction-eligible type (note, meeting, email and similar) also gets one facts
 extraction call after it is saved; it runs as a queued job, is attributed to the
 write that caused it, and stops with `gbrain config set facts.extraction_enabled
-false`. One page opts out with `facts_backstop: false` in its frontmatter (`no`,
-`off` and `0` work too), for a page whose facts another page already carries,
-such as a raw meeting transcript filed beside its meeting page; the write
-receipt then reads `facts_backstop: { skipped: "opted_out" }`. The opt-out
-stops future extraction only: facts already extracted from the page stay.
+false`. One page opts out of this after-save extraction with
+`facts_backstop: false` in its frontmatter (`no`, `off` and `0` work too), for
+a page whose facts another page already carries, such as a raw meeting
+transcript filed beside its meeting page, or a draft not yet checked; the write
+receipt then reads `facts_backstop: { skipped: "opted_out" }`. Removing the
+line queues the extraction again, even when the body is unchanged. The opt-out
+stops future after-save extraction only: facts already extracted from the page
+stay, and the opt-in conversation-facts backfill reads its own
+`conversation_parseable` flag instead.
 Image OCR, when turned on (`embedding_image_ocr`), runs before the save.
 Set `GBRAIN_AI_CALL_LOG=<path>` to record every model call a process makes (kind,
 model, tokens, duration, and the write request, job or cycle phase it served; no

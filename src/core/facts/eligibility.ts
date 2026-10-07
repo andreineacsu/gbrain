@@ -3,11 +3,14 @@
  *
  * Single source of truth for "should this page write fire the facts
  * extraction backstop?" Used by:
- *   - put_page (operations.ts:556 — MCP backstop hook)
- *   - sync.ts post-import hook
- *   - file_upload + code_import callers
- *   - extract_facts MCP op (negative path: returns 'eligibility_failed' so
- *     the caller sees a stable reason)
+ *   - the page-write outbox (persistence/effect-facts.ts: prepareFactsBackstop
+ *     for put_page, capture and edit_page, and the body_unchanged check)
+ *   - runFactsBackstop (facts/backstop.ts), which the sync post-import hook
+ *     and the facts-absorb job call; the job re-checks the page it reads, so
+ *     an opt-out written after queueing still skips (reason
+ *     'eligibility_failed:<reason>')
+ * The extract_facts op takes turn text, not a page, so this predicate does
+ * not apply to it.
  *
  * Pre-extraction (PR1 commit 5), this lived inline at operations.ts:633
  * and sync.ts had its own divergent type filter (`['conversation',
