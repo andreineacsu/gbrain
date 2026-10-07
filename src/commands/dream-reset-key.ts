@@ -5,7 +5,7 @@
 import type { BrainEngine } from '../core/engine.ts';
 import {
   countDeadDreamSubmissions, dreamBreakerBaseKey, dreamBreakerResetCommand, loadDreamBreakerThreshold,
-  resetDreamBreakerKey, DREAM_BREAKER_CONFIG_KEY, DREAM_BREAKER_KEY_PREFIXES,
+  resetDreamBreakerKey, DREAM_BREAKER_CONFIG_KEY, DREAM_BREAKER_KEY_PREFIXES, DREAM_PATTERNS_SOURCE_KEY_PREFIX,
 } from '../core/cycle/dream-breaker.ts';
 import { setCliExitVerdict, writeJsonDocument } from '../core/cli-force-exit.ts';
 import { opError } from '../core/ops/contract.ts';
@@ -16,8 +16,9 @@ const HELP = `Usage: gbrain dream reset-key <base-key>
 
 The paid-loop breaker refuses to resubmit a dream synthesize or patterns key
 whose submissions died ${'`'}${DREAM_BREAKER_CONFIG_KEY}${'`'} times (default 3) within 24 hours.
-Patterns deaths also count under ${'`'}dream:patterns:source:<source id>${'`'} whatever
-each run's key was; a completed patterns run clears that count.
+Patterns deaths count under ${'`'}${DREAM_PATTERNS_SOURCE_KEY_PREFIX}<source id>${'`'}, whatever
+reflections each run read. A run that completes resets that count, so only
+deaths in a row trip it; once tripped, it clears by reset or after 24 hours.
 
   <base-key>   Re-enable one key (without any :c<i>of<n> chunk suffix). The reset
                is stored in the brain and survives restarts; deaths after it

@@ -14,7 +14,8 @@ import { MinionQueue } from '../src/core/minions/queue.ts';
 import { UnrecoverableError } from '../src/core/minions/types.ts';
 import { finalizeWriteAccounting } from '../src/core/minions/handlers/subagent-persistence.ts';
 import {
-  countDeadDreamSubmissions, dreamBreakerRefusal, loadDreamBreaker, resetDreamBreakerKey, DREAM_BREAKER_CONFIG_KEY,
+  clearPatternsSourceDeaths, countDeadDreamSubmissions, dreamBreakerRefusal, loadDreamBreaker, patternsBreakerRefusal, resetDreamBreakerKey,
+  DREAM_BREAKER_CONFIG_KEY,
 } from '../src/core/cycle/dream-breaker.ts';
 import { dreamPaidLoopCheck } from '../src/commands/doctor/checks/dream-breaker.ts';
 
@@ -127,19 +128,34 @@ describe('dead-submission counter', () => {
 describe('#6236 patterns deaths per source', () => {
   const SOURCE_KEY = 'dream:patterns:source:default';
 
-  test('three dead runs under three different keys trip the source key; another source and a reset do not', async () => {
-    for (const [i, queue] of ['p1', 'p2', 'p3'].entries()) await seedJob({ key: `dream:patterns:digest-${i}`, status: 'dead', queue, released: i > 0 });
+  test.each([
+    ['three different reflection sets', ['digest-0', 'digest-1', 'digest-2']],
+    ['one reflection set three times', ['digest-0', 'digest-0', 'digest-0']],
+  ])('%s trip the source key, and one reset clears it', async (_case, digests) => {
+    for (const [i, digest] of digests.entries()) await seedJob({ key: `dream:patterns:${digest}`, status: 'dead', queue: `p${i}`, released: i > 0 });
     await seedJob({ key: 'dream:patterns:digest-9', status: 'dead', queue: 'p9', sourceId: 'other' });
     await seedJob({ key: KEY, status: 'dead', queue: 's1' });
     const rows = await countDeadDreamSubmissions(engine);
-    expect(rows.filter(row => row.base_key.startsWith('dream:patterns:source:')).map(({ base_key, dead_submissions }) => ({ base_key, dead_submissions })))
+    expect(rows.filter(row => row.base_key.startsWith('dream:patterns:')).map(({ base_key, dead_submissions }) => ({ base_key, dead_submissions })))
       .toEqual([{ base_key: SOURCE_KEY, dead_submissions: 3 }, { base_key: 'dream:patterns:source:other', dead_submissions: 1 }]);
-    const breaker = (await loadDreamBreaker(engine))!;
-    expect([...breaker.tripped.keys()]).toEqual([SOURCE_KEY]);
-    expect(dreamBreakerRefusal(breaker, SOURCE_KEY)).toContain(`gbrain dream reset-key '${SOURCE_KEY}'`);
+    expect(await patternsBreakerRefusal(engine, 'default')).toContain(`gbrain dream reset-key '${SOURCE_KEY}'`);
     const { runDreamResetKey } = await import('../src/commands/dream-reset-key.ts');
     expect(await captured(() => runDreamResetKey(engine, [SOURCE_KEY]))).toContain(`Reset ${SOURCE_KEY} (3 dead submission(s)`);
+    expect(await patternsBreakerRefusal(engine, 'default')).toBeNull();
     expect((await loadDreamBreaker(engine))!.tripped.size).toBe(0);
+  });
+
+  test('a reset that fails after a completed run is logged, not thrown', async () => {
+    const broken = new Proxy(engine, { get(target, key) {
+      if (key === 'executeRaw') return async () => { throw new Error('pool reaped'); };
+      const value = Reflect.get(target, key);
+      return typeof value === 'function' ? value.bind(target) : value;
+    } });
+    const lines: string[] = [];
+    const write = process.stderr.write;
+    process.stderr.write = ((chunk: string | Uint8Array) => { lines.push(String(chunk)); return true; }) as typeof process.stderr.write;
+    try { await clearPatternsSourceDeaths(broken, 'default'); } finally { process.stderr.write = write; }
+    expect(lines.join('')).toContain(`could not clear ${SOURCE_KEY} after a completed run`);
   });
 });
 

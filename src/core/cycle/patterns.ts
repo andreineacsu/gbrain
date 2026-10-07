@@ -313,7 +313,7 @@ export async function runPhasePatterns(
       private_queue_lease_ms: DEFAULT_PRIVATE_QUEUE_LEASE_MS,
     };
     // Paid-loop breaker: only maintenance runs carry a key, so only they are covered (#6236: per source too).
-    const refusal = submitOpts.idempotency_key ? await patternsBreakerRefusal(engine, submitOpts.idempotency_key, opts.sourceId ?? 'default') : null;
+    const refusal = submitOpts.idempotency_key ? await patternsBreakerRefusal(engine, opts.sourceId ?? 'default') : null;
     if (refusal) {
       process.stderr.write(`[dream] patterns: ${refusal}\n`);
       return skipped('dream_breaker_tripped', refusal);

@@ -11,8 +11,8 @@
  * completion, is never a death.
  *
  * A patterns key digests the reflection set, so it changes whenever a
- * reflection does. Every patterns death therefore also counts under the
- * stable per-source key `dream:patterns:source:<source id>`, which trips
+ * reflection does. Patterns deaths therefore count under the stable
+ * per-source key `dream:patterns:source:<source id>` instead, which trips
  * however often the content key changed; a completed patterns run resets it.
  *
  * Not covered: content-hashed synthesize keys change whenever a transcript
@@ -33,7 +33,7 @@ export const DEFAULT_MAX_DEAD_SUBMISSIONS = 3;
 
 export interface DeadDreamSubmissions { base_key: string; dead_submissions: number; last_dead_at: string }
 
-/** The stable key every patterns death of this source also counts under. */
+/** The stable key every patterns death of this source counts under. */
 export function dreamPatternsSourceKey(sourceId: string): string {
   return `${DREAM_PATTERNS_SOURCE_KEY_PREFIX}${sourceId}`;
 }
@@ -79,8 +79,7 @@ export async function countDeadDreamSubmissions(engine: BrainEngine): Promise<De
          FROM minion_jobs
         WHERE name = 'subagent' AND status = 'dead' AND finished_at > now() - interval '24 hours'
      ), counted AS (
-       SELECT base_key, queue, finished_at FROM dead
-        WHERE left(base_key, ${DREAM_BREAKER_KEY_PREFIXES[0].length}) = $1 OR left(base_key, ${DREAM_BREAKER_KEY_PREFIXES[1].length}) = $2
+       SELECT base_key, queue, finished_at FROM dead WHERE left(base_key, ${DREAM_BREAKER_KEY_PREFIXES[0].length}) = $1
        UNION ALL
        SELECT $4::text || source_id, queue, finished_at FROM dead
         WHERE left(base_key, ${DREAM_BREAKER_KEY_PREFIXES[1].length}) = $2
@@ -158,13 +157,10 @@ export async function loadDreamBreaker(engine: BrainEngine): Promise<DreamBreake
   }
 }
 
-/**
- * The refusal for a patterns submission: its source's key, then its content
- * key. Null when the breaker is off or neither is tripped.
- */
-export async function patternsBreakerRefusal(engine: BrainEngine, contentKey: string, sourceId: string): Promise<string | null> {
+/** The refusal for a patterns submission of this source, or null when the breaker is off or the key is not tripped. */
+export async function patternsBreakerRefusal(engine: BrainEngine, sourceId: string): Promise<string | null> {
   const breaker = await loadDreamBreaker(engine);
-  return breaker && (dreamBreakerRefusal(breaker, dreamPatternsSourceKey(sourceId)) ?? dreamBreakerRefusal(breaker, contentKey));
+  return breaker && dreamBreakerRefusal(breaker, dreamPatternsSourceKey(sourceId));
 }
 
 /**
