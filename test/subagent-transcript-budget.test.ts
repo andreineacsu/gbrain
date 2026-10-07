@@ -13,6 +13,7 @@ import { resetPgliteState } from './helpers/reset-pglite.ts';
 import { makeSubagentHandler } from '../src/core/minions/handlers/subagent.ts';
 import type { MinionJobContext, ToolDef } from '../src/core/minions/types.ts';
 import { __setChatTransportForTests, configureGateway, resetGateway, type ChatBlock, type ChatMessage } from '../src/core/ai/gateway.ts';
+import { patternsTranscriptBudgetChars } from '../src/core/cycle/patterns.ts';
 
 let engine: PGLiteEngine;
 let schemaVersion: string;
@@ -122,5 +123,15 @@ describe('subagent transcript budget', () => {
         .rejects.toThrow('max_transcript_chars must be a non-negative integer');
     }
     expect(calls).toBe(0);
+  });
+});
+
+describe('patterns transcript budget', () => {
+  test.each([
+    ['claude-cli:claude-opus-5-5', 280_000],
+    ['anthropic:claude-opus-5-5', 1_400_000],
+    ['no-such-provider:model', 280_000],
+  ])('%s: %i characters of prompt and tool results', (model, chars) => {
+    expect(patternsTranscriptBudgetChars(model)).toBe(chars);
   });
 });

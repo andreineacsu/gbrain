@@ -24,7 +24,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
-import { runPhasePatterns } from '../src/core/cycle/patterns.ts';
+import { patternsTranscriptBudgetChars, runPhasePatterns } from '../src/core/cycle/patterns.ts';
 import { withEnv } from './helpers/with-env.ts';
 
 let engine: PGLiteEngine;
@@ -101,6 +101,9 @@ describe('runPhasePatterns child-outcome status (#2782)', () => {
       expect(Number(jobs[0]!.timeout_ms)).toBe(600000);
       expect(jobs[0]!.data.require_writes).toBe(true);
       expect(jobs[0]!.data.allow_clean_zero_writes).toBe(true);
+      // #6236: the child's replayed transcript is bounded by its model's window.
+      expect(jobs[0]!.data.max_transcript_chars).toBe(patternsTranscriptBudgetChars(String(jobs[0]!.data.model)));
+      expect(jobs[0]!.data.max_transcript_chars).toBeGreaterThan(String(jobs[0]!.data.prompt).length);
     } finally {
       rmSync(brainDir, { recursive: true, force: true });
     }

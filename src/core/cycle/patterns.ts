@@ -48,6 +48,8 @@ import { normalizeModelId } from '../model-id.ts';
 import { throwIfAborted } from '../abort-check.ts';
 import { resolveCycleDate } from './cycle-date.ts';
 import { clearPatternsSourceDeaths, patternsBreakerRefusal } from './dream-breaker.ts';
+import { resolveChatContextTokens } from '../ai/model-resolver.ts';
+import { AIConfigError } from '../ai/errors.ts';
 import { publishOrHold } from '../persistence/accepted-pending.ts';
 
 export interface PatternsPhaseOpts {
@@ -112,6 +114,30 @@ export { CYCLE_DEADLINE_RESERVE_MS };
  * budget.
  */
 export const MIN_PATTERNS_SUBAGENT_BUDGET_MS = 2 * 60 * 1000;
+
+/**
+ * #6236: share of the model's declared context window the patterns child's
+ * transcript (prompt plus tool results) may fill. It is re-sent whole on
+ * every turn, and claude-cli counts each request at about twice the
+ * conversation it replays, so the rest is headroom for that, the system
+ * prompt and the model's own turns.
+ */
+const PATTERNS_WINDOW_SHARE = 0.4;
+/** Characters per token, the conservative ratio synthesize's chunk budget uses. */
+const PATTERNS_CHARS_PER_TOKEN = 3.5;
+/** Window assumed for a model whose provider declares none. */
+const UNDECLARED_WINDOW_TOKENS = 200_000;
+
+/** The patterns child's `max_transcript_chars`: its share of the model's declared window. */
+export function patternsTranscriptBudgetChars(model: string): number {
+  let windowTokens: number | undefined;
+  try {
+    windowTokens = resolveChatContextTokens(normalizeModelId(model));
+  } catch (error) {
+    if (!(error instanceof AIConfigError)) throw error;
+  }
+  return Math.floor((windowTokens ?? UNDECLARED_WINDOW_TOKENS) * PATTERNS_WINDOW_SHARE * PATTERNS_CHARS_PER_TOKEN);
+}
 
 /**
  * Clamp the configured subagent budgets to the remaining parent-job time.
@@ -262,6 +288,7 @@ export async function runPhasePatterns(
       prompt: buildPatternsPrompt(reflections, config.minEvidence, config.sourceSlugPrefix, config.outputSlugPrefix, cycleDate),
       model: config.model,
       max_turns: 30,
+      max_transcript_chars: patternsTranscriptBudgetChars(config.model), // #6236: the replayed transcript fits the window
       // #4217/CDX-12: a patterns child whose every put_page failed must
       // dead-letter (its whole purpose is writing pattern pages), not report
       // completed with zero pages. #5540: a clean finish that examined the
