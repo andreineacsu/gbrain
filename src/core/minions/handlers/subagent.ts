@@ -73,6 +73,7 @@ import {
 import { randomUUIDv7 } from 'bun';
 import { snapshotFromJob } from '../delegated-policy.ts';
 import { applyDelegatedData, guardDelegatedTools } from '../delegated-tools.ts';
+import { applyTranscriptBudget } from '../transcript-budget.ts';
 import { withDelegatedSpend } from '../delegated-spend.ts';
 import { invokeAI, sdkInvocationUsage, hasAIInvocationGuard } from '../../ai/invocation-guard.ts';
 import { chatInvocation } from '../../ai/guarded-generation.ts';
@@ -479,7 +480,7 @@ export function makeSubagentHandler(deps: SubagentDeps) {
     });
     const selectedTools = selectAllowedTools(registry, data.allowed_tools);
     const guardTools = (tools: ToolDef[], deferEmbeds = false) => guardDelegatedTools(engine, config, submitted, ctx.id, tools, deps.toolRegistry !== undefined, deferEmbeds);
-    const toolDefs = guardTools(selectedTools);
+    const toolDefs = await applyTranscriptBudget(engine, ctx.id, data, guardTools(selectedTools)); // #6236: bounds what each turn re-sends
 
     // v0.41 Approach C: render the final system prompt now that toolDefs
     // is known. Splices a deterministic tool-usage preamble listing each

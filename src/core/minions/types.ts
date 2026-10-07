@@ -590,6 +590,16 @@ export interface SubagentHandlerData {
    */
   allow_clean_zero_writes?: boolean;
   /**
+   * #6236: characters the run's transcript (the prompt plus every tool
+   * result) may reach; every turn re-sends it whole. A read-only tool's
+   * result that would take it past this comes back as a notice telling the
+   * model to finish with what it has read; other tools' results always pass
+   * and count. A resumed job counts the results it already holds. Unset =
+   * unbounded. Set by the dream patterns phase. Same trust story as
+   * `allowed_slug_prefixes`.
+   */
+  max_transcript_chars?: number;
+  /**
    * #4216 — synthesis execution mode. 'oneshot' = single structured
    * completion + programmatic validated writes, falling back to the agentic
    * loop in the SAME job when the output fails validation. Unset/'agentic'
@@ -701,6 +711,12 @@ export interface ToolDef {
    * line (no embedded newlines) so the rendered preamble stays scannable.
    */
   usage_hint?: string;
+  /**
+   * #6236: the tool only reads. A job's `max_transcript_chars` budget may
+   * withhold a read-only tool's result; any other tool's result (a write
+   * receipt) always reaches the model. Unset = not read-only.
+   */
+  read_only?: boolean;
 }
 
 /**

@@ -297,6 +297,7 @@ export function buildBrainTools(opts: BuildBrainToolsOpts): ToolDef[] {
       // v0.41 Approach C: surface usage_hint to the system-prompt renderer.
       // Keyed by the unprefixed op name. Undefined when no hint is registered.
       usage_hint: BRAIN_TOOL_USAGE_HINTS[op.name],
+      read_only: op.scope === 'read',
       async execute(input: unknown, ctx: ToolCtx): Promise<unknown> {
         if (op.localOnly) throw new Error(`${toolName}: local-only operations cannot be delegated`);
         const opCtx = buildOpContext({
