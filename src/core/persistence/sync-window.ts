@@ -7,8 +7,11 @@
  * only once every earlier request is final, so at claim time that request is
  * either committed (the group publishes) or not (an earlier page failed or was
  * cancelled). In the second case the group is cancelled here, so no page
- * publishes after an earlier page of the same sync failed. Publication
- * validation re-checks the same predecessor inside the transaction.
+ * publishes after the request before its group failed. Publication
+ * validation re-checks the same predecessor inside the transaction. A group
+ * whose head ended without committing can still commit its last request, and
+ * the group after it then publishes; `sync-run.ts` counts those pages
+ * (`committedPast`).
  */
 import type { BrainEngine } from '../engine.ts';
 import { completeWrite, lockCounters } from './journal.ts';

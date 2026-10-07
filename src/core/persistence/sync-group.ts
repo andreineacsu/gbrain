@@ -88,7 +88,9 @@ export function nextGroupSize(settings: BulkSettings, perMemberMs: number | null
 /**
  * Followers for a group: frozen in manifest order after the head, four at a
  * time, stopping at the first entry that is not groupable, was overtaken by
- * another cursor, would be waived (the waiver handles it as a head) or is held (#5988).
+ * another cursor or would be waived (the waiver handles it as a head), or
+ * that the caller's `freezeAt` skips: a held entry (#5988), or one a dropped
+ * group's member already committed.
  */
 export async function freezeFollowers<P extends WaiverEntry & { rebound?: true }>(engine: BrainEngine, cursor: WaiverCursor & { entries: unknown[] }, config: GBrainConfig,
   count: number, freezeAt: (index: number) => Promise<P | null>): Promise<P[]> {

@@ -48,6 +48,7 @@ test/managed-sweep-timeline.test.ts
 test/managed-sync-bulk.test.ts
 test/managed-sync-chunker-version.test.ts
 test/managed-sync-drain.test.ts
+test/managed-sync-group-committed-tail.test.ts
 test/managed-sync-group-completion.test.ts
 test/managed-sync-images-5493.test.ts
 test/managed-sync-lanes.test.ts
