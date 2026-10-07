@@ -114,6 +114,35 @@ describe('isFactsBackstopEligible — guards', () => {
   });
 });
 
+describe('isFactsBackstopEligible — facts_backstop frontmatter opt-out (#6232)', () => {
+  const cases: Array<[label: string, value: unknown, expected: ReturnType<typeof isFactsBackstopEligible>]> = [
+    ['boolean false', false, { ok: false, reason: 'opted_out' }],
+    ["text 'off'", 'off', { ok: false, reason: 'opted_out' }],
+    ["text ' No ' (trimmed, any case)", ' No ', { ok: false, reason: 'opted_out' }],
+    ["text 'FALSE'", 'FALSE', { ok: false, reason: 'opted_out' }],
+    ['number 0', 0, { ok: false, reason: 'opted_out' }],
+    ['boolean true', true, { ok: true }],
+    ["text 'yes'", 'yes', { ok: true }],
+    ['null', null, { ok: true }],
+    ["unrecognized text 'maybe'", 'maybe', { ok: true }],
+  ];
+  for (const [label, value, expected] of cases) {
+    test(`facts_backstop: ${label} on an eligible source transcript`, () => {
+      const f = fixture({
+        slug: 'sources/meetings/2026-05-09-call-transcript',
+        type: 'source',
+        frontmatter: { facts_backstop: value },
+      });
+      expect(isFactsBackstopEligible(f.slug, f.parsed)).toEqual(expected);
+    });
+  }
+
+  test('the opt-out also wins over the meetings/ slug rescue', () => {
+    const f = fixture({ slug: 'meetings/2026-05-09', type: 'note', frontmatter: { facts_backstop: false } });
+    expect(isFactsBackstopEligible(f.slug, f.parsed)).toEqual({ ok: false, reason: 'opted_out' });
+  });
+});
+
 describe('isFactsBackstopEligible — eligible-types coverage', () => {
   for (const t of ['note', 'meeting', 'slack', 'email', 'calendar-event', 'source', 'writing'] as PageType[]) {
     test(`type=${t} on arbitrary slug → ok`, () => {

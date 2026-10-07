@@ -21,6 +21,11 @@
  *     own world; not user-meaningful for hot memory)
  *   - frontmatter.dream_generated is NOT `true` (anti-loop: never extract
  *     from dream-generated pages — they're already a digest)
+ *   - frontmatter.facts_backstop is NOT off (`false`, `no`, `off` or `0`,
+ *     the spellings `conversation_parseable` accepts). The writer's opt-out
+ *     for a page whose facts another page carries, such as the raw
+ *     transcript sidecar of a meeting page (#6232). It stops future
+ *     extraction only; facts already extracted from the page stay.
  *   - body length >= 80 chars (skip TODO-style snippets)
  *   - parsed.type ∈ {note, meeting, slack, email, calendar-event, source, writing}
  *     OR slug.startsWith('meetings/' | 'personal/' | 'daily/')
@@ -35,6 +40,7 @@
  */
 
 import type { PageType } from '../types.ts';
+import { isFrontmatterFlagOff } from './conversation-types.ts';
 
 export type EligibilityResult = { ok: true } | { ok: false; reason: string };
 
@@ -90,6 +96,7 @@ export function isFactsBackstopEligible(
   if (parsed.frontmatter && parsed.frontmatter.dream_generated === true) {
     return { ok: false, reason: 'dream_generated' };
   }
+  if (isFrontmatterFlagOff(parsed.frontmatter?.facts_backstop)) return { ok: false, reason: 'opted_out' };
 
   const body = (parsed.compiled_truth ?? '').trim();
   if (body.length < MIN_BODY_CHARS) return { ok: false, reason: 'too_short' };

@@ -529,7 +529,8 @@ intent committed with the page; the `facts-backstop` effect becomes
 `dispatched` when its durable worker job is accepted. Extraction availability
 is checked by that worker. The handoff is idempotent and rechecks the source,
 page revision and current writer grant. Confined writers, unchanged pages,
-disabled extraction and dream-generated content do not enqueue work.
+disabled extraction, dream-generated content and pages whose frontmatter sets
+`facts_backstop: false` (`skipped: "opted_out"`) do not enqueue work.
 Extraction reads only `compiled_truth`, so a write that leaves it unchanged on
 a live page that was already eligible records
 `facts_backstop: { skipped: "body_unchanged" }` and queues nothing. Title,
