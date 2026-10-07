@@ -12,6 +12,7 @@ import type { RemediationStep } from '../remediation-step.ts';
 import type { RepairPlanStep, RepairPreviewFailure, RepairStepResult } from './repairs.ts';
 import type { ExplicitRepairNotice, RepairKindSpec } from '../repair/registry.ts';
 import type { CapSource } from '../consent.ts';
+import type { Action } from '../agent-output.ts';
 
 /**
  * Options for computeRemediationPlan. All fields are optional with
@@ -125,6 +126,19 @@ export interface StepResult {
 }
 
 /**
+ * A manual-only step a run did not submit. `fix` is the job's own submit
+ * command with `actor: 'user'`, so it renders `tell_user_to_run`: an agent
+ * relays it, the user decides. `est_usd_cost` is present for a paid step.
+ */
+export interface ManualOnlyStep {
+  id: string;
+  job: string;
+  params: Record<string, unknown>;
+  est_usd_cost?: number;
+  fix: Action;
+}
+
+/**
  * Result of a full runRemediation invocation. Stable shape for JSON
  * emission and MCP envelope.
  */
@@ -154,6 +168,11 @@ export interface RemediationResult {
    * ids) were not run; free job steps and included repair steps still ran.
    */
   job_steps_skipped?: { reason: 'target_unreachable'; target: number; ceiling: number; skipped?: string[] };
+  /**
+   * Manual-only job steps the plan held (onboard apply_policy `manual_only`):
+   * no run submits them, the user runs each job. Omitted when there are none.
+   */
+  manual_only_skipped?: ManualOnlyStep[];
   /** Set when `--resume` refused (a checkpoint for another brain). */
   resume_refused?: { reason: string; checkpoint_brain_id: string; brain_id: string; plan_hash: string };
   /** Repair steps the run applied or refused (only when `repairs` was passed). */

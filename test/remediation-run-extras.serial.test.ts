@@ -112,8 +112,9 @@ describe('runRemediation extraRemediations threading', () => {
   test('E3: an unreachable score target still runs the free job steps and skips only the paid ones', async () => {
     const { runRemediation } = await import('../src/core/remediation/run.ts');
     submittedJobs.length = 0;
+    // A paid job that is not manual-only: a manual-only one is never a job step at all.
     const paid = makeRemediationStep({
-      id: 'onboard.paid_step', job: 'extract-takes-from-pages', params: {}, severity: 'medium', est_seconds: 5,
+      id: 'onboard.paid_step', job: 'synthesize', params: {}, severity: 'medium', est_seconds: 5,
       est_usd_cost: 2, rationale: 'synthetic paid extra', status: 'remediable',
     });
     let unreachable = false;

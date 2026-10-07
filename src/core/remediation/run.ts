@@ -17,17 +17,38 @@ import {
   computeRecommendations,
 } from '../brain-score-recommendations.ts';
 import type { RemediationStep } from '../remediation-step.ts';
+import { isManualOnlyStep } from '../onboard/render.ts';
 import { loadRecommendationContext } from './context.ts';
 import { computeRemediationPlan } from './plan.ts';
 import { planRepairStepsReport, previewFailureField, runRepairSteps, type RepairPlanStep, type RepairPreviewFailure, type RepairStepResult } from './repairs.ts';
 import { OperationError } from '../ops/contract.ts';
 import type { RemediationCheckpoint } from '../remediation-checkpoint.ts';
 import type {
+  ManualOnlyStep,
   RemediationHooks,
   RemediationOpts,
   RemediationResult,
   StepResult,
 } from './types.ts';
+
+/** What a run reports for a manual-only step instead of submitting it: the step and the command the user runs. */
+function manualOnlyReport(step: RemediationStep): ManualOnlyStep {
+  const usd = step.est_usd_cost ?? 0;
+  const cost = usd > 0 ? ` and costs money (estimated $${usd.toFixed(2)})` : '';
+  return {
+    id: step.id, job: step.job, params: step.params, ...(usd > 0 ? { est_usd_cost: usd } : {}),
+    fix: {
+      argv: ['gbrain', 'jobs', 'submit', step.job, ...(Object.keys(step.params).length ? ['--params', JSON.stringify(step.params)] : []), '--follow'],
+      consent: usd > 0 ? ['paid'] : [],
+      actor: 'user',
+      why: `Manual-only: no automatic run submits the ${step.job} job. ${step.rationale}`,
+      user_message: `gbrain did not run the ${step.job} job: it is manual-only${cost}, so it runs only when you decide. What it does: ${step.rationale}`,
+      requires_exclusive: false,
+    },
+  };
+}
+
+const manualOnlyField = (steps: ManualOnlyStep[]) => steps.length ? { manual_only_skipped: steps } : {};
 
 /**
  * Submit ordered Remediation jobs sequentially per D3, with D5 cascade
@@ -46,15 +67,18 @@ import type {
  * PAID steps only (their ids land in `job_steps_skipped.skipped`); free steps
  * still run so the brain improves as far as it can — when a worker serves the
  * queue. With no worker (PGLite, or no supervisor) they would wait out their
- * timeout, so every job step is skipped as before.
+ * timeout, so every job step is skipped as before. A manual-only step is never
+ * a job step, whatever the target or its cost: it lands in `manualOnly`.
  */
 function planJobSteps(planned: RemediationStep[], manifest: { job_ids: string[] } | undefined, unreachable?: { target: number; ceiling: number }) {
-  const remediable = planned.filter((r) => r.status === 'remediable' && (!manifest || manifest.job_ids.includes(r.id)));
+  const planable = planned.filter((r) => r.status === 'remediable' && (!manifest || manifest.job_ids.includes(r.id)));
+  const manualOnly = planable.filter(isManualOnlyStep).map(manualOnlyReport);
+  const remediable = planable.filter((r) => !isManualOnlyStep(r));
   const workerRuns = !unreachable || queueWorkerAlive('default') === true;
   const freeRecs = workerRuns ? remediable.filter((r) => (r.est_usd_cost ?? 0) === 0) : [];
-  if (!unreachable) return { recs: remediable, freeRecs, jobStepsSkipped: undefined };
+  if (!unreachable) return { recs: remediable, freeRecs, jobStepsSkipped: undefined, manualOnly };
   return {
-    recs: freeRecs, freeRecs,
+    recs: freeRecs, freeRecs, manualOnly,
     jobStepsSkipped: { reason: 'target_unreachable' as const, ...unreachable, skipped: remediable.filter((r) => !freeRecs.includes(r)).map((r) => r.id) },
   };
 }
@@ -132,9 +156,10 @@ export async function runRemediation(
   const extraRemediations = opts.extraRemediations ?? [];
   const brainId = repairs ? (await (await import('../repair/core.ts')).resolveRepairScope(engine)).brain_id : undefined;
   let previewFailures: RepairPreviewFailure[] = [];
+  let manualOnlySkipped: ManualOnlyStep[] = [];
   const synthetic = (score: number, extra: Partial<RemediationResult> = {}): RemediationResult => ({
     doctor_run_id: crypto.randomUUID(), brain_score_initial: score, brain_score_final: score, brain_score_target: targetScore,
-    target_reached: false, submitted: [], aborted_count: 0, ...previewFailureField(previewFailures), ...extra,
+    target_reached: false, submitted: [], aborted_count: 0, ...previewFailureField(previewFailures), ...manualOnlyField(manualOnlySkipped), ...extra,
   });
 
   // Resume loads its checkpoint first: a checkpoint that records a manifest
@@ -171,8 +196,9 @@ export async function runRemediation(
   // Embeddings a budget stop left behind after re-sealing; the re-sealed pages no longer show up in a repair plan.
   let pendingEmbedSources = includeRepairs && manifest ? [...(cp?.pending_embed_sources ?? [])] : [];
   const initialHealth = await engine.getHealth();
-  const { freeRecs, jobStepsSkipped, recs: plannedJobSteps } = planJobSteps(computeRecommendations(initialHealth, ctx, extraRemediations), manifest,
+  const { freeRecs, jobStepsSkipped, recs: plannedJobSteps, manualOnly } = planJobSteps(computeRecommendations(initialHealth, ctx, extraRemediations), manifest,
     initialPlan.target_unreachable ? { target: targetScore, ceiling: initialPlan.max_reachable_score } : undefined);
+  manualOnlySkipped = manualOnly;
   if (jobStepsSkipped && freeRecs.length === 0 && !(includeRepairs && (repairSteps.length || pendingEmbedSources.length))) {
     hooks.onTargetUnreachable?.(targetScore, initialPlan.max_reachable_score);
     return synthetic(initialPlan.brain_score_current, {
@@ -457,7 +483,7 @@ export async function runRemediation(
       // would resubmit completed extras every iteration, forever.
       const pendingExtras = extraRemediations.filter((r) => !attemptedIds.has(r.id));
       recs = computeRecommendations(freshHealth, ctx, pendingExtras)
-        .filter((r) => r.status === 'remediable' && !attemptedIds.has(r.id) && (!manifest || manifest.job_ids.includes(r.id))
+        .filter((r) => r.status === 'remediable' && !isManualOnlyStep(r) && !attemptedIds.has(r.id) && (!manifest || manifest.job_ids.includes(r.id))
           && (!jobStepsSkipped || (r.est_usd_cost ?? 0) === 0));
     }
   };
@@ -516,6 +542,7 @@ export async function runRemediation(
     aborted_count: abortedIds.size,
     budget_exhausted: budgetAbort,
     ...(jobStepsSkipped ? { job_steps_skipped: jobStepsSkipped } : {}),
+    ...manualOnlyField(manualOnlySkipped),
     ...(repairs ? {
       repairs: repairResults, repairs_skipped: skippedRepairs,
       budget: { max_usd: maxUsd ?? null, spent_usd: settledUsd(), include_repairs: includeRepairs, plan_hash: planHash },

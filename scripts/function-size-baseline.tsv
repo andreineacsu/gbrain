@@ -50,7 +50,7 @@ src/core/minions/worker.ts	MinionWorker.start	470	seed: W5 baseline, refactor wa
 src/core/ops/facts.ts	recall.handler	348	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
 src/core/ops/search.ts	query.handler	332	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1); +2 GBRA-49 explain_target: one TargetTrace prep line and its HybridSearchOpts thread (diagnosis/meta live in prepareExplainTarget/finishExplainTarget)
 src/core/progressive-batch/orchestrator.ts	runProgressiveBatch	348	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
-src/core/remediation/run.ts	runRemediation	428	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
+src/core/remediation/run.ts	runRemediation	430	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1); +2 #6248: the manual-only steps a run reports instead of submitting (selection and report shape live in planJobSteps / manualOnlyReport)
 src/core/schema-pack/unify-types-handler.ts	runUnifyTypes	310	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
 src/core/skillopt/orchestrator.ts	runOptimizationLoop	704	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)
 src/core/skillopt/orchestrator.ts	runOptimizationLoop>withBudgetTracker(#1)	405	seed: W5 baseline, refactor wave 1 (decomposition deferred to wave 2, plan D1)

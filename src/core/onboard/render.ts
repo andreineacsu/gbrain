@@ -15,14 +15,16 @@ import type {
  * apply_policy + prompt_text + migration_id metadata.
  *
  * Rules of thumb for apply_policy:
- *   - protected job (LLM-bearing) → 'prompt_required' or 'manual_only'
- *     based on job name (takes-bootstrap stays manual_only per A12).
+ *   - a job on the manual-only allowlist below → 'manual_only', whatever
+ *     its `protected` flag (takes-bootstrap stays manual_only per A12).
+ *   - any other protected job (LLM-bearing) → 'prompt_required'.
  *   - non-protected (regex, SQL, etc.) → 'auto_apply'.
  */
 /**
- * v0.42 (D17): jobs that stay manual_only — autopilot will NOT surface
- * these as auto-apply candidates; user must explicitly run
- * `gbrain onboard --auto-with-prompt` or submit the handler directly.
+ * v0.42 (D17): jobs that stay manual_only. No automatic run submits them:
+ * runRemediation (behind `gbrain onboard --auto` and MCP `run_onboard`)
+ * reports them in `manual_only_skipped` instead; the user submits the job
+ * directly (`gbrain jobs submit <job>`).
  *
  * Membership criteria: one-time consenting decisions OR LLM-bearing
  * handlers without a mature eval. Adding a new entry here is a load-
@@ -37,13 +39,17 @@ const MANUAL_ONLY_PROTECTED_JOBS: ReadonlySet<string> = new Set([
   'unify-types',
 ]);
 
+/** True when only the user may run this step (apply_policy 'manual_only'); decided by job name. */
+export function isManualOnlyStep(step: Pick<RemediationStep, 'job'>): boolean {
+  return MANUAL_ONLY_PROTECTED_JOBS.has(step.job.trim());
+}
+
 export function toOnboardRecommendation(step: RemediationStep): OnboardRecommendation {
+  // Manual-only allowlist takes precedence; everything else protected
+  // is prompt_required.
   let apply_policy: OnboardRecommendation['apply_policy'] = 'auto_apply';
-  if (step.protected) {
-    // Manual-only allowlist takes precedence; everything else protected
-    // is prompt_required (needs --yes but can run via --auto --yes).
-    apply_policy = MANUAL_ONLY_PROTECTED_JOBS.has(step.job) ? 'manual_only' : 'prompt_required';
-  }
+  if (isManualOnlyStep(step)) apply_policy = 'manual_only';
+  else if (step.protected) apply_policy = 'prompt_required';
   return {
     ...step,
     apply_policy,
