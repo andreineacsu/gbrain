@@ -1,3 +1,5 @@
+import { isManualOnlyStep } from '../core/onboard/render.ts';
+
 export const AUTOPILOT_FULL_CYCLE_FLOOR_MINUTES = 60;
 
 export interface AutopilotRemediationPlanShape {
@@ -33,6 +35,15 @@ export function shouldRunAutopilotFullCycle({
     || planLength > 3
     || estimatedSeconds >= 300
     || score < 70;
+}
+
+/**
+ * The plan steps the targeted path submits. A manual-only step is the user's
+ * to run: it still counts in the plan the routing reads (today its estimate
+ * sends such a plan to the full cycle), but it is never submitted from here.
+ */
+export function autopilotTargetedSteps<T extends { job: string }>(plan: T[]): T[] {
+  return plan.filter((step) => !isManualOnlyStep(step));
 }
 
 export function shouldSleepHealthyAutopilot(

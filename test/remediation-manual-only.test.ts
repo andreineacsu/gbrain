@@ -9,10 +9,11 @@
  * pack upgrade and retyped the brain.
  *
  * Protects: no manual-only step reaches the queue from runRemediation (first
- * plan, mid-run recheck, unreachable-target free steps, dry run); each one is
- * reported in `manual_only_skipped` with a command only the user runs, and its
- * cost stays out of the budget check; the other steps still run; and
- * `onboard --auto` prints that command, on the unreachable-target exit too.
+ * plan, mid-run recheck, unreachable-target free steps, dry run) or from
+ * autopilot's targeted dispatch; each one is reported in `manual_only_skipped`
+ * with a command only the user runs, and its cost stays out of the budget
+ * check; the other steps still run; and `onboard --auto` prints that command,
+ * on the unreachable-target exit too.
  * Seams: a spy on MinionQueue.prototype.add that refuses manual-only jobs
  * (so a regression fails on the assertion instead of retyping the fixture)
  * and calls through for every other job; real PGLite and inline jobs.
@@ -27,9 +28,11 @@ import { makeRemediationStep, type RemediationStep } from '../src/core/remediati
 import { checkPackUpgradeAvailable } from '../src/core/onboard/checks.ts';
 import { toOnboardRecommendation } from '../src/core/onboard/render.ts';
 import { runOnboard } from '../src/commands/onboard.ts';
+import { autopilotTargetedSteps } from '../src/commands/autopilot-remediation-policy.ts';
 import { _resetPackCacheForTests } from '../src/core/schema-pack/registry.ts';
 import { _resetPackLocatorForTests } from '../src/core/schema-pack/load-active.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
+import { surfaceFileSource } from './helpers/source-surface.ts';
 import { emptyHome, withEnv } from './helpers/with-env.ts';
 
 let engine: PGLiteEngine;
@@ -177,6 +180,20 @@ describe('the other surfaces that read the manual-only rule', () => {
       });
       expect(toOnboardRecommendation(step).apply_policy).toBe('manual_only');
     }
+  });
+
+  test("autopilot's targeted dispatch submits the plan without its manual-only steps", () => {
+    const plan = [autoStep('onboard.auto_a'), TAKES_BOOTSTRAP, autoStep('onboard.auto_b')];
+    expect(autopilotTargetedSteps(plan).map((s) => s.id)).toEqual(['onboard.auto_a', 'onboard.auto_b']);
+  });
+});
+
+// The dispatch tick has no unit harness; like test/autopilot-fanout-wiring.test.ts, this pins the wiring in its source.
+describe('autopilot targeted dispatch wiring', () => {
+  test('the targeted loop, the only place the tick iterates plan steps, goes through autopilotTargetedSteps', () => {
+    const dispatchTickSource = surfaceFileSource('autopilot', 'src/commands/autopilot-dispatch.ts');
+    expect(dispatchTickSource).toContain('for (const step of autopilotTargetedSteps(plan))');
+    expect(dispatchTickSource).not.toContain('for (const step of plan)');
   });
 });
 
