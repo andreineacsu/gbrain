@@ -9,7 +9,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { importFromContent } from '../src/core/import-file.ts';
-import { groundPatternPages } from '../src/core/cycle/patterns.ts';
+import { compactPatternClaimLists, groundPatternPages } from '../src/core/cycle/patterns.ts';
 
 let engine: PGLiteEngine;
 
@@ -60,5 +60,18 @@ describe('patterns quote grounding', () => {
       single,
       expect.objectContaining({ text: expect.stringContaining('never deploy on Fridays'), reason: 'quote_not_in_source', sources: ['2 reflections'], detected_at: '2026-10-07' }),
     ]);
+  });
+
+  test('#6236: before a run, a verified page whose records list every reflection keeps only the counts', async () => {
+    const listing = { text: 'You said "a dropped quote".', reason: 'quote_not_in_source', detail: 'not found',
+      sources: ['wiki/personal/reflections/r1', 'wiki/personal/reflections/r2', 'wiki/personal/reflections/r3'], detected_at: '2026-10-01' };
+    await importFromContent(engine, 'wiki/personal/patterns/untouched',
+      `---\ntype: note\ntitle: Untouched\ndream_generated: true\nquote_verified_at: '2026-10-01'\nunverified_claims: ${JSON.stringify([listing])}\n---\nAn untouched pattern.\n`,
+      { noEmbed: true, sourceId: 'default' });
+    expect(await compactPatternClaimLists(engine, null, 'wiki/personal/patterns', 'default')).toBe(1);
+    const page = (await engine.getPage('wiki/personal/patterns/untouched'))!;
+    expect(page.frontmatter.unverified_claims).toEqual([{ ...listing, sources: ['3 reflections'] }]);
+    expect(page.compiled_truth).toContain('An untouched pattern.');
+    expect(await compactPatternClaimLists(engine, null, 'wiki/personal/patterns', 'default')).toBe(0);
   });
 });

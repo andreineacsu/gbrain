@@ -572,6 +572,13 @@ for (const managed of [true, false]) test(`#5884: ${managed ? 'managed' : 'unman
 test('#6236: managed patterns stops after three dead runs under changing keys, and a completed run clears the count', async () => {
   await fixture(async (engine, sourceId, root) => {
     for (let i = 0; i < 3; i++) await seed(engine, sourceId, `wiki/personal/reflections/example-${i}`);
+    // A pattern page an earlier run grounded, whose claim record lists every reflection; this run never writes it.
+    const listing = { text: 'You said "an older quote".', reason: 'quote_not_in_source', detail: 'not found', detected_at: '2026-10-01',
+      sources: [0, 1, 2].map(i => `wiki/personal/reflections/example-${i}`) };
+    await submitPageMutation({ engine, sourceId, remote: false as const, config: { engine: engine.kind, embedding_disabled: true }, dryRun: false,
+      logger: { info() {}, warn() {}, error() {} } }, { operation: 'put_page', params: { slug: 'wiki/personal/patterns/listed', request_id: randomUUID(),
+      content: `---\ntitle: Listed pattern\ntype: note\nunverified_claims: ${JSON.stringify([listing])}\n---\nAn older pattern.` } });
+    const listedClaims = async () => (await engine.readPageSnapshot('wiki/personal/patterns/listed', { sourceId }))!.page.frontmatter.unverified_claims;
     await engine.setConfig('dream.patterns.enabled', 'true');
     await engine.setConfig('models.dream.patterns', 'anthropic:claude-sonnet-4-6');
     await engine.setConfig('agent.use_gateway_loop', 'true');
@@ -600,12 +607,14 @@ test('#6236: managed patterns stops after three dead runs under changing keys, a
         expect(refused).toMatchObject({ status: 'skipped', details: { reason: 'dream_breaker_tripped' } });
         expect(refused.summary).toContain(`gbrain dream reset-key '${sourceKey}'`);
         expect(calls).toBe(0);
+        expect(await listedClaims()).toEqual([listing]);
 
         await engine.executeRaw('DELETE FROM minion_jobs WHERE queue LIKE $1', [`dream-inline-dead-${sourceId}-%`]);
         for (let n = 0; n < 2; n++) await dead(n, "now() - interval '2 hours'");
         expect(await sourceCount()).toBe(2);
         const completed = await runPhasePatterns(engine, { brainDir: root, sourceId, dryRun: false, once: true, cycleDate: '2026-10-07' });
         expect(completed.details).toMatchObject({ child_outcome: 'completed', transcript_withheld: 0 });
+        expect(await listedClaims()).toEqual([{ ...listing, sources: ['3 reflections'] }]);
         await dead(2, "now() + interval '1 second'");
         expect(await sourceCount()).toBe(1);
       });

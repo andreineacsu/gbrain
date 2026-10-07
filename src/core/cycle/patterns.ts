@@ -51,6 +51,7 @@ import { clearPatternsSourceDeaths, patternsBreakerRefusal } from './dream-break
 import { resolveChatContextTokens } from '../ai/model-resolver.ts';
 import { AIConfigError } from '../ai/errors.ts';
 import { countWithheldResults } from '../minions/transcript-budget.ts';
+import { isUncontainedPhaseError } from './phase-containment.ts';
 import { publishOrHold } from '../persistence/accepted-pending.ts';
 
 export interface PatternsPhaseOpts {
@@ -333,6 +334,7 @@ export async function runPhasePatterns(
       process.stderr.write(`[dream] patterns: ${refusal}\n`);
       return skipped('dream_breaker_tripped', refusal);
     }
+    await compactPatternClaimLists(engine, maintenance, config.outputSlugPrefix, opts.sourceId ?? 'default', opts.signal); // #6236
     let job: Awaited<ReturnType<typeof queue.add>>;
     try {
       job = await queue.add('subagent', data as unknown as Record<string, unknown>, submitOpts, {
@@ -779,6 +781,49 @@ function compactReflectionList(record: unknown): unknown {
   if (!record || typeof record !== 'object' || Array.isArray(record)) return record;
   const sources = (record as { sources?: unknown }).sources;
   return Array.isArray(sources) && sources.length > 1 ? { ...record, sources: reflectionCount(sources.length) } : record;
+}
+
+/**
+ * #6236: before the child runs, a pattern page whose claim records still list
+ * every reflection is rewritten with their counts (zero LLM), so a page no run
+ * writes does not stay too large for the child to read. A page whose managed
+ * publication is held waits for the next run; a page that fails is logged and
+ * skipped. Returns the pages rewritten.
+ */
+export async function compactPatternClaimLists(engine: BrainEngine, maintenance: MaintenanceAuthority | null, outputSlugPrefix: string,
+  sourceId: string, signal?: AbortSignal): Promise<number> {
+  const rows = await engine.executeRaw<{ slug: string }>(
+    `SELECT slug FROM pages
+      WHERE source_id = $1 AND slug LIKE $2 AND deleted_at IS NULL AND jsonb_typeof(frontmatter->'unverified_claims') = 'array'
+        AND EXISTS (SELECT 1 FROM jsonb_array_elements(frontmatter->'unverified_claims') AS c
+                     WHERE jsonb_typeof(c.value->'sources') = 'array' AND jsonb_array_length(c.value->'sources') > 1)`,
+    [sourceId, `${outputSlugPrefix}/%`]);
+  let compacted = 0;
+  for (const { slug } of rows) {
+    throwIfAborted(signal, '[dream] patterns claim compaction');
+    try {
+      const snapshot = await engine.readPageSnapshot(slug, { sourceId });
+      const claims = snapshot?.page.frontmatter.unverified_claims;
+      if (!snapshot || !Array.isArray(claims)) continue;
+      const { serializePageToMarkdown } = await import('../markdown.ts');
+      const content = serializePageToMarkdown({ ...snapshot.page,
+        frontmatter: { ...snapshot.page.frontmatter, unverified_claims: claims.map(compactReflectionList) } }, snapshot.tags);
+      if (maintenance) {
+        const { publishMaintenancePage } = await import('../persistence/prepared-maintenance.ts');
+        if (await publishOrHold(() => publishMaintenancePage(engine, maintenance, slug, content, { expectedRevision: snapshot.revision }))) continue;
+      } else {
+        const [{ importFromContent }, { isAvailable }] = await Promise.all([import('../import-file.ts'), import('../ai/gateway.ts')]);
+        await importFromContent(engine, slug, content, { noEmbed: !isAvailable('embedding'), sourceId });
+      }
+      compacted++;
+    } catch (error) {
+      if (isUncontainedPhaseError(error, signal)) throw error;
+      process.stderr.write(`[dream] patterns: could not compact the claim records of ${slug}; the next run retries `
+        + `(${error instanceof Error ? error.message : String(error)})\n`);
+    }
+  }
+  if (compacted > 0) process.stderr.write(`[dream] patterns: compacted the claim records of ${compacted} pattern page(s)\n`);
+  return compacted;
 }
 
 // ── Provenance via put_page tool execution rows ─────────────────────
