@@ -11,7 +11,8 @@
  * Protects: no manual-only step reaches the queue from runRemediation (first
  * plan, mid-run recheck, unreachable-target free steps, dry run); each one is
  * reported in `manual_only_skipped` with a command only the user runs, and its
- * cost stays out of the budget check; the other steps still run.
+ * cost stays out of the budget check; the other steps still run; and
+ * `onboard --auto` prints that command, on the unreachable-target exit too.
  * Seams: a spy on MinionQueue.prototype.add that refuses manual-only jobs
  * (so a regression fails on the assertion instead of retyping the fixture)
  * and calls through for every other job; real PGLite and inline jobs.
@@ -25,6 +26,7 @@ import type { RemediationOpts, RemediationResult } from '../src/core/remediation
 import { makeRemediationStep, type RemediationStep } from '../src/core/remediation-step.ts';
 import { checkPackUpgradeAvailable } from '../src/core/onboard/checks.ts';
 import { toOnboardRecommendation } from '../src/core/onboard/render.ts';
+import { runOnboard } from '../src/commands/onboard.ts';
 import { _resetPackCacheForTests } from '../src/core/schema-pack/registry.ts';
 import { _resetPackLocatorForTests } from '../src/core/schema-pack/load-active.ts';
 import { resetPgliteState } from './helpers/reset-pglite.ts';
@@ -175,5 +177,69 @@ describe('the other surfaces that read the manual-only rule', () => {
       });
       expect(toOnboardRecommendation(step).apply_policy).toBe('manual_only');
     }
+  });
+});
+
+describe('onboard --auto reports the manual-only steps it did not run', () => {
+  const origExit = process.exit;
+  class Exit extends Error { constructor(readonly code: number) { super(`exit ${code}`); } }
+
+  async function onboardAuto(args: string[]): Promise<{ stdout: string; exit: number | null; queued: string[] }> {
+    let stdout = '';
+    const out = spyOn(process.stdout, 'write').mockImplementation(((chunk: string | Uint8Array) => { stdout += String(chunk); return true; }) as never);
+    const err = spyOn(process.stderr, 'write').mockImplementation((() => true) as never);
+    process.exit = ((code?: number) => { throw new Exit(code ?? 0); }) as typeof process.exit;
+    let exit: number | null = null;
+    try {
+      const { queued } = await withQueueSpy(async () => {
+        try { await runOnboard(engine, args); } catch (e) { if (!(e instanceof Exit)) throw e; exit = e.code; }
+      });
+      return { stdout, exit, queued };
+    } finally {
+      process.exit = origExit;
+      out.mockRestore();
+      err.mockRestore();
+    }
+  }
+
+  // An empty brain on gbrain-base: the pack upgrade is the only onboard remediation.
+  const command = `gbrain jobs submit unify-types --params '{"target_pack":"gbrain-base-v2","apply":true}' --follow`;
+  const notRun = `Not run: unify-types (onboard.pack_upgrade_gbrain-base-v2) is manual-only; onboard --auto never runs it. To run it yourself: ${command}\n`;
+  // With no worker, a target above the ceiling runs nothing and exits 2; the report still reaches the caller.
+  const targets = [
+    { name: 'a reachable target (exit 0)', target: '0', exit: null, before: 'Brain at score 100/100, target 0/100. Nothing to do.\n' },
+    { name: 'an unreachable target (exit 2)', target: '101', exit: 2, before: '' },
+  ];
+
+  test.each(targets)('human output names the step and the command that runs it: $name', async ({ target, exit: expectedExit, before }) => {
+    const { stdout, exit, queued } = await onboardAuto(['--auto', '--max-usd', '1', '--target-score', target]);
+    expect(queued).toEqual([]);
+    expect(exit).toBe(expectedExit);
+    expect(stdout).toBe(before + notRun);
+  });
+
+  // stdout is one JSON document: the nothing-to-do line goes to stderr under --json.
+  test.each(targets)('JSON output is one document whose step tells an agent to relay the command: $name', async ({ target, exit: expectedExit }) => {
+    const { stdout, exit, queued } = await onboardAuto(['--auto', '--max-usd', '1', '--target-score', target, '--json']);
+    expect(queued).toEqual([]);
+    expect(exit).toBe(expectedExit);
+    const json = JSON.parse(stdout) as RemediationResult;
+    expect(json.submitted).toEqual([]);
+    expect(json.manual_only_skipped).toEqual([{
+      id: 'onboard.pack_upgrade_gbrain-base-v2', job: 'unify-types', params: { target_pack: 'gbrain-base-v2', apply: true },
+      fix: expect.objectContaining({ argv: PACK_ARGV, command, consent: [], actor: 'user', next: 'tell_user_to_run', requires_exclusive: false }),
+    }]);
+    if (expectedExit === 2) expect(json.target_unreachable).toMatchObject({ target: 101 });
+  });
+
+  test('a paid manual-only step is listed with its estimated cost', async () => {
+    // The takes bootstrap step exists only once the user enabled the bootstrap.
+    await engine.setConfig('takes.bootstrap_enabled', 'true');
+    const { stdout, exit, queued } = await onboardAuto(['--auto', '--max-usd', '1', '--target-score', '0']);
+    expect(queued).toEqual([]);
+    expect(exit).toBeNull();
+    expect(stdout).toContain(notRun);
+    expect(stdout).toContain('Not run: extract-takes-from-pages (onboard.takes_bootstrap) is manual-only; onboard --auto never runs it. '
+      + 'It is paid (estimated $5.00). To run it yourself: gbrain jobs submit extract-takes-from-pages --follow\n');
   });
 });

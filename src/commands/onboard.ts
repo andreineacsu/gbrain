@@ -9,8 +9,11 @@
 //
 // Three modes:
 //   --check    (default): print plan, no submission
-//   --auto:               submit auto_apply tier (requires --max-usd)
-//   --auto --yes:         also submit prompt_required tier
+//   --auto:               submit every planned step except the manual_only
+//                         ones (requires --max-usd); each manual_only step is
+//                         listed with the command the user runs for it
+//   --auto --yes:         same as --auto: --yes is parsed but not read, so
+//                         the prompt_required tier is not held back yet
 //   --history:            show recent migration_impact_log entries
 //
 // `--json` switches to the stable JSON envelope. No CLI mode → human render.
@@ -26,6 +29,13 @@ function parseInt10(args: string[], flag: string): number | null {
   if (i === -1 || i === args.length - 1) return null;
   const v = parseInt(args[i + 1] ?? '', 10);
   return isNaN(v) ? null : v;
+}
+
+/** Each manual-only step the run left to the user, its `fix` rendered for the CLI (`next: tell_user_to_run`). */
+async function renderManualOnly(result: Awaited<ReturnType<typeof runRemediation>>) {
+  if (!result.manual_only_skipped?.length) return [];
+  const { cliRenderContext, renderAction } = await import('../core/agent-output.ts');
+  return result.manual_only_skipped.map((step) => ({ ...step, fix: renderAction(step.fix, cliRenderContext()) }));
 }
 
 export async function runOnboard(engine: BrainEngine, args: string[]): Promise<void> {
@@ -159,12 +169,9 @@ export async function runOnboard(engine: BrainEngine, args: string[]): Promise<v
       targetScore,
       maxUsd,
       extraRemediations,
-      // --auto --yes opts into the prompt_required tier too; library
-      // doesn't distinguish auto_apply vs prompt_required, it just runs
-      // every remediation in the plan. The plan-building side (T12 render)
-      // does the tier distinction; for --auto without --yes, the CLI shell
-      // would pre-filter the extras to auto_apply only. For now: pass
-      // everything; CLI documents this is "everything" behavior.
+      // The library never submits a manual_only step (it lands in
+      // result.manual_only_skipped). It does not tell auto_apply from
+      // prompt_required: every other remediation in the plan runs.
     },
     {
       onTargetUnreachable: (target, ceiling) => {
@@ -174,7 +181,8 @@ export async function runOnboard(engine: BrainEngine, args: string[]): Promise<v
         );
       },
       onNothingToDo: (score, target) => {
-        process.stdout.write(
+        // Under --json stdout carries only the result document.
+        (jsonOutput ? process.stderr : process.stdout).write(
           `Brain at score ${score}/100, target ${target}/100. Nothing to do.\n`,
         );
       },
@@ -198,11 +206,19 @@ export async function runOnboard(engine: BrainEngine, args: string[]): Promise<v
     },
   );
 
+  // Written before the unreachable-target exit, so the manual-only steps reach the caller on that path too.
+  const manualOnly = await renderManualOnly(result);
+  if (jsonOutput) {
+    process.stdout.write(JSON.stringify(manualOnly.length ? { ...result, manual_only_skipped: manualOnly } : result, null, 2) + '\n');
+  } else {
+    for (const step of manualOnly) {
+      const cost = step.est_usd_cost ? ` It is paid (estimated $${step.est_usd_cost.toFixed(2)}).` : '';
+      process.stdout.write(`Not run: ${step.job} (${step.id}) is manual-only; onboard --auto never runs it.${cost} To run it yourself: ${step.fix.command}\n`);
+    }
+  }
   if (result.target_unreachable) process.exit(2);
 
-  if (jsonOutput) {
-    process.stdout.write(JSON.stringify(result, null, 2) + '\n');
-  } else if (result.submitted.length > 0) {
+  if (!jsonOutput && result.submitted.length > 0) {
     process.stdout.write(
       `\nBrain score: ${result.brain_score_initial} → ${result.brain_score_final} (target ${targetScore})\n` +
       `Submitted: ${result.submitted.length} job(s), ${result.aborted_count} aborted/failed\n`,
