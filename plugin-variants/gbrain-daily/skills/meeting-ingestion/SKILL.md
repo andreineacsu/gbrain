@@ -120,11 +120,15 @@ source_url: "..."              # link back to the source platform, if any
   from it into the brain.
 
 Retain the raw transcript when the source provides one: file it as a sidecar
-page with `type: source` at `sources/meetings/YYYY-MM-DD-{slug}-transcript`
+page with `type: source` and `facts_backstop: false` in its frontmatter at
+`sources/meetings/YYYY-MM-DD-{slug}-transcript`
 (the default pack files raw evidence as `source` under `sources/`; never
 invent `meeting-transcript`, and don't write the `transcript` alias) or keep
 the source file reachable, and link it from the meeting page. The transcript is the canonical
-evidence for every quote and claim check downstream.
+evidence for every quote and claim check downstream. `facts_backstop: false`
+keeps it out of automatic fact extraction: the meeting page carries the
+meeting's facts (Phase 5), and the raw transcript holds exactly the garbles
+and banter Phase 6 screens out.
 
 **Redact before you retain.** A raw transcript routinely captures pasted
 secrets and PII (a read-aloud API key, a screen-shared token, a private phone
@@ -283,6 +287,15 @@ next cycle extracts it (`gbrain dream --phase chronicle` runs it now, paid), and
 `chronicle_backstop.skipped` names the reason and its fix. Never hand-write
 `life/events/` pages; edit the meeting page and extraction updates its events.
 See `docs/guides/life-chronicle.md`.
+
+Facts (what `recall` and `context_pack` return) are extracted from the saved
+meeting page in the background too: on by default, one paid chat call for each
+write that changes the page body. The receipt's `facts_backstop` reads
+`queued`, or `skipped` with the reason. Extraction reads the page as written,
+so Phase 6 decides what reaches entity pages, while everything on this page,
+the downgrade protocol's uncertain notes included, is extraction input. Don't
+call `extract_facts` for the meeting or its transcript; the transcript sidecar
+stays out through its `facts_backstop: false`.
 
 ### Phase 6: Claim verification + consistency check (gate for every entity write)
 
