@@ -117,7 +117,7 @@ describe('isFactsBackstopEligible — guards', () => {
   });
 });
 
-describe('isFactsBackstopEligible — facts_backstop frontmatter opt-out (#6232)', () => {
+describe('isFactsBackstopEligible: facts_backstop frontmatter opt-out (#6232)', () => {
   const cases: Array<[label: string, value: unknown, expected: ReturnType<typeof isFactsBackstopEligible>]> = [
     ['boolean false', false, { ok: false, reason: 'opted_out' }],
     ["text 'off'", 'off', { ok: false, reason: 'opted_out' }],
