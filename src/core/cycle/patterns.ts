@@ -729,11 +729,12 @@ export async function groundPatternPages(engine: BrainEngine, maintenance: Maint
     stats.quarantined += quarantined.length;
     stats.repaired += ct.normalized + ct.near + tl.normalized + tl.near;
     const prior = Array.isArray(snapshot.page.frontmatter.unverified_claims) ? snapshot.page.frontmatter.unverified_claims as unknown[] : [];
+    const records = [...prior.map(compactReflectionList),
+      ...quarantined.map(c => ({ ...c, sources: reflectionCount(sources.length), detected_at: cycleDate }))].slice(-100);
     const page = { ...snapshot.page,
       compiled_truth: ct.body.trim() ? ct.body : (await import('./synthesize-verify.ts')).ALL_CLAIMS_QUARANTINED_BODY,
       timeline: tl.body,
-      frontmatter: { ...snapshot.page.frontmatter, quote_verified_at: cycleDate,
-        ...(quarantined.length ? { unverified_claims: [...prior, ...quarantined.map(c => ({ ...c, sources: sources.map(x => x.path), detected_at: cycleDate }))].slice(-100) } : {}) } };
+      frontmatter: { ...snapshot.page.frontmatter, quote_verified_at: cycleDate, ...(records.length ? { unverified_claims: records } : {}) } };
     const content = serializePageToMarkdown(page, snapshot.tags);
     if (maintenance) {
       const { publishMaintenancePage } = await import('../persistence/prepared-maintenance.ts');
@@ -746,6 +747,23 @@ export async function groundPatternPages(engine: BrainEngine, maintenance: Maint
     }
   }
   return stats;
+}
+
+/**
+ * #6236: a pattern claim is checked against every reflection the run read (up
+ * to 100), so its record names how many, not each one: listing them on every
+ * claim grew pattern pages to hundreds of kilobytes, and the next run's
+ * subagent read them back whole.
+ */
+function reflectionCount(count: number): string[] {
+  return [`${count} reflections`];
+}
+
+/** A record written with the full reflection list keeps only its count. */
+function compactReflectionList(record: unknown): unknown {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return record;
+  const sources = (record as { sources?: unknown }).sources;
+  return Array.isArray(sources) && sources.length > 1 ? { ...record, sources: reflectionCount(sources.length) } : record;
 }
 
 // ── Provenance via put_page tool execution rows ─────────────────────

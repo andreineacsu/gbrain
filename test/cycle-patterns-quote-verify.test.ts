@@ -44,4 +44,21 @@ describe('patterns quote grounding', () => {
     const again = await groundPatternPages(engine, null, [], reflections, 'wiki/personal/patterns', 'default', '2026-10-05');
     expect(again).toEqual({ pages: 0, quarantined: 0, repaired: 0 });
   });
+
+  test('#6236: a claim record counts the reflections it was checked against instead of listing each one, and a listing record is compacted', async () => {
+    const reflections = ['r1', 'r2'].map(name => ({ slug: `wiki/personal/reflections/${name}`, title: name, excerpt: '', updatedAt: new Date(), seat: null }));
+    const listing = { text: 'You said "an older quote".', reason: 'quote_not_in_source', detail: 'not found',
+      sources: ['wiki/personal/reflections/r1', 'wiki/personal/reflections/r2', 'wiki/personal/reflections/r3'], detected_at: '2026-10-01' };
+    const single = { ...listing, text: 'You said "a synthesized quote".', sources: ['wiki/personal/reflections/r1'] };
+    await importFromContent(engine, 'wiki/personal/patterns/fridays',
+      `---\ntype: note\ntitle: Fridays\ndream_generated: true\nunverified_claims: ${JSON.stringify([listing, single])}\n---\nYou wrote "never deploy on Fridays".\n`,
+      { noEmbed: true, sourceId: 'default' });
+    await groundPatternPages(engine, null, [{ slug: 'wiki/personal/patterns/fridays', source_id: 'default' }], reflections,
+      'wiki/personal/patterns', 'default', '2026-10-07');
+    expect((await engine.getPage('wiki/personal/patterns/fridays'))!.frontmatter.unverified_claims).toEqual([
+      { ...listing, sources: ['3 reflections'] },
+      single,
+      expect.objectContaining({ text: expect.stringContaining('never deploy on Fridays'), reason: 'quote_not_in_source', sources: ['2 reflections'], detected_at: '2026-10-07' }),
+    ]);
+  });
 });
