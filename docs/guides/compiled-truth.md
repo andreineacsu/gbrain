@@ -132,9 +132,10 @@ support that claim.
    `extract timeline` scan the WHOLE page for dated markers:
    `- **YYYY-MM-DD** | ...` bullets and inline `[Source: ..., YYYY-MM-DD]`
    citations. The citation shape the quality convention mandates on every fact
-   therefore files one permanent timeline row per citation when it sits in
-   compiled truth (dated by the citation, summary = the bullet/paragraph it sits
-   in, code spans stripped). The example page above keeps its citations below
+   therefore files one permanent timeline row per dated source when it sits in
+   compiled truth (`[Source: A, D1; B, D2]` files A on D1 and B on D2; summary =
+   the bullet/paragraph it sits in, code spans, HTML comments and emphasis
+   markers stripped; a comment-only line ends the paragraph). The example page above keeps its citations below
    the sentinel, so it does not show the hazard. The one placement that mints
    nothing is a citation alone in its own paragraph — blank line above and
    below. Timeline rows commit with their page on every write;

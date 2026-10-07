@@ -178,6 +178,93 @@ describe('inline citation timeline dates', () => {
   });
 });
 
+// #6184: an HTML comment is markup, never an event: it leaves no text, and a
+// comment-only line drops out without ending the paragraph.
+// #6226: `;` after a date separates the sources of one citation, each keeping
+// its own date, and paired emphasis markers are unwrapped from the summary.
+describe('inline citation comments, sources and emphasis (#6184, #6226)', () => {
+  const cases: Array<{ name: string; content: string; expected: Array<{ date: string; source: string; summary: string }> }> = [
+    {
+      name: 'a citation in its own paragraph above a section END marker files nothing',
+      content: ['<!-- AUTO:slack -->', '- Talked with alice-example about the launch.', '', '[Source: Slack import, 2026-01-02]', '<!-- AUTO:slack END -->', ''].join('\n'),
+      expected: [],
+    },
+    {
+      name: 'a citation ending a bullet above a section END marker keeps the bullet text only',
+      content: ['<!-- AUTO:slack -->', '- Talked with alice-example about the launch.', '[Source: Slack import, 2026-01-02]', '<!-- AUTO:slack END -->', ''].join('\n'),
+      expected: [{ date: '2026-01-02', source: 'Slack import', summary: 'Talked with alice-example about the launch.' }],
+    },
+    {
+      name: 'a materialized marker below an END marker is not echoed into a summary',
+      content: ['[Source: Slack import, 2026-01-02]', '<!-- AUTO:slack END -->', '<!-- gbrain:materialized v1 aa7e494fedca -->', ''].join('\n'),
+      expected: [],
+    },
+    {
+      name: 'an inline comment and a comment running onto the next line leave no text',
+      content: ['Kickoff held <!-- moved from notes --> in person. [Source: memo, 2026-01-03] <!-- AUTO:notes', 'generated -->'].join('\n'),
+      expected: [{ date: '2026-01-03', source: 'memo', summary: 'Kickoff held in person.' }],
+    },
+    {
+      name: 'a comment-only line between prose and its citation drops out of the paragraph',
+      content: ['Talked with alice-example about the launch.', '<!-- slack thread -->', '[Source: Slack import, 2026-01-02]'].join('\n'),
+      expected: [{ date: '2026-01-02', source: 'Slack import', summary: 'Talked with alice-example about the launch.' }],
+    },
+    {
+      name: 'an unclosed comment opener is text and hides no later citation',
+      content: ['We use the <!-- marker in notes. [Source: memo, 2026-01-01]', '', 'Hired Bob. [Source: memo, 2026-01-05]'].join('\n'),
+      expected: [
+        { date: '2026-01-01', source: 'memo', summary: 'We use the <!-- marker in notes.' },
+        { date: '2026-01-05', source: 'memo', summary: 'Hired Bob.' },
+      ],
+    },
+    {
+      name: 'a backtick inside a comment does not pair with a later one',
+      content: 'Kickoff held. <!-- the ` key --> [Source: memo, 2026-01-03] <!-- another ` -->',
+      expected: [{ date: '2026-01-03', source: 'memo', summary: 'Kickoff held.' }],
+    },
+    {
+      name: 'a multi-source citation files one entry per source, each with its own date',
+      content: '# Alice Example\n\n- **Widget-co:** per Alice, builds widgets for small teams. [Source: meeting transcript, 2026-10-06; Gmail "Intro", 2026-09-28]\n',
+      expected: [
+        { date: '2026-10-06', source: 'meeting transcript', summary: 'Widget-co: per Alice, builds widgets for small teams.' },
+        { date: '2026-09-28', source: 'Gmail "Intro"', summary: 'Widget-co: per Alice, builds widgets for small teams.' },
+      ],
+    },
+    {
+      name: 'a semicolon before any date stays inside the source',
+      content: 'Offer accepted. [Source: call; follow-up email, 2026-05-10]',
+      expected: [{ date: '2026-05-10', source: 'call; follow-up email', summary: 'Offer accepted.' }],
+    },
+    {
+      name: 'a source with an invalid date or no name is dropped and its sibling kept',
+      content: 'Board approved. [Source: minutes, 2026-02-30; memo, 2026-03-02; , 2026-03-03]',
+      expected: [{ date: '2026-03-02', source: 'memo', summary: 'Board approved.' }],
+    },
+    {
+      name: 'a source name may hold a line separator',
+      content: 'Met. [Source: call\u2028notes, 2026-01-02]',
+      expected: [{ date: '2026-01-02', source: 'call\u2028notes', summary: 'Met.' }],
+    },
+    {
+      name: 'paired emphasis is unwrapped; snake_case and spaced stars are not emphasis',
+      content: '- __Status__: ***shipped*** the _beta_ of widget_co_api to 2 * 3 * 4 users. [Source: changelog, 2026-04-01]',
+      expected: [{ date: '2026-04-01', source: 'changelog', summary: 'Status: shipped the beta of widget_co_api to 2 * 3 * 4 users.' }],
+    },
+    {
+      name: 'nested emphasis is unwrapped too',
+      content: '- **Widget-co (*stealth*):** raised a seed. [Source: memo, 2026-01-01]',
+      expected: [{ date: '2026-01-01', source: 'memo', summary: 'Widget-co (stealth): raised a seed.' }],
+    },
+  ];
+  for (const { name, content, expected } of cases) {
+    test(name, () => {
+      expect(parseInlineCitationTimelineEntries(content)).toEqual(expected);
+      expect(parseTimelineEntries(content)).toEqual(expected.map(entry => ({ ...entry, detail: `Source: ${entry.source}` })));
+      expect(extractTimelineFromContent(content, 'people/alice-example')).toEqual(expected.map(entry => ({ ...entry, slug: 'people/alice-example' })));
+    });
+  }
+});
+
 describe('inline citation link targets (#5483)', () => {
   const cite = emailCitation({
     account: 'user@example.com',
