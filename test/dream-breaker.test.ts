@@ -39,14 +39,23 @@ beforeEach(async () => {
 
 const KEY = 'dream:synth-v2:default:filename:loop.txt:0123456789abcdef';
 
-async function seedJob(opts: { key: string; status: string; queue: string; hoursAgo?: number; released?: boolean }, target: PGLiteEngine = engine): Promise<void> {
+async function seedJob(opts: { key: string; status: string; queue: string; hoursAgo?: number; released?: boolean; sourceId?: string }, target: PGLiteEngine = engine): Promise<void> {
+  const source_id = opts.sourceId ?? 'default';
   await target.executeRaw(
     `INSERT INTO minion_jobs (submission_authority, name, queue, status, data, idempotency_key, created_at, finished_at)
      VALUES ('{"version":1,"kind":"application"}'::jsonb, 'subagent', $1, $2, $3::text::jsonb, $4,
              now() - ($5 || ' hours')::interval, now() - ($5 || ' hours')::interval)`,
-    [opts.queue, opts.status, JSON.stringify(opts.released ? { source_id: 'default', __released_idempotency_key: opts.key } : { source_id: 'default' }),
+    [opts.queue, opts.status, JSON.stringify(opts.released ? { source_id, __released_idempotency_key: opts.key } : { source_id }),
       opts.released ? null : opts.key, String(opts.hoursAgo ?? 1)],
   );
+}
+
+async function captured(run: () => Promise<void>): Promise<string> {
+  const lines: string[] = [];
+  const log = console.log;
+  console.log = (...args: unknown[]) => { lines.push(args.join(' ')); };
+  try { await run(); } finally { console.log = log; }
+  return lines.join('\n');
 }
 
 describe('queue key release', () => {
@@ -115,6 +124,25 @@ describe('dead-submission counter', () => {
   });
 });
 
+describe('#6236 patterns deaths per source', () => {
+  const SOURCE_KEY = 'dream:patterns:source:default';
+
+  test('three dead runs under three different keys trip the source key; another source and a reset do not', async () => {
+    for (const [i, queue] of ['p1', 'p2', 'p3'].entries()) await seedJob({ key: `dream:patterns:digest-${i}`, status: 'dead', queue, released: i > 0 });
+    await seedJob({ key: 'dream:patterns:digest-9', status: 'dead', queue: 'p9', sourceId: 'other' });
+    await seedJob({ key: KEY, status: 'dead', queue: 's1' });
+    const rows = await countDeadDreamSubmissions(engine);
+    expect(rows.filter(row => row.base_key.startsWith('dream:patterns:source:')).map(({ base_key, dead_submissions }) => ({ base_key, dead_submissions })))
+      .toEqual([{ base_key: SOURCE_KEY, dead_submissions: 3 }, { base_key: 'dream:patterns:source:other', dead_submissions: 1 }]);
+    const breaker = (await loadDreamBreaker(engine))!;
+    expect([...breaker.tripped.keys()]).toEqual([SOURCE_KEY]);
+    expect(dreamBreakerRefusal(breaker, SOURCE_KEY)).toContain(`gbrain dream reset-key '${SOURCE_KEY}'`);
+    const { runDreamResetKey } = await import('../src/commands/dream-reset-key.ts');
+    expect(await captured(() => runDreamResetKey(engine, [SOURCE_KEY]))).toContain(`Reset ${SOURCE_KEY} (3 dead submission(s)`);
+    expect((await loadDreamBreaker(engine))!.tripped.size).toBe(0);
+  });
+});
+
 describe('#5590 boundary', () => {
   test('a real zero-write failure still dead-letters, and that death counts', async () => {
     const proseOnly = { result: 'I will write the page next.', turns_count: 1, stop_reason: 'end_turn' as const,
@@ -140,14 +168,6 @@ describe('doctor dream_paid_loop', () => {
 });
 
 describe('gbrain dream reset-key', () => {
-  async function captured(run: () => Promise<void>): Promise<string> {
-    const lines: string[] = [];
-    const log = console.log;
-    console.log = (...args: unknown[]) => { lines.push(args.join(' ')); };
-    try { await run(); } finally { console.log = log; }
-    return lines.join('\n');
-  }
-
   test('--list shows tripped keys and a reset clears them', async () => {
     const { runDreamResetKey } = await import('../src/commands/dream-reset-key.ts');
     await seedJob({ key: KEY, status: 'dead', queue: 'd1' });

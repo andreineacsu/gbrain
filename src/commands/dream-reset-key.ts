@@ -16,6 +16,8 @@ const HELP = `Usage: gbrain dream reset-key <base-key>
 
 The paid-loop breaker refuses to resubmit a dream synthesize or patterns key
 whose submissions died ${'`'}${DREAM_BREAKER_CONFIG_KEY}${'`'} times (default 3) within 24 hours.
+Patterns deaths also count under ${'`'}dream:patterns:source:<source id>${'`'} whatever
+each run's key was; a completed patterns run clears that count.
 
   <base-key>   Re-enable one key (without any :c<i>of<n> chunk suffix). The reset
                is stored in the brain and survives restarts; deaths after it

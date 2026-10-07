@@ -8,6 +8,7 @@ import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { runPhaseConsolidate } from '../src/core/cycle/phases/consolidate.ts';
 import { runPhaseSynthesize } from '../src/core/cycle/synthesize.ts';
 import { runPhasePatterns } from '../src/core/cycle/patterns.ts';
+import { countDeadDreamSubmissions } from '../src/core/cycle/dream-breaker.ts';
 import { runCycle } from '../src/core/cycle.ts';
 import { maintenancePreflight, publishMaintenancePage, prepareMaintenanceMutation } from '../src/core/persistence/prepared-maintenance.ts';
 import { claimWorktree, getWorktreeBinding, acquireWorktree } from '../src/core/persistence/ownership.ts';
@@ -563,6 +564,50 @@ for (const managed of [true, false]) test(`#5884: ${managed ? 'managed' : 'unman
         }
         expect(parseMarkdown(readFileSync(join(root, 'wiki/personal/patterns/traced.md'), 'utf8')).frontmatter)
           .toMatchObject({ raw_trace_exempt: true });
+      });
+    } finally { __setChatTransportForTests(null); }
+  });
+}, 90_000);
+
+test('#6236: managed patterns stops after three dead runs under changing keys, and a completed run clears the count', async () => {
+  await fixture(async (engine, sourceId, root) => {
+    for (let i = 0; i < 3; i++) await seed(engine, sourceId, `wiki/personal/reflections/example-${i}`);
+    await engine.setConfig('dream.patterns.enabled', 'true');
+    await engine.setConfig('models.dream.patterns', 'anthropic:claude-sonnet-4-6');
+    await engine.setConfig('agent.use_gateway_loop', 'true');
+    await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+    const sourceKey = `dream:patterns:source:${sourceId}`;
+    // Each earlier run digested a different reflection set, so each died under its own key.
+    const dead = (n: number, finished: string) => engine.executeRaw(
+      `INSERT INTO minion_jobs (submission_authority, name, queue, status, data, created_at, finished_at)
+       VALUES ('{"version":1,"kind":"application"}'::jsonb, 'subagent', $1, 'dead', $2::text::jsonb, ${finished}, ${finished})`,
+      [`dream-inline-dead-${sourceId}-${n}`, JSON.stringify({ source_id: sourceId, __released_idempotency_key: `dream:patterns:reflection-set-${n}` })]);
+    const sourceCount = async () => (await countDeadDreamSubmissions(engine)).find(row => row.base_key === sourceKey)?.dead_submissions ?? 0;
+    let calls = 0;
+    __setChatTransportForTests(async opts => {
+      calls++;
+      const write = calls % 2 === 1;
+      return { text: write ? '' : 'Saved the pattern.', blocks: write ? [{ type: 'tool-call', toolCallId: `pattern-write-${calls}`, toolName: 'brain_put_page', input: {
+        slug: 'wiki/personal/patterns/breaker', content: `---\ntitle: Breaker pattern\ntype: note\n---\nA recurring theme, run ${calls}, in [[wiki/personal/reflections/example-0]].`,
+      } }] : [{ type: 'text', text: 'Saved the pattern.' }], stopReason: write ? 'tool_calls' : 'end',
+      usage: { input_tokens: 100, output_tokens: 100, cache_read_tokens: 0, cache_creation_tokens: 0 },
+      model: opts.model!, providerId: 'anthropic' };
+    });
+    try {
+      await withEnv({ ANTHROPIC_API_KEY: 'sk-test-maintenance' }, async () => {
+        for (let n = 0; n < 3; n++) await dead(n, "now() - interval '2 hours'");
+        const refused = await runPhasePatterns(engine, { brainDir: root, sourceId, dryRun: false, once: true, cycleDate: '2026-10-07' });
+        expect(refused).toMatchObject({ status: 'skipped', details: { reason: 'dream_breaker_tripped' } });
+        expect(refused.summary).toContain(`gbrain dream reset-key '${sourceKey}'`);
+        expect(calls).toBe(0);
+
+        await engine.executeRaw('DELETE FROM minion_jobs WHERE queue LIKE $1', [`dream-inline-dead-${sourceId}-%`]);
+        for (let n = 0; n < 2; n++) await dead(n, "now() - interval '2 hours'");
+        expect(await sourceCount()).toBe(2);
+        const completed = await runPhasePatterns(engine, { brainDir: root, sourceId, dryRun: false, once: true, cycleDate: '2026-10-07' });
+        expect(completed.details.child_outcome).toBe('completed');
+        await dead(2, "now() + interval '1 second'");
+        expect(await sourceCount()).toBe(1);
       });
     } finally { __setChatTransportForTests(null); }
   });

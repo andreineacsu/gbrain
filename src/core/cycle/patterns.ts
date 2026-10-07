@@ -47,7 +47,7 @@ import { probeChatModel } from '../ai/gateway.ts';
 import { normalizeModelId } from '../model-id.ts';
 import { throwIfAborted } from '../abort-check.ts';
 import { resolveCycleDate } from './cycle-date.ts';
-import { dreamBreakerRefusal, loadDreamBreaker } from './dream-breaker.ts';
+import { clearPatternsSourceDeaths, patternsBreakerRefusal } from './dream-breaker.ts';
 import { publishOrHold } from '../persistence/accepted-pending.ts';
 
 export interface PatternsPhaseOpts {
@@ -285,9 +285,8 @@ export async function runPhasePatterns(
       private_queue_owner_token: privateQueueOwnerToken,
       private_queue_lease_ms: DEFAULT_PRIVATE_QUEUE_LEASE_MS,
     };
-    // Paid-loop breaker: only maintenance runs carry a key, so only they are covered.
-    const breaker = submitOpts.idempotency_key ? await loadDreamBreaker(engine) : null;
-    const refusal = breaker && dreamBreakerRefusal(breaker, submitOpts.idempotency_key!);
+    // Paid-loop breaker: only maintenance runs carry a key, so only they are covered (#6236: per source too).
+    const refusal = submitOpts.idempotency_key ? await patternsBreakerRefusal(engine, submitOpts.idempotency_key, opts.sourceId ?? 'default') : null;
     if (refusal) {
       process.stderr.write(`[dream] patterns: ${refusal}\n`);
       return skipped('dream_breaker_tripped', refusal);
@@ -345,6 +344,8 @@ export async function runPhasePatterns(
         throw e;
       }
     }
+
+    if (outcome === 'completed' && submitOpts.idempotency_key) await clearPatternsSourceDeaths(engine, opts.sourceId ?? 'default'); // #6236
 
     if (opts.yieldDuringPhase) {
       try { await opts.yieldDuringPhase(); } catch { /* best-effort */ }

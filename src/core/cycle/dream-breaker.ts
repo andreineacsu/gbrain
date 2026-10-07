@@ -10,12 +10,19 @@
  * Only dead rows count: a completed job, including a legitimate zero-write
  * completion, is never a death.
  *
- * Not covered: content-hashed keys change whenever a transcript grows, and
- * patterns runs outside maintenance carry no key.
+ * A patterns key digests the reflection set, so it changes whenever a
+ * reflection does. Every patterns death therefore also counts under the
+ * stable per-source key `dream:patterns:source:<source id>`, which trips
+ * however often the content key changed; a completed patterns run resets it.
+ *
+ * Not covered: content-hashed synthesize keys change whenever a transcript
+ * grows, and patterns runs outside maintenance carry no key.
  */
 import type { BrainEngine } from '../engine.ts';
 
 export const DREAM_BREAKER_KEY_PREFIXES = ['dream:synth-v2:', 'dream:patterns:'] as const;
+/** Base-key prefix of the per-source patterns count, whatever each run's content key. */
+export const DREAM_PATTERNS_SOURCE_KEY_PREFIX = 'dream:patterns:source:';
 /** Base-key prefix of a contained cycle-phase failure after paid model calls. */
 export const DREAM_PHASE_KEY_PREFIX = 'dream:phase:';
 export const DREAM_BREAKER_CONFIG_KEY = 'dream.breaker.max_dead_submissions';
@@ -25,6 +32,11 @@ export const DREAM_BREAKER_CONTAINED_KEY = 'dream.breaker.contained_failures';
 export const DEFAULT_MAX_DEAD_SUBMISSIONS = 3;
 
 export interface DeadDreamSubmissions { base_key: string; dead_submissions: number; last_dead_at: string }
+
+/** The stable key every patterns death of this source also counts under. */
+export function dreamPatternsSourceKey(sourceId: string): string {
+  return `${DREAM_PATTERNS_SOURCE_KEY_PREFIX}${sourceId}`;
+}
 
 export function dreamBreakerBaseKey(key: string): string {
   return key.replace(/:c\d+of\d+$/, '');
@@ -63,17 +75,22 @@ export async function countDeadDreamSubmissions(engine: BrainEngine): Promise<De
   const dead = await engine.executeRaw<DeadDreamSubmissions>(
     `WITH dead AS (
        SELECT regexp_replace(COALESCE(idempotency_key, data->>'__released_idempotency_key'), ':c[0-9]+of[0-9]+$', '') AS base_key,
-              queue, finished_at
+              COALESCE(data->>'source_id', 'default') AS source_id, queue, finished_at
          FROM minion_jobs
         WHERE name = 'subagent' AND status = 'dead' AND finished_at > now() - interval '24 hours'
+     ), counted AS (
+       SELECT base_key, queue, finished_at FROM dead
+        WHERE left(base_key, ${DREAM_BREAKER_KEY_PREFIXES[0].length}) = $1 OR left(base_key, ${DREAM_BREAKER_KEY_PREFIXES[1].length}) = $2
+       UNION ALL
+       SELECT $4::text || source_id, queue, finished_at FROM dead
+        WHERE left(base_key, ${DREAM_BREAKER_KEY_PREFIXES[1].length}) = $2
      )
      SELECT base_key, COUNT(DISTINCT queue)::int AS dead_submissions, MAX(finished_at)::text AS last_dead_at
-       FROM dead
-      WHERE (left(base_key, ${DREAM_BREAKER_KEY_PREFIXES[0].length}) = $1 OR left(base_key, ${DREAM_BREAKER_KEY_PREFIXES[1].length}) = $2)
-        AND finished_at > COALESCE(($3::text::jsonb ->> base_key)::timestamptz, '-infinity'::timestamptz)
+       FROM counted
+      WHERE finished_at > COALESCE(($3::text::jsonb ->> base_key)::timestamptz, '-infinity'::timestamptz)
       GROUP BY base_key
       ORDER BY dead_submissions DESC, base_key`,
-    [DREAM_BREAKER_KEY_PREFIXES[0], DREAM_BREAKER_KEY_PREFIXES[1], JSON.stringify(resets)],
+    [DREAM_BREAKER_KEY_PREFIXES[0], DREAM_BREAKER_KEY_PREFIXES[1], JSON.stringify(resets), DREAM_PATTERNS_SOURCE_KEY_PREFIX],
   );
   const cutoff = Date.now() - 24 * 3_600_000;
   for (const [baseKey, times] of Object.entries(await loadContained(engine))) {
@@ -138,6 +155,30 @@ export async function loadDreamBreaker(engine: BrainEngine): Promise<DreamBreake
     process.stderr.write(`[dream] breaker count query failed (${error instanceof Error ? error.message : String(error)}); `
       + 'skipping the paid-loop breaker for this run\n');
     return null;
+  }
+}
+
+/**
+ * The refusal for a patterns submission: its source's key, then its content
+ * key. Null when the breaker is off or neither is tripped.
+ */
+export async function patternsBreakerRefusal(engine: BrainEngine, contentKey: string, sourceId: string): Promise<string | null> {
+  const breaker = await loadDreamBreaker(engine);
+  return breaker && (dreamBreakerRefusal(breaker, dreamPatternsSourceKey(sourceId)) ?? dreamBreakerRefusal(breaker, contentKey));
+}
+
+/**
+ * A completed patterns run ends its source's death count, so only deaths in
+ * a row trip it. A failed reset is logged; the earlier deaths then keep
+ * counting until they leave the 24 h window.
+ */
+export async function clearPatternsSourceDeaths(engine: BrainEngine, sourceId: string): Promise<void> {
+  const key = dreamPatternsSourceKey(sourceId);
+  try {
+    await resetDreamBreakerKey(engine, key);
+  } catch (error) {
+    process.stderr.write(`[dream] patterns: could not clear ${key} after a completed run; its earlier deaths keep counting `
+      + `until they are 24h old (${error instanceof Error ? error.message : String(error)})\n`);
   }
 }
 
