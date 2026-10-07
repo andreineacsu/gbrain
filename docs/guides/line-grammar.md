@@ -85,6 +85,9 @@ linking page is due for re-extraction and the next sweep creates the edge.
 pages link to it, most-referenced first. A bare-name link like
 `[[Dave Example]]` whose name matches an existing page in another directory
 shows that page in `existing_matches`, so the link can be rewritten by slug.
+A reference no page can ever have is skipped and never listed: a citation like
+`[[memory:12345]]` whose prefix is not a registered source, or bracketed code
+on a code page that does not form a valid slug.
 Remote callers never see targets that only private pages reference. Writes from remote agents record their missing
 mention targets too (`wanted_pages.remote`, on by default).
 
