@@ -3,13 +3,14 @@
  * edges when their target appears, stay private, and never loop the stale
  * sweep. Postgres arm: test/e2e/wanted-links-postgres.test.ts.
  */
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { extractStaleFromDB } from '../src/commands/extract.ts';
+import { extractStaleFromDB, runExtract } from '../src/commands/extract.ts';
 import { collectWantedLinks } from '../src/core/wanted-links.ts';
-import type { LinkCandidate } from '../src/core/link-extraction.ts';
+import { LINK_EXTRACTOR_VERSION_TS, type LinkCandidate } from '../src/core/link-extraction.ts';
 import { bareNameReferenceSettles, disabledClearsRows, forwardReferenceHeals, onlyUnresolvedAuthoredReferences,
-  privateOriginsStayPrivate, restoredTargetHeals } from './helpers/wanted-links-scenarios.ts';
+  privateOriginsStayPrivate, restoredTargetHeals, UNPAGEABLE_CITATIONS, UNPAGEABLE_CODE_PAGE, unpageableReferencesNeverAbortExtraction,
+  unpageableReferencesStayOutOfWrites, wantedTargets } from './helpers/wanted-links-scenarios.ts';
 
 test('a link written before its target exists becomes an edge after the target is created', () => forwardReferenceHeals(), 120_000);
 test('resolved references, prose paths and code spans are never wanted', () => onlyUnresolvedAuthoredReferences(), 120_000);
@@ -17,6 +18,8 @@ test('a bare-name reference matched only by basename settles after one re-extrac
 test('remote callers never see targets or counts from private origins', () => privateOriginsStayPrivate(), 120_000);
 test('restoring a deleted target heals links written while it was deleted', () => restoredTargetHeals(), 120_000);
 test('wanted_pages.enabled=false clears an origin\'s rows on its next extraction', () => disabledClearsRows(), 120_000);
+test('the stale sweep skips references that cannot name a page and finishes', () => unpageableReferencesNeverAbortExtraction(), 120_000);
+test('a write never lists or records references that cannot name a page', () => unpageableReferencesStayOutOfWrites(), 120_000);
 
 describe('collectWantedLinks', () => {
   const candidate = (targetSlug: string, key: string, extra: Partial<LinkCandidate> = {}): LinkCandidate => ({
@@ -80,5 +83,34 @@ describe('unmanaged brain', () => {
     expect(await engine.executeRaw(`SELECT f.slug FROM links l JOIN pages f ON f.id=l.from_page_id JOIN pages t ON t.id=l.to_page_id
       WHERE t.slug='people/carol-example'`)).toEqual([{ slug: 'notes/lunch' }]);
     expect(await engine.executeRaw('SELECT target_ref FROM wanted_links')).toEqual([]);
+  }, 120_000);
+});
+
+// Unmanaged extraction passes collectWantedLinks rows straight to replaceWantedLinks, so the store's own filter is the only guard.
+describe('unmanaged brain, references that cannot name a page', () => {
+  let engine: PGLiteEngine;
+  beforeAll(async () => {
+    engine = new PGLiteEngine();
+    await engine.connect({});
+    await engine.initSchema();
+  }, 60_000);
+  afterAll(async () => { await engine.disconnect(); }, 60_000);
+
+  test('extract links --source db and the stale sweep finish, and every valid link lands', async () => {
+    await engine.executeRaw("INSERT INTO sources(id,name) VALUES('archive','archive')");
+    await engine.setConfig('link_resolution.cross_source', 'true');
+    await engine.putPage('people/alice-example', { type: 'person', title: 'Alice', compiled_truth: 'Alice.', timeline: '' });
+    await engine.putPage('src/fetch-mock.test.ts', { type: 'code', title: 'Fetch mock', compiled_truth: UNPAGEABLE_CODE_PAGE, timeline: '' });
+    await engine.putPage('notes/cursor', { type: 'note', title: 'Cursor', compiled_truth: UNPAGEABLE_CITATIONS, timeline: '' });
+    const expected = [{ target: 'archive:people/dan-example' }, { target: 'default:people/carol-example' }];
+    const log = spyOn(console, 'log').mockImplementation(() => {});
+    const exit = spyOn(process, 'exit').mockImplementation(code => { throw new Error(`Extraction exited with code ${code}`); });
+    try { await runExtract(engine, ['links', '--source', 'db']); } finally { exit.mockRestore(); log.mockRestore(); }
+    expect(await wantedTargets(engine)).toEqual(expected);
+    expect(await engine.executeRaw(`SELECT f.slug FROM links l JOIN pages f ON f.id=l.from_page_id JOIN pages t ON t.id=l.to_page_id
+      WHERE t.slug='people/alice-example' ORDER BY f.slug`)).toEqual([{ slug: 'notes/cursor' }, { slug: 'src/fetch-mock.test.ts' }]);
+    await extractStaleFromDB(engine, { dryRun: false, jsonMode: true, quiet: true, catchUp: true });
+    expect(await engine.countStalePagesForExtraction({ versionTs: LINK_EXTRACTOR_VERSION_TS })).toBe(0);
+    expect(await wantedTargets(engine)).toEqual(expected);
   }, 120_000);
 });

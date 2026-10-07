@@ -4,7 +4,8 @@
  */
 import { describe, test } from 'bun:test';
 import { bareNameReferenceSettles, disabledClearsRows, forwardReferenceHeals, onlyUnresolvedAuthoredReferences,
-  privateOriginsStayPrivate, restoredTargetHeals } from '../helpers/wanted-links-scenarios.ts';
+  privateOriginsStayPrivate, restoredTargetHeals, unpageableReferencesNeverAbortExtraction,
+  unpageableReferencesStayOutOfWrites } from '../helpers/wanted-links-scenarios.ts';
 
 const url = process.env.DATABASE_URL;
 describe.skipIf(!url)('Postgres wanted pages', () => {
@@ -14,4 +15,6 @@ describe.skipIf(!url)('Postgres wanted pages', () => {
   test('private origins stay private', () => privateOriginsStayPrivate(url), 180_000);
   test('restoring a deleted target heals', () => restoredTargetHeals(url), 180_000);
   test('disabling clears rows', () => disabledClearsRows(url), 180_000);
+  test('the stale sweep skips references that cannot name a page', () => unpageableReferencesNeverAbortExtraction(url), 180_000);
+  test('a write never records references that cannot name a page', () => unpageableReferencesStayOutOfWrites(url), 180_000);
 });

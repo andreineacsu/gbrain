@@ -6,6 +6,7 @@
 import type { BrainEngine } from './engine.ts';
 import { executeRawJsonb } from './sql-query.ts';
 import { sanitizeForJsonb } from './batch-rows.ts';
+import { validateSlug } from './utils.ts';
 
 export type WantedProducer = 'body' | 'frontmatter';
 
@@ -25,9 +26,32 @@ export interface WantedLinksReplacement {
 }
 
 /**
+ * The rows whose target can become a page: a slug validateSlug accepts (a
+ * bare name always can), in a registered source. Any other reference names
+ * no possible page, such as a regex literal on a code page read as a wikilink
+ * or a `[[memory:123]]` citation whose prefix is no source id. It is never
+ * wanted: the page guard would throw on it and abort the caller's whole
+ * transaction. Its link candidate still counts as a missing target.
+ */
+export async function possibleWantedRows<T extends Pick<WantedLinkInput, 'ref_kind' | 'target_source_id' | 'target_ref'>>(
+  executor: Pick<BrainEngine, 'executeRaw'>, rows: readonly T[],
+): Promise<T[]> {
+  const shaped = rows.filter(row => row.ref_kind !== 'slug' || isPageSlug(row.target_ref));
+  if (!shaped.length) return [];
+  const registered = new Set((await executor.executeRaw<{ id: string }>('SELECT id FROM sources WHERE id = ANY($1::text[])',
+    [[...new Set(shaped.map(row => row.target_source_id))]])).map(row => row.id));
+  return shaped.filter(row => registered.has(row.target_source_id));
+}
+
+function isPageSlug(target: string): boolean {
+  try { validateSlug(target); return true; } catch { return false; } // a rejected slug is this predicate's answer
+}
+
+/**
  * Replace one origin's wanted rows inside the caller's transaction (the same
- * one that replaces its derived links). Slug targets are locked first, so a
- * concurrent writer creating the target either committed before this check
+ * one that replaces its derived links), keeping only possibleWantedRows.
+ * Slug targets are locked first, so a concurrent writer creating the target
+ * either committed before this check
  * (and the row is stamped `-infinity`, leaving the origin stale) or commits
  * after it with an `updated_at` past `checked_at`. Only an exact slug counts
  * here: a bare-name reference matching some page's basename may legitimately
@@ -40,7 +64,7 @@ export async function replaceWantedLinks(
   replacement: WantedLinksReplacement,
 ): Promise<number> {
   if (!replacement.producers.length) return 0;
-  const rows = replacement.rows.filter(row => replacement.producers.includes(row.producer))
+  const rows = (await possibleWantedRows(tx, replacement.rows.filter(row => replacement.producers.includes(row.producer))))
     .map(row => ({ ...row, context: sanitizeForJsonb(row.context) }));
   const slugTargets = rows.filter(row => row.ref_kind === 'slug')
     .map(row => ({ sourceId: row.target_source_id, slug: row.target_ref }));

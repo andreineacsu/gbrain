@@ -5,9 +5,10 @@
  * person before that person's page existed never gained the edge: nothing
  * re-extracted the linking page when the target appeared. Each unresolved
  * authored reference (a body markdown link or wikilink, or a frontmatter link
- * field) is recorded in `wanted_links`, replaced together with the origin's
- * derived links. A live page matching a wanted target and updated after the
- * row's `checked_at` makes the origin stale for extraction
+ * field) whose target can become a page (`possibleWantedRows`) is recorded in
+ * `wanted_links`, replaced together with the origin's derived links. A live
+ * page matching a wanted target and updated after the row's `checked_at`
+ * makes the origin stale for extraction
  * (`WANTED_ORIGIN_IS_STALE` in engine-sql/pages.ts), so the next sweep creates the
  * edge and the row disappears. Rows are derived state: the page text is the
  * source of truth.
@@ -19,7 +20,7 @@ import { isValidSourceId } from './source-id.ts';
 import type { WantedLinkInput } from './wanted-links-store.ts';
 
 export type { WantedLinkInput, WantedLinksReplacement, WantedProducer } from './wanted-links-store.ts';
-export { replaceWantedLinks } from './wanted-links-store.ts';
+export { possibleWantedRows, replaceWantedLinks } from './wanted-links-store.ts';
 
 type Resolution = { ok: true } | { ok: false; reason: string };
 

@@ -68,6 +68,50 @@ export async function onlyUnresolvedAuthoredReferences(databaseUrl?: string) {
   }, { databaseUrl });
 }
 
+// A regex literal on a code page read as a wikilink (#6228) and a citation whose prefix names no source (#6225).
+export const UNPAGEABLE_CODE_PAGE = 'const f = fakeFetch([[/jina\\.local/, () => json(body, status)]]);\n// owner: [[people/alice-example]] [[people/carol-example]]';
+export const UNPAGEABLE_CITATIONS = 'See [[memory:12345]] with [[people/alice-example]], [[people/carol-example]] and [[archive:people/dan-example]].';
+const addArchiveSource = async ({ engine }: { engine: BrainEngine }) => {
+  await engine.executeRaw("INSERT INTO sources(id,name) VALUES('archive','archive')");
+};
+export const wantedTargets = (engine: BrainEngine) => engine.executeRaw<{ target: string }>(
+  "SELECT DISTINCT target_source_id || ':' || target_ref AS target FROM wanted_links ORDER BY 1");
+
+/** References that can never name a page are skipped by the stale sweep; the run finishes and every valid link lands. */
+export async function unpageableReferencesNeverAbortExtraction(databaseUrl?: string) {
+  await managedBrain(async ({ engine, ctx }) => {
+    await put(ctx, 'people/alice-example', 'Alice.', 'person');
+    // Written while wanted pages are off, so only the sweep below meets these references.
+    await engine.setConfig('wanted_pages.enabled', 'false');
+    await put(ctx, 'src/fetch-mock.test.ts', UNPAGEABLE_CODE_PAGE, 'code');
+    await put(ctx, 'notes/cursor', UNPAGEABLE_CITATIONS);
+    await engine.setConfig('wanted_pages.enabled', 'true');
+    await engine.setConfig('link_resolution.cross_source', 'true');
+    await engine.executeRaw("UPDATE pages SET links_extracted_at = NULL WHERE slug IN ('src/fetch-mock.test.ts', 'notes/cursor')");
+    await extractStale(engine);
+    expect(await stale(engine)).toBe(0);
+    expect(await backlinks(engine, 'people/alice-example')).toEqual([{ slug: 'notes/cursor' }, { slug: 'src/fetch-mock.test.ts' }]);
+    expect(await wantedTargets(engine)).toEqual([{ target: 'archive:people/dan-example' }, { target: 'default:people/carol-example' }]);
+  }, { databaseUrl, setup: addArchiveSource });
+}
+
+/** A write's wanted preview lists only targets a page can have, and the write itself succeeds. */
+export async function unpageableReferencesStayOutOfWrites(databaseUrl?: string) {
+  await managedBrain(async ({ engine, ctx }) => {
+    await engine.setConfig('link_resolution.cross_source', 'true');
+    await put(ctx, 'people/alice-example', 'Alice.', 'person');
+    const code = await put(ctx, 'src/fetch-mock.test.ts', UNPAGEABLE_CODE_PAGE, 'code');
+    expect((code.outcome ?? code).auto_links.wanted).toEqual([{ slug: 'people/carol-example', source_id: 'default' }]);
+    const cited = await put(ctx, 'notes/cursor', UNPAGEABLE_CITATIONS);
+    const autoLinks = (cited.outcome ?? cited).auto_links;
+    expect(autoLinks.wanted_count).toBe(2);
+    expect(autoLinks.wanted).toEqual(expect.arrayContaining([{ slug: 'people/carol-example', source_id: 'default' },
+      { slug: 'people/dan-example', source_id: 'archive' }]));
+    expect(await backlinks(engine, 'people/alice-example')).toEqual([{ slug: 'notes/cursor' }, { slug: 'src/fetch-mock.test.ts' }]);
+    expect(await wantedTargets(engine)).toEqual([{ target: 'archive:people/dan-example' }, { target: 'default:people/carol-example' }]);
+  }, { databaseUrl, setup: addArchiveSource });
+}
+
 /** A bare-name reference that matches a page only by basename wakes its origin once, then settles (no re-listing loop). */
 export async function bareNameReferenceSettles(databaseUrl?: string) {
   await managedBrain(async ({ engine, ctx }) => {
