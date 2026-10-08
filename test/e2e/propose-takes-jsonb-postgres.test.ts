@@ -12,11 +12,15 @@
  *
  * Pins: both write sites produce `jsonb_typeof = 'array'` and the dedup rows'
  * elements round-trip their fields (`-> 0 ->> 'claim'` resolves).
+ *
+ * Also pins the candidate filter on Postgres (#5212, #5211): the frontmatter
+ * arms that keep cycle output out of the candidates read real jsonb here.
  */
 import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
 import { setupDB, teardownDB, hasDatabase } from './helpers.ts';
 import {
   runPhaseProposeTakes,
+  __testing,
   EMPTY_EXTRACTION_TOMBSTONE_TEXT,
   type ProposeTakesExtractor,
 } from '../../src/core/cycle/propose-takes.ts';
@@ -134,5 +138,35 @@ describeIfDB('propose_takes dedup_against_fence_rows JSONB — Postgres regressi
     expect(tomb[0]!.status).toBe('rejected');
     expect(tomb[0]!.kind).toBe('array');
     expect(tomb[0]!.first_claim).toBe('Cities send messages');
+  });
+});
+
+// Runs after the D3 block, whose phase-level run must see only its own two pages.
+describeIfDB('propose_takes candidates exclude cycle output on Postgres (#5212, #5211)', () => {
+  test('cycle-written pages are filtered before the limit; a hand-written atom is not', async () => {
+    await engine.putPage('atoms/manual/hand-written', {
+      type: 'atom' as never, title: 'Hand-written', compiled_truth: 'An observation a person filed as an atom.', timeline: '',
+      frontmatter: { subtype: 'manual', dream_generated: false },
+    });
+    const cycleOutput = [
+      ['takes/marked-boolean', 'note', { dream_generated: true }],
+      ['takes/marked-string', 'note', { dream_generated: 'true' }],
+      ['atoms/2026-09-18/unmarked-atom-0123456789abcdef', 'atom', { atom_type: 'insight', extracted_by: 'extract_atoms-v0.41.2.1' }],
+      ['concepts/example-concept', 'concept', { synthesized_by: 'synthesize_concepts-v0.41' }],
+    ] as const;
+    for (const [slug, type, frontmatter] of cycleOutput) {
+      await engine.putPage(slug, {
+        type: type as never, title: slug, compiled_truth: 'Text the dream cycle wrote.', timeline: '',
+        frontmatter: { ...frontmatter },
+      });
+    }
+    // The four cycle pages are the newest rows, so an unfiltered limit of 1
+    // would return one of them instead of the hand-written atom.
+    const candidates = await __testing.listCandidatePages(engine, { sourceId: 'default' }, 1);
+    expect(candidates.map(page => page.slug)).toEqual(['atoms/manual/hand-written']);
+    // A limit of 1 proves only the newest page's arm, so each cycle page is
+    // also checked against a listing wide enough to hold them all.
+    const all = (await __testing.listCandidatePages(engine, { sourceId: 'default' }, 100)).map(page => page.slug);
+    for (const [slug] of cycleOutput) expect(all).not.toContain(slug);
   });
 });

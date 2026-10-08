@@ -281,12 +281,27 @@ interface ProposeTakesPageRow {
 /**
  * Load proposal candidates with a narrow projection instead of
  * `engine.listPages` (`SELECT p.*`). The phase only reads slug, source_id
- * and compiled_truth — skipping timeline/frontmatter/title keeps large
- * toasted columns out of the hot path. Scope precedence mirrors
+ * and compiled_truth, so the projection keeps timeline, frontmatter and title
+ * out of the returned rows (the filter below reads three frontmatter keys in
+ * the WHERE clause, nothing more). Scope precedence mirrors
  * `sourceScopeOpts`: federated array (`sourceIds`) beats scalar
  * (`sourceId`); ordering matches `PAGE_SORT_SQL.updated_desc` with an id
  * tiebreak for determinism. (Takeover of PR #1979's projection by
  * @shawnduggan.)
+ *
+ * Pages these cycle writers produced are not candidates (the anti-loop
+ * contract in `extract/receipt-writer.ts`). The filter runs before the
+ * LIMIT, so such a page neither reaches the extractor nor takes a slot of
+ * the page limit. Each arm keys on a field its writer stamps, never on a
+ * page type hand-written pages share (`atom` and `concept` hold both):
+ *   - `type: extract_receipt`: operation receipts;
+ *   - `dream_generated: true`: synthesize and patterns output, and atoms
+ *     written since extract_atoms stamps the marker (#5211);
+ *   - `extracted_by: extract_atoms-*`: atoms stored before that;
+ *   - `synthesized_by: synthesize_concepts-*`: concept narratives, the
+ *     same cycle-owned test `derived-write-through.ts` uses.
+ * A NULL type, an unset or false marker and a hand-written atom or concept
+ * stay eligible.
  */
 async function listCandidatePages(
   engine: BrainEngine,
@@ -296,6 +311,9 @@ async function listCandidatePages(
   const where = [
     'deleted_at IS NULL',
     "type IS DISTINCT FROM 'extract_receipt'",
+    "COALESCE(frontmatter->>'dream_generated', '') <> 'true'",
+    "COALESCE(frontmatter->>'extracted_by', '') NOT LIKE 'extract_atoms%'",
+    "COALESCE(frontmatter->>'synthesized_by', '') NOT LIKE 'synthesize_concepts%'",
   ];
   const params: unknown[] = [];
   if (scope.sourceIds && scope.sourceIds.length > 0) {

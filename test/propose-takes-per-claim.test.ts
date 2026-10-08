@@ -61,14 +61,56 @@ async function putThesis(): Promise<void> {
   });
 }
 
+// Pages the cycle wrote, which the phase must never read back. Each row trips
+// exactly one arm of the candidate filter, and each page is written last, so
+// it is the newest candidate and would take a slot of the page limit.
+const CYCLE_OUTPUT: Array<{ name: string; slug: string; type: string; frontmatter: Record<string, unknown> }> = [
+  {
+    name: 'an extract receipt, by type (#4621)',
+    slug: 'extracts/2026-08-27/takes.proposed/default/propose/round-single',
+    type: 'extract_receipt',
+    frontmatter: { type: 'extract_receipt' },
+  },
+  {
+    name: 'a page marked dream_generated: true (#5212)',
+    slug: 'wiki/personal/reflections/2026-09-18-example-reflection',
+    type: 'note',
+    frontmatter: { dream_generated: true },
+  },
+  {
+    name: "a page marked dream_generated: 'true' as a string (#5212)",
+    slug: 'wiki/personal/patterns/example-pattern',
+    type: 'note',
+    frontmatter: { dream_generated: 'true' },
+  },
+  {
+    name: 'an extract_atoms atom stored without the marker (#5211)',
+    slug: 'atoms/2026-09-18/example-atom-0123456789abcdef',
+    type: 'atom',
+    frontmatter: { atom_type: 'insight', source_slug: 'wiki/essays/thesis', source_hash: '4e868938a35af33c', extracted_by: 'extract_atoms-v0.41.2.1' },
+  },
+  {
+    name: 'a synthesize_concepts narrative',
+    slug: 'concepts/example-concept',
+    type: 'concept',
+    frontmatter: { tier: 'T2', synthesis_mode: 'llm', synthesized_by: 'synthesize_concepts-v0.41' },
+  },
+];
+
 describe('#2138 per-claim proposal idempotency', () => {
-  test('skips extract receipts before invoking the extractor (#4621)', async () => {
-    await putThesis();
-    await engine.putPage('extracts/2026-08-27/takes.proposed/default/propose/round-single', {
-      title: 'propose_takes receipt',
-      type: 'extract_receipt',
-      compiled_truth: 'Operational receipt with no gradeable claims.',
-      frontmatter: { type: 'extract_receipt', dream_generated: true },
+  test('a hand-written atom and a hand-written concept stay candidates', async () => {
+    await engine.putPage('atoms/manual/pricing-observation', {
+      title: 'pricing observation',
+      type: 'atom' as never,
+      compiled_truth: 'A short observation a person filed as an atom.',
+      frontmatter: { subtype: 'manual', legacy_type: 'content-atom' },
+      timeline: '',
+    });
+    await engine.putPage('wiki/concepts/reversible-rollouts', {
+      title: 'reversible rollouts',
+      type: 'concept' as never,
+      compiled_truth: 'A concept page a person wrote.',
+      frontmatter: {},
       timeline: '',
     });
 
@@ -78,10 +120,39 @@ describe('#2138 per-claim proposal idempotency', () => {
       return [];
     };
 
-    const result = await runPhaseProposeTakes(context(), { extractor });
+    await runPhaseProposeTakes(context(), { extractor });
 
-    expect(scannedPages).toEqual(['wiki/essays/thesis']);
-    expect((result.details as Record<string, unknown>).pages_scanned).toBe(1);
+    expect(scannedPages.sort()).toEqual(['atoms/manual/pricing-observation', 'wiki/concepts/reversible-rollouts']);
+  });
+
+  test.each(CYCLE_OUTPUT)('skips $name before the page limit and the extractor', async ({ slug, type, frontmatter }) => {
+    await putThesis();
+    await engine.putPage('notes/hand-written', {
+      title: 'hand-written',
+      type: 'note',
+      compiled_truth: 'A claim a person wrote.',
+      frontmatter: { dream_generated: false },
+      timeline: '',
+    });
+    await engine.putPage(slug, {
+      title: 'cycle output',
+      type: type as never,
+      compiled_truth: 'Text the dream cycle wrote, with a claim that could be extracted.',
+      frontmatter: { ...frontmatter },
+      timeline: '',
+    });
+
+    const scannedPages: string[] = [];
+    const extractor: ProposeTakesExtractor = async ({ pagePath }) => {
+      scannedPages.push(pagePath);
+      return [{ claim_text: 'An example claim', kind: 'take', holder: 'brain', weight: 0.6 }];
+    };
+
+    const result = await runPhaseProposeTakes(context(), { extractor, pageLimit: 2 });
+
+    expect(scannedPages.sort()).toEqual(['notes/hand-written', 'wiki/essays/thesis']);
+    expect((result.details as Record<string, unknown>).pages_scanned).toBe(2);
+    expect(await countProposals(slug)).toBe(0);
   });
 
   test('keeps distinct claims, drops repeated claim, then page-cache hits', async () => {
