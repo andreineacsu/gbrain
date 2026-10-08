@@ -116,7 +116,7 @@ describe('queue_health — healthy queue stays quiet', () => {
   });
 });
 
-describe('queue_health — prompt_too_long deaths name their dream phase (#6303)', () => {
+describe('queue_health: prompt_too_long deaths name their dream phase (#6303)', () => {
   // The submission key (live, or released into data on death) says which dream
   // phase submitted the child, the same rule the paid-loop breaker counts by;
   // an unkeyed child in a private dream-inline queue is a patterns child.
