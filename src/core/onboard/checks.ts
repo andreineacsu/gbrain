@@ -26,6 +26,8 @@ import { embeddingEnablement, type ReadinessState } from '../readiness.ts';
 import { embeddingsDisabled } from '../embedding-disabled.ts';
 import { loadConfig } from '../config.ts';
 import { MIN_ENTITY_PAGES_FOR_COVERAGE } from '../types.ts';
+import { classifyStoredType, sanitizeTypeForDisplay } from '../schema-pack/type-usage.ts';
+import type { ResolvedPack } from '../schema-pack/registry.ts';
 
 /** Shared shape returned by all four checks. */
 export interface OnboardCheckResult {
@@ -259,10 +261,11 @@ export async function checkEmbedStaleness(
  * rules") and pairs file-only config with the engine's DB-side `schema_pack`,
  * matching `checkPackUpgradeAvailable` / `checkTypeProliferation` below.
  *
- * Those two siblings still open-code the same resolution rather than calling
- * the shared helper: their outer `catch` returns a distinguishable
+ * `checkPackUpgradeAvailable` still open-codes the same resolution rather
+ * than calling the shared helper: its outer `catch` returns a distinguishable
  * `Check skipped: <message>`, which a null-swallowing helper would flatten
- * into "No active pack".
+ * into "No active pack". `checkTypeProliferation` calls the helper per source
+ * and names the sources whose pack did not resolve.
  */
 async function resolveNerInferenceCapability(
   engine: BrainEngine,
@@ -630,65 +633,164 @@ export async function checkPackUpgradeAvailable(
   }
 }
 
+type CheckStatus = OnboardCheckResult['check']['status'];
+
+/** One schema pack's page-type vocabulary as the sources resolving to it use it. */
+interface PackVocabulary {
+  pack: string;
+  /** True when this is also the pack the brain resolves with no source named. */
+  brain_wide: boolean;
+  sources: string[];
+  declared: number;
+  /** Declared types in use (a folded alias counts as its declared type) plus retype-pending and undeclared labels. */
+  distinct: number;
+  status: CheckStatus;
+  alias_labels: string[];
+  /** Alias labels the pack's own mapping_rules retype: unification is still pending, so each one counts. */
+  retype_pending_labels: string[];
+  undeclared_types: Array<{ type: string; count: number }>;
+}
+
+function gradePackVocabulary(
+  pack: ResolvedPack,
+  brainWide: boolean,
+  sources: Iterable<string>,
+  labels: ReadonlyMap<string, number>,
+): PackVocabulary {
+  const retypeSources = new Set((pack.manifest.mapping_rules ?? []).map((rule) => rule.from_type));
+  const declaredInUse = new Set<string>();
+  const aliasLabels: string[] = [];
+  const retypePending: string[] = [];
+  const undeclared: Array<{ type: string; count: number }> = [];
+  for (const [label, count] of labels) {
+    const cls = classifyStoredType(label, pack.manifest);
+    if (cls.kind === 'undeclared') {
+      undeclared.push({ type: label, count });
+    } else if (cls.kind === 'canonical') {
+      declaredInUse.add(label);
+    } else if (retypeSources.has(label)) {
+      retypePending.push(label);
+    } else {
+      declaredInUse.add(cls.canonical);
+      aliasLabels.push(label);
+    }
+  }
+  const declared = pack.manifest.page_types.length;
+  const distinct = declaredInUse.size + retypePending.length + undeclared.length;
+  return {
+    pack: pack.manifest.name,
+    brain_wide: brainWide,
+    sources: [...sources].sort(),
+    declared,
+    distinct,
+    status: distinct > declared * 2 ? 'fail' : distinct > declared + 5 ? 'warn' : 'ok',
+    alias_labels: aliasLabels.sort(),
+    retype_pending_labels: retypePending.sort(),
+    undeclared_types: undeclared.sort((a, b) => b.count - a.count || a.type.localeCompare(b.type)),
+  };
+}
+
+const TYPE_PROLIFERATION_SAMPLE = 5;
+
+function listSample(items: string[]): string {
+  const more = items.length - TYPE_PROLIFERATION_SAMPLE;
+  return items.slice(0, TYPE_PROLIFERATION_SAMPLE).join(', ') + (more > 0 ? ` and ${more} more` : '');
+}
+
+function describePackVocabulary(v: PackVocabulary): string {
+  let text = `pack \`${v.pack}\` (${v.sources.length === 1 ? 'source' : 'sources'} ${listSample(v.sources)}): ${v.distinct} type(s) vs ${v.declared} declared`;
+  if (v.alias_labels.length > 0) text += `, counting ${v.alias_labels.length} alias label(s) as their declared type`;
+  if (v.retype_pending_labels.length > 0) {
+    text += `, ${v.retype_pending_labels.length} alias label(s) the pack's mapping_rules retype: ${listSample(v.retype_pending_labels.map((l) => `'${sanitizeTypeForDisplay(l)}'`))}`;
+  }
+  if (v.undeclared_types.length > 0) {
+    text += `, ${v.undeclared_types.length} undeclared: ${listSample(v.undeclared_types.map((t) => `'${sanitizeTypeForDisplay(t.type)}' (${t.count})`))}`;
+  }
+  return text;
+}
+
 /**
- * type_proliferation (D16): pack-aware ratio. Warns when distinct typed
- * pages exceed pack-declared types + 5; fails at declared × 2. No false
- * positives on custom packs (compares to actual pack declaration count,
- * not a hardcoded threshold).
+ * type_proliferation (D16): pack-aware ratio. Each source's page types are
+ * classified against that source's own resolved pack, so a
+ * `schema_pack.source.<id>` override counts (#6289); sources resolving to the
+ * same pack pool their types. An alias counts as its declared type unless the
+ * pack's own mapping_rules retype it, which leaves unification pending. A pack
+ * warns when its distinct types exceed its declared types + 5 and fails at
+ * declared × 2. The raw literal count stays in the message; a source whose
+ * pack does not resolve, or a failed page query, reports "not verified".
  */
 export async function checkTypeProliferation(
   engine: BrainEngine,
 ): Promise<OnboardCheckResult> {
-  let declared = 15;  // fallback to gbrain-base-v2 default if pack unavailable
+  let rows: Array<{ src: string; type: string; n: string }>;
   try {
-    const { loadActivePack } = await import('../schema-pack/load-active.ts');
-    const { loadConfigFileOnly } = await import('../config.ts');
-    let dbConfig: string | undefined;
-    try {
-      dbConfig = (await engine.getConfig('schema_pack')) ?? undefined;
-    } catch { /* tolerate pre-config brains */ }
-    const active = await loadActivePack({ cfg: loadConfigFileOnly(), remote: false, dbConfig })
-      .catch(() => null);
-    if (active) declared = active.manifest.page_types.length;
-  } catch {
-    // Use fallback.
+    rows = await engine.executeRaw(
+      `SELECT COALESCE(source_id, 'default') AS src, type, COUNT(*)::text AS n
+         FROM pages
+        WHERE deleted_at IS NULL AND type IS NOT NULL
+        GROUP BY 1, 2`,
+    );
+  } catch (e) {
+    return notVerifiedResult('type_proliferation', 'the page type count', e);
   }
-  const n = await safeCount(
-    engine,
-    `SELECT COUNT(DISTINCT type) AS count FROM pages WHERE deleted_at IS NULL AND type IS NOT NULL`,
-  );
-  const warn = declared + 5;
-  const fail = declared * 2;
-  if (n > fail) {
-    return {
-      check: {
-        name: 'type_proliferation',
-        status: 'fail',
-        message:
-          `${n} distinct page types (pack declares ${declared}). ` +
-          `Run \`gbrain onboard --check --explain\` to preview a pack upgrade ` +
-          `or define a custom pack with mapping_rules.`,
-      },
-      remediations: [],  // pack_upgrade_available check emits the actionable step
-    };
+  const { loadActivePackForLocalEngine } = await import('../schema-pack/best-effort.ts');
+  const brainWide = await loadActivePackForLocalEngine(engine);
+  if (rows.length === 0) {
+    const message = brainWide ? `0 distinct typed values (pack declares ${brainWide.manifest.page_types.length})` : '0 distinct typed values';
+    return { check: { name: 'type_proliferation', status: 'ok', message }, remediations: [] };
   }
-  if (n > warn) {
-    return {
-      check: {
-        name: 'type_proliferation',
-        status: 'warn',
-        message: `${n} distinct page types vs ${declared} declared in pack — consider unification.`,
-      },
-      remediations: [],
-    };
+
+  const packBySource = new Map<string, ResolvedPack | null>();
+  const byPack = new Map<string, { pack: ResolvedPack; sources: Set<string>; labels: Map<string, number> }>();
+  for (const r of rows) {
+    if (!packBySource.has(r.src)) packBySource.set(r.src, await loadActivePackForLocalEngine(engine, { sourceId: r.src }));
+    const pack = packBySource.get(r.src);
+    if (!pack) continue;
+    const entry = byPack.get(pack.identity) ?? { pack, sources: new Set<string>(), labels: new Map<string, number>() };
+    entry.sources.add(r.src);
+    entry.labels.set(r.type, (entry.labels.get(r.type) ?? 0) + Number(r.n));
+    byPack.set(pack.identity, entry);
+  }
+  const graded = [...byPack.values()]
+    .map((e) => gradePackVocabulary(e.pack, e.pack.identity === brainWide?.identity, e.sources, e.labels))
+    .sort((a, b) => a.pack.localeCompare(b.pack) || a.sources[0].localeCompare(b.sources[0]));
+  const unresolved = [...packBySource].filter(([, pack]) => !pack).map(([src]) => src).sort();
+
+  const rank: Record<CheckStatus, number> = { ok: 0, warn: 1, fail: 2 };
+  let status = graded.reduce<CheckStatus>((worst, v) => (rank[v.status] > rank[worst] ? v.status : worst), 'ok');
+  const raw = new Set(rows.map((r) => r.type)).size;
+  let message = `${raw} distinct page types across ${packBySource.size} source(s)`;
+  if (graded.length > 0) message += `; ${graded.map(describePackVocabulary).join('; ')}`;
+  message += '.';
+  const flagged = graded.filter((v) => v.status !== 'ok');
+  const brainWideFlagged = flagged.find((v) => v.brain_wide);
+  if (brainWideFlagged?.status === 'fail') {
+    message += ' Run `gbrain onboard --check --explain` to preview a pack upgrade or define a custom pack with mapping_rules.';
+  } else if (brainWideFlagged) {
+    message += ' Consider unification.';
+  }
+  // The pack-upgrade preview covers the brain-wide pack only; a source on its own pack gets its own listing.
+  const ownPackSources = flagged.filter((v) => !v.brain_wide).flatMap((v) => v.sources);
+  if (ownPackSources.length > 0) {
+    message += ` For ${listSample(ownPackSources)}, on a pack of their own: list the types that pack does not declare with \`gbrain schema review-orphans --source <id>\`, then declare them in that pack or retype the pages.`;
+  }
+  if (unresolved.length > 0) {
+    if (status === 'ok') status = 'warn';
+    message += ` Not verified for ${unresolved.length} source(s) (${unresolved.join(', ')}): the active pack did not resolve. Run \`gbrain schema active --source <id>\` for each to debug.`;
   }
   return {
     check: {
       name: 'type_proliferation',
-      status: 'ok',
-      message: `${n} distinct typed values (pack declares ${declared})`,
+      status,
+      message,
+      details: {
+        distinct_types: raw,
+        per_pack: graded,
+        unresolved_sources: unresolved,
+        ...(unresolved.length > 0 ? { code: 'not_verified', verified: false } : {}),
+      },
     },
-    remediations: [],
+    remediations: [],  // pack_upgrade_available emits the actionable step for the brain-wide pack
   };
 }
 
