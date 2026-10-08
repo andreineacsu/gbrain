@@ -20,6 +20,21 @@ anything.
 gbrain config set dream.patterns.subagent_timeout_ms 2400000
 ```
 
+## Cadence under autopilot
+
+Autopilot runs brain-wide maintenance at most once per
+`autopilot.global_floor_min` minutes (default 60), and repeats a pass sooner
+while a phase still has work left, for example a `synthesize` backlog larger
+than one run's budget. A repeated pass does not repeat a `patterns` run that
+finished: the phase is skipped with `reason: ran_within_floor` until that many
+minutes have passed since the run. A run whose child died or timed out is
+retried on the next pass.
+
+A direct run is not held to this interval.
+
+**Say to your agent:** *"Run dream patterns now, outside the maintenance schedule."*
+(the agent runs `gbrain dream --phase patterns`; it is a paid run).
+
 ## Budget sizing
 
 After every child, finished, timed out or failed, the phase records its cost

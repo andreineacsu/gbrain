@@ -75,6 +75,7 @@ const { PGLiteEngine } = await import('../../src/core/pglite-engine.ts');
 const { registerBuiltinHandlers } = await import('../../src/commands/jobs.ts');
 const { LAST_GLOBAL_AT_KEY } = await import('../../src/core/cycle.ts');
 const { isGlobalMaintenanceStale } = await import('../../src/commands/autopilot-fanout.ts');
+const { GLOBAL_MAINTENANCE_PROGRESS_KEY, readGlobalMaintenanceProgress } = await import('../../src/core/minions/handlers/autopilot-global-maintenance.ts');
 const { TRIAGE_VERSION } = await import('../../src/core/cycle/synthesize.ts');
 const engine = new PGLiteEngine();
 const repoPath = mkdtempSync(join(tmpdir(), 'global-postcondition-'));
@@ -318,6 +319,72 @@ describe('global maintenance freshness postcondition (#5089)', () => {
     const unchanged = await handler(job);
     expect(unchanged.report.phases[0].details.reason).toBe('no_new_evidence');
     expect(await engine.getConfig(LAST_GLOBAL_AT_KEY)).not.toBeNull();
+  }, 60_000);
+
+  test('a completed patterns run is not repeated inside the floor while a synthesize backlog keeps the pass due (#6297)', async () => {
+    await seedTranscripts(1);
+    await engine.setConfig('dream.synthesize.budget_usd', '0'); // a standing backlog: every pass defers the transcript
+    await seedReflections();
+    const job = { id: ownerJobId, data: { phases: ['synthesize', 'patterns'], repoPath } } as unknown as MinionJobContext;
+    const patternsOf = (result: { report: CycleReport }) => result.report.phases.find(p => p.phase === 'patterns')!;
+    const children = async () => (await engine.executeRaw<{ n: number }>(`SELECT count(*)::int AS n FROM minion_jobs WHERE name = 'subagent'`))[0].n;
+
+    const first = await handler(job);
+    expect(first.report.phases.find(p => p.phase === 'synthesize')!.details.budget_deferred_transcripts).toHaveLength(1);
+    expect(patternsOf(first)).toMatchObject({ status: 'ok', details: { child_outcome: 'completed' } });
+    expect(await engine.getConfig(LAST_GLOBAL_AT_KEY)).toBeNull();
+    expect(await children()).toBe(1);
+
+    // A backlog pass writes reflections, so the evidence watermark does not skip the next run.
+    await engine.putPage('wiki/personal/reflections/example-later', {
+      title: 'Later reflection', type: 'note', compiled_truth: 'Recurring synthetic theme, again.', timeline: '',
+    });
+    const second = await handler(job);
+    expect(patternsOf(second)).toMatchObject({ status: 'skipped', details: { reason: 'ran_within_floor', floor_min: 60 } });
+    expect(await children()).toBe(1);
+    expect(await engine.getConfig(LAST_GLOBAL_AT_KEY)).toBeNull();
+
+    // Once the floor has passed since that run, the next pass runs the phase again.
+    const progress = await readGlobalMaintenanceProgress(engine);
+    await engine.setConfig(GLOBAL_MAINTENANCE_PROGRESS_KEY, JSON.stringify({
+      ...progress, finished_at: { patterns: new Date(Date.now() - 6 * 60_000).toISOString() },
+    }));
+    await engine.setConfig('autopilot.global_floor_min', '5');
+    const third = await handler(job);
+    expect(patternsOf(third)).toMatchObject({ status: 'ok', details: { child_outcome: 'completed' } });
+    expect(await children()).toBe(2);
+
+    // The backlog clears while patterns is inside the floor: the skip does not hold the stamp back, and the stamp clears the record.
+    await engine.unsetConfig('dream.synthesize.budget_usd');
+    const fourth = await handler(job);
+    expect(fourth.report.phases.find(p => p.phase === 'synthesize')!.details.budget_deferred_transcripts).toEqual([]);
+    expect(patternsOf(fourth)).toMatchObject({ status: 'skipped', details: { reason: 'ran_within_floor' } });
+    expect(await engine.getConfig(LAST_GLOBAL_AT_KEY)).not.toBeNull();
+    expect((await readGlobalMaintenanceProgress(engine)).finished_at).toEqual({});
+  }, 60_000);
+
+  test('a patterns skip does not start the floor: the first run with enough evidence is not held back (#6297)', async () => {
+    await seedTranscripts(1);
+    await engine.setConfig('dream.synthesize.budget_usd', '0');
+    await engine.setConfig('dream.patterns.enabled', 'true');
+    await engine.setConfig('models.dream.patterns', 'anthropic:claude-sonnet-4-6');
+    const job = { id: ownerJobId, data: { phases: ['synthesize', 'patterns'], repoPath } } as unknown as MinionJobContext;
+    const first = await handler(job);
+    expect(first.report.phases.find(p => p.phase === 'patterns')).toMatchObject({ status: 'skipped', details: { reason: 'insufficient_evidence' } });
+    await seedReflections();
+    const second = await handler(job);
+    expect(second.report.phases.find(p => p.phase === 'patterns')).toMatchObject({ status: 'ok', details: { child_outcome: 'completed' } });
+  }, 60_000);
+
+  test('a patterns child that died is retried on the next pass, not held to the floor (#6297)', async () => {
+    await seedReflections();
+    const job = { id: ownerJobId, data: { phases: ['patterns'], repoPath } } as unknown as MinionJobContext;
+    childStatuses = ['dead'];
+    const died = await handler(job);
+    expect(died.report.phases[0]).toMatchObject({ status: 'fail', details: { child_outcome: 'dead' } });
+    childStatuses = [];
+    const retry = await handler(job);
+    expect(retry.report.phases[0]).toMatchObject({ status: 'ok', details: { child_outcome: 'completed' } });
   }, 60_000);
 
   test('an aborted run does not stamp freshness', async () => {

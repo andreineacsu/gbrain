@@ -33,7 +33,21 @@ export interface GlobalMaintenanceProgress {
   skip_this_pass?: string[];
   /** A phase in the current pass failed; the pass does not stamp last_global_at. */
   pass_failed?: boolean;
+  /**
+   * When a floor-bound phase last finished a run (ISO), kept while no pass has
+   * stamped last_global_at since. The dispatch floor applies to that phase from
+   * this time; a stamped pass clears it.
+   */
+  finished_at?: Record<string, string>;
 }
+
+/**
+ * #6297: phases the dispatch floor bounds on their own. `patterns` skips only
+ * when no reflection is newer than its last completed run, and a synthesize
+ * backlog writes reflections on every pass while it withholds the pass stamp,
+ * so without this the phase paid for a child on every pass.
+ */
+const FLOOR_BOUND_PHASES: ReadonlySet<string> = new Set(['patterns']);
 
 export async function readGlobalMaintenanceProgress(engine: BrainEngine): Promise<GlobalMaintenanceProgress> {
   try {
@@ -67,6 +81,7 @@ function phaseBlocksStamp(phase: PhaseResult): boolean {
 export function makeAutopilotGlobalMaintenanceHandler(engine: BrainEngine): MinionHandler {
   return async (job) => {
     const { runCycle, MAINTENANCE_PHASES, LAST_GLOBAL_AT_KEY } = await import('../../cycle.ts');
+    const { isGlobalMaintenanceStale, resolveGlobalFloorMin } = await import('../../../commands/autopilot-fanout.ts');
     const repoPath: string | null = typeof job.data.repoPath === 'string'
       ? job.data.repoPath
       : (await engine.getConfig('sync.repo_path')) ?? null;
@@ -89,6 +104,8 @@ export function makeAutopilotGlobalMaintenanceHandler(engine: BrainEngine): Mini
     progress.durations ??= {};
     progress.timeouts ??= {};
     progress.skip_this_pass ??= [];
+    progress.finished_at ??= {};
+    const floorMin = await resolveGlobalFloorMin(engine);
     const runToken = `${job.id}:${job.attempts_made ?? 0}`;
     const recordTimeout = (phase: string) => {
       const prev = progress.timeouts![phase];
@@ -117,6 +134,13 @@ export function makeAutopilotGlobalMaintenanceHandler(engine: BrainEngine): Mini
         progress.pass_failed = true;
         ran.push({ phase, status: 'skipped', duration_ms: 0, summary: `skipped: killed an earlier job; run gbrain dream --phase ${phase}`,
           details: { reason: 'timed_out_previous_job', recovery: `gbrain dream --phase ${phase}` } });
+        continue;
+      }
+      const finishedAt = FLOOR_BOUND_PHASES.has(phase) ? progress.finished_at[phase] : undefined;
+      if (finishedAt && !isGlobalMaintenanceStale(finishedAt, Date.now(), floorMin)) {
+        ran.push({ phase, status: 'skipped', duration_ms: 0,
+          summary: `skipped: last finished ${finishedAt}, inside the ${floorMin}-minute maintenance floor`,
+          details: { reason: 'ran_within_floor', last_finished_at: finishedAt, floor_min: floorMin } });
         continue;
       }
       const estimate = progress.durations[phase] ?? 0;
@@ -173,6 +197,7 @@ export function makeAutopilotGlobalMaintenanceHandler(engine: BrainEngine): Mini
         progress.durations[phase] = result.duration_ms;
         delete progress.timeouts[phase];
         if (phaseBlocksStamp(result)) progress.pass_failed = true;
+        else if (FLOOR_BOUND_PHASES.has(phase) && result.status !== 'skipped') progress.finished_at[phase] = new Date().toISOString();
       }
     }
 
@@ -215,6 +240,11 @@ export function makeAutopilotGlobalMaintenanceHandler(engine: BrainEngine): Mini
       && report.reason !== 'aborted' && report.reason !== 'lock_stolen') {
       try {
         await engine.setConfig(LAST_GLOBAL_AT_KEY, new Date().toISOString());
+        // The stamp now carries the floor for every phase.
+        if (Object.keys(progress.finished_at).length > 0) {
+          progress.finished_at = {};
+          await save();
+        }
       } catch (e) {
         console.warn(`[autopilot-global-maintenance] failed to stamp last_global_at: ${e instanceof Error ? e.message : String(e)}`);
       }

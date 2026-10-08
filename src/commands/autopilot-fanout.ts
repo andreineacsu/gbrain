@@ -692,6 +692,12 @@ export function isGlobalMaintenanceStale(lastGlobalAtIso: string | null, now = D
   return (now - d.getTime()) / 60_000 >= floorMin;
 }
 
+/** Minutes between brain-wide maintenance runs: config `autopilot.global_floor_min` (an integer ≥ 1), else 60. */
+export async function resolveGlobalFloorMin(engine: BrainEngine): Promise<number> {
+  const n = parseInt((await engine.getConfig('autopilot.global_floor_min')) ?? '', 10);
+  return Number.isFinite(n) && n >= 1 ? n : GLOBAL_FLOOR_MIN;
+}
+
 /**
  * #4578: the global maintenance job deadline. Precedence:
  * GBRAIN_GLOBAL_MAINTENANCE_TIMEOUT_MS > config autopilot.global_maintenance_timeout_ms
@@ -726,12 +732,7 @@ export async function dispatchGlobalMaintenance(
   const emit = opts.emit ?? ((line) => process.stderr.write(line + '\n'));
   const log = opts.log ?? ((line) => console.log(line));
 
-  let floorMin = GLOBAL_FLOOR_MIN;
-  const floorCfg = await engine.getConfig('autopilot.global_floor_min');
-  if (floorCfg) {
-    const n = parseInt(floorCfg, 10);
-    if (Number.isFinite(n) && n >= 1) floorMin = n;
-  }
+  const floorMin = await resolveGlobalFloorMin(engine);
   const lastGlobalAt = await engine.getConfig(LAST_GLOBAL_AT_KEY);
   if (!isGlobalMaintenanceStale(lastGlobalAt, Date.now(), floorMin)) {
     return { dispatched: false, reason: 'fresh' };

@@ -34,6 +34,7 @@ import {
 import {
   dispatchGlobalMaintenance,
   isGlobalMaintenanceStale,
+  resolveGlobalFloorMin,
   dispatchPerSource,
 } from '../src/commands/autopilot-fanout.ts';
 import type { BrainEngine } from '../src/core/engine.ts';
@@ -149,6 +150,13 @@ describe('isGlobalMaintenanceStale', () => {
   test('older than floor → stale; within floor → fresh', () => {
     expect(isGlobalMaintenanceStale(new Date(now - 61 * 60_000).toISOString(), now, 60)).toBe(true);
     expect(isGlobalMaintenanceStale(new Date(now - 10 * 60_000).toISOString(), now, 60)).toBe(false);
+  });
+  test('the floor is autopilot.global_floor_min when it is an integer ≥ 1, else 60 (#6297)', async () => {
+    const cases: Array<[string | null, number]> = [[null, 60], ['', 60], ['0', 60], ['-5', 60], ['abc', 60], ['15', 15], ['7.9', 7]];
+    for (const [raw, floor] of cases) {
+      const engine = { getConfig: async () => raw } as unknown as BrainEngine;
+      expect(await resolveGlobalFloorMin(engine)).toBe(floor);
+    }
   });
 });
 

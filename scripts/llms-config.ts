@@ -204,7 +204,7 @@ export const SECTIONS: DocSection[] = [
       {
         title: "docs/guides/dream-patterns.md",
         description:
-          "Dream patterns phase: settings (min_evidence, subagent timeouts), in-cycle budget sizing from the recorded `dream.patterns.last_run` (first batch, timeout halving, `insufficient_cycle_budget` skip, probe after 3 skips), reset with `gbrain config unset dream.patterns.last_run`.",
+          "Dream patterns phase: settings (min_evidence, subagent timeouts), in-cycle budget sizing from the recorded `dream.patterns.last_run` (first batch, timeout halving, `insufficient_cycle_budget` skip, probe after 3 skips), reset with `gbrain config unset dream.patterns.last_run`; cadence under autopilot (a finished run is skipped as `ran_within_floor` for `autopilot.global_floor_min` minutes).",
         path: "docs/guides/dream-patterns.md",
         includeInFull: false,
       },
