@@ -265,15 +265,30 @@ died is skipped for the rest of that pass so the others still run, and doctor
 warns once it has killed three jobs in a row (or the last three jobs all died
 at the deadline).
 
+A phase that runs a subagent child (dream `patterns`) gives the child the
+smaller of the time left in its job and its own limit,
+`dream.patterns.subagent_timeout_ms`. When that child is cut off at its timeout
+in the last three jobs that ran it, doctor warns too, even though those jobs
+completed (`details.child_timeouts` lists the jobs and their children). The
+warning clears when a child completes or the phase next reports it had nothing
+to run. A child that dies for another reason, such as `prompt_too_long`, shows
+up in `queue_health` and `dream_paid_loop` instead. Every child death, a
+timeout included, counts toward the dream paid-loop breaker, which may refuse
+the phase until it is reset: `gbrain doctor --only dream_paid_loop --json`
+shows it and names the reset.
+
 1. Run the named phase in the foreground, without the job deadline:
    `gbrain dream --phase <name>` (for example `gbrain dream --phase embed`).
+   `patterns` is a paid model run, so ask before running it.
 2. Give the job more time if your brain needs it:
    `gbrain config set autopilot.global_maintenance_timeout_ms 3600000`, or set
    `GBRAIN_GLOBAL_MAINTENANCE_TIMEOUT_MS` in the autopilot service environment
    (the variable wins over the config key; values below 60000 are ignored).
-   Unset both to return to the default.
-3. Confirm with `gbrain doctor`: `global_maintenance_timeouts` is `ok` after the
-   next job finishes within its deadline.
+   Unset both to return to the default. A child cut off at its own limit needs
+   `gbrain config set dream.patterns.subagent_timeout_ms <ms>` instead.
+3. Confirm with `gbrain doctor --only global_maintenance_timeouts`: it is `ok`
+   after the next job finishes within its deadline (and a phase's child
+   completes).
 ## auto_chronicle has no effect
 
 **Say to your agent:** *"Why aren't my meetings showing up as timeline events?"*
