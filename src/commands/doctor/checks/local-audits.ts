@@ -119,6 +119,7 @@ async function runStubGuard(ctx: DoctorContext): Promise<Check[]> {
 export const stubGuardEntry: DoctorEntry = {
   name: 'stub_guard_24h',
   emits: ['stub_guard_24h', 'sync_failures', 'managed_sync_backlog', 'slug_fallback_audit'],
+  engineChecks: ['sync_failures', 'managed_sync_backlog'],
   run: runStubGuard,
 };
 
@@ -364,6 +365,16 @@ export const extractionBacklogsEntry: DoctorEntry = {
     'progressive_batch_audit_health',
     'conversation_parser_probe_health',
   ],
+  engineChecks: [
+    'malformed_path_pages',
+    'nightly_quality_probe_health',
+    'extract_health',
+    'conversation_facts_backlog',
+    'extract_atoms_backlog',
+    'atom_provenance_drift',
+    'conversation_format_coverage',
+    'conversation_parser_probe_health',
+  ],
   run: runExtractionBacklogs,
 };
 
@@ -596,5 +607,6 @@ async function runDefaultSourcePath(ctx: DoctorContext): Promise<Check[]> {
 export const defaultSourcePathEntry: DoctorEntry = {
   name: 'default_source_local_path',
   emits: ['default_source_local_path', 'fts_reindex_incomplete', 'multi_source_drift', 'orphan_clones'],
+  engineChecks: ['default_source_local_path', 'fts_reindex_incomplete', 'multi_source_drift'],
   run: runDefaultSourcePath,
 };

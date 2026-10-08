@@ -121,6 +121,7 @@ async function runRetrievalReflex(ctx: DoctorContext): Promise<Check[]> {
 export const retrievalReflexEntry: DoctorEntry = {
   name: 'retrieval_reflex_health',
   emits: ['retrieval_reflex_health', 'volunteer_channels', 'memory_verbs_usage'],
+  engineChecks: ['volunteer_channels'],
   run: runRetrievalReflex,
 };
 
@@ -180,6 +181,7 @@ export const skillConformanceEntry: DoctorEntry = {
     'skill_currency',
     'skill_preconditions',
   ],
+  engineChecks: ['skill_preconditions'],
   run: runSkillConformance,
 };
 

@@ -23,6 +23,12 @@ export interface DoctorEntry {
   name: string;
   /** Every check name `run` can push, categorized in src/core/doctor-categories.ts. */
   emits: readonly string[];
+  /**
+   * Entries before the DB-checks early stop only: the emitted checks whose
+   * result depends on whether an engine is open. `--only` opens the engine for
+   * them when a brain is configured (src/commands/doctor/registry.ts onlyNeedsEngine).
+   */
+  engineChecks?: readonly string[];
   run(ctx: DoctorContext): Promise<Check[] | typeof STOP_DOCTOR>;
 }
 

@@ -45,6 +45,7 @@ export const bootstrapChecksEntry: DoctorEntry = {
     'bootstrap_runbook_skew',
     'bootstrap_last_verify',
   ],
+  engineChecks: ['bootstrap_harness_health', 'bootstrap_hook_schema_pairing'],
   run: runBootstrapChecks,
 };
 
@@ -70,6 +71,7 @@ async function runMemorableRelay(ctx: DoctorContext): Promise<Check[]> {
 export const memorableRelayEntry: DoctorEntry = {
   name: 'memorable_relay_health',
   emits: ['memorable_relay_health', 'memory_writeback'],
+  engineChecks: ['memory_writeback'],
   run: runMemorableRelay,
 };
 
@@ -104,6 +106,7 @@ async function runConnectors(ctx: DoctorContext): Promise<Check[]> {
 export const connectorsEntry: DoctorEntry = {
   name: 'connectors',
   emits: ['connectors', 'dream_paid_loop'],
+  engineChecks: ['connectors', 'dream_paid_loop'],
   run: runConnectors,
 };
 
@@ -233,5 +236,6 @@ async function runMinionsMigration(ctx: DoctorContext): Promise<Check[]> {
 export const minionsMigrationEntry: DoctorEntry = {
   name: 'minions_migration',
   emits: ['minions_migration', 'upgrade_errors', 'self_upgrade_health', 'bun_runtime'],
+  engineChecks: ['upgrade_errors'],
   run: runMinionsMigration,
 };

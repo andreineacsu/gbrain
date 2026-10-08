@@ -16,7 +16,9 @@
  *
  * To add a check: put a `{ name, emits, run }` entry in the topic module
  * under ./checks/, add it here at the position its output should take, and
- * categorize every emitted name in src/core/doctor-categories.ts.
+ * categorize every emitted name in src/core/doctor-categories.ts. An entry in
+ * group 1 that reads the engine lists those checks in `engineChecks`, so
+ * `--only` opens the engine for them (test/doctor-only-engine-checks.test.ts).
  */
 
 import { resolverHealthEntry, retrievalReflexEntry, skillConformanceEntry } from './checks/skill-group.ts';
@@ -197,10 +199,18 @@ export function parseOnlyChecks(args: readonly string[]): Set<string> | null {
   return new Set(raw.flatMap((r) => r.split(',')).map((n) => n.trim()).filter(Boolean));
 }
 
-/** True when any requested check is a DB check (ordered after the DB-checks early stop). */
-export function onlyNeedsEngine(only: ReadonlySet<string>): boolean {
+/**
+ * True when any requested check is a DB check (ordered after the DB-checks
+ * early stop), or, with a brain configured, a check an earlier entry declares
+ * in `engineChecks`. Without a configured brain those earlier checks run
+ * engine-free, as the full doctor's filesystem lane would.
+ */
+export function onlyNeedsEngine(only: ReadonlySet<string>, opts: { brainConfigured?: boolean } = {}): boolean {
   const gate = DOCTOR_CHECK_REGISTRY.indexOf(dbChecksGateEntry);
-  return DOCTOR_CHECK_REGISTRY.some((e, i) => i > gate && e.emits.some((n) => only.has(n)));
+  return DOCTOR_CHECK_REGISTRY.some((e, i) => {
+    const needs = i > gate ? e.emits : opts.brainConfigured ? e.engineChecks ?? [] : [];
+    return needs.some((n) => only.has(n));
+  });
 }
 
 function selected(entry: DoctorEntry, only: ReadonlySet<string> | null | undefined): boolean {

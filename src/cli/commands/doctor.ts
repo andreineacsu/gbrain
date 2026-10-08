@@ -96,7 +96,8 @@ export async function run(args: string[], ctx: CliDispatchContext): Promise<void
 /**
  * `gbrain doctor --only <check>[,…] [--json]` — the default `fix.verify`:
  * read-only, observational startup (probeOnly: no migrations or maintenance),
- * engine-free when every requested check is a filesystem check. Unknown names
+ * engine-free when every requested check is a filesystem check (a check that
+ * reads the engine counts as one only when no brain is configured). Unknown names
  * exit 2 with the valid list. Returns false when `--only` is absent.
  */
 async function runDoctorOnly(
@@ -123,7 +124,7 @@ async function runDoctorOnly(
     setCliExitVerdict(out.exitCode);
     return true;
   }
-  if (!onlyNeedsEngine(only)) {
+  if (!onlyNeedsEngine(only, { brainConfigured: getDbUrlSource() !== null })) {
     await runDoctor(null, args, getDbUrlSource());
     return true;
   }

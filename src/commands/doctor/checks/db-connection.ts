@@ -90,6 +90,8 @@ async function runPgliteDataDir(ctx: DoctorContext): Promise<Check[]> {
 export const pgliteDataDirEntry: DoctorEntry = {
   name: 'pglite_data_dir',
   emits: ['pglite_data_dir', 'pglite_scratch_probe'],
+  // They diagnose a failed open, so --only must attempt one first.
+  engineChecks: ['pglite_data_dir', 'pglite_scratch_probe'],
   run: runPgliteDataDir,
 };
 

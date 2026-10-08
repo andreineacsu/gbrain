@@ -282,5 +282,6 @@ async function runSupervisor(ctx: DoctorContext): Promise<Check[]> {
 export const supervisorEntry: DoctorEntry = {
   name: 'supervisor',
   emits: ['supervisor', 'supervisor_singleton', 'supervisor_niceness', 'worker_oom_loop', 'pool_reap_health'],
+  engineChecks: ['supervisor', 'supervisor_singleton', 'worker_oom_loop', 'pool_reap_health'],
   run: runSupervisor,
 };

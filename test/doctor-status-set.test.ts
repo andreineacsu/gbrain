@@ -102,6 +102,21 @@ describe('doctor --only (E1)', () => {
     expect(onlyNeedsEngine(new Set(['embeddings']))).toBe(true);
   });
 
+  // #6303: checks that run before the DB-checks stop but read the engine
+  // (dream_paid_loop is the fix.verify of the paid-loop breaker skip) open it
+  // when a brain is configured; filesystem checks never do.
+  test.each([
+    { only: ['dream_paid_loop'], brainConfigured: true, connects: true },
+    { only: ['connectors'], brainConfigured: true, connects: true },
+    { only: ['sync_failures'], brainConfigured: true, connects: true },
+    { only: ['pglite_data_dir'], brainConfigured: true, connects: true },
+    { only: ['dream_paid_loop'], brainConfigured: false, connects: false },
+    { only: ['harness_wiring', 'agent_contract'], brainConfigured: true, connects: false },
+    { only: ['embeddings'], brainConfigured: false, connects: true },
+  ])('--only $only with brainConfigured=$brainConfigured connects: $connects', ({ only, brainConfigured, connects }) => {
+    expect(onlyNeedsEngine(new Set(only), { brainConfigured })).toBe(connects);
+  });
+
   test('engine-free run returns exactly the requested checks', async () => {
     const home = mkdtempSync(join(tmpdir(), 'gbrain-only-'));
     try {
