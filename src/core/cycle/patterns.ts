@@ -326,7 +326,7 @@ export async function runPhasePatterns(
       undefined, undefined, 1, null, opts.signal ?? null,
     );
 
-    let outcome: MinionJobStatus | 'timeout';
+    let outcome: MinionJobStatus | 'timeout', childError: string | null = null;
     try {
       const final = await waitForCompletionRenewing(queue, job.id, {
         timeoutMs: budgets.waitTimeoutMs,
@@ -337,7 +337,7 @@ export async function runPhasePatterns(
       // #4077: on abort the wait returns its last snapshot instead of
       // throwing — unwind before treating it as an outcome.
       throwIfAborted(opts.signal, '[dream] patterns completion wait');
-      outcome = final.status;
+      outcome = final.status; childError = final.error_text;
     } catch (e) {
       if (e instanceof TimeoutError) {
         outcome = 'timeout';
@@ -353,7 +353,7 @@ export async function runPhasePatterns(
       }
     }
 
-    await recordPatternsLastRun(engine, { duration_ms: Date.now() - submittedAt, reflections: submitted.length, outcome }); // #6177: every child, timed out or failed too
+    await recordPatternsLastRun(engine, { duration_ms: Date.now() - submittedAt, reflections: submitted.length, outcome, error_text: childError }); // #6177: every child; #6296: the job's error tells one killed at its own timeout_ms from a failed one
     if (outcome === 'completed' && submitOpts.idempotency_key) await clearPatternsSourceDeaths(engine, opts.sourceId ?? 'default'); // #6236: only consecutive deaths trip
 
     if (opts.yieldDuringPhase) {

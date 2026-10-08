@@ -75,9 +75,21 @@ export async function readPatternsLastRun(engine: BrainEngine): Promise<Patterns
   }
 }
 
-/** Record a child's cost; any end other than completed or timeout is `failed`. */
-export async function recordPatternsLastRun(engine: BrainEngine, run: { duration_ms: number; reflections: number; outcome: string }): Promise<void> {
-  const outcome: PatternsLastRun['outcome'] = run.outcome === 'completed' || run.outcome === 'timeout' ? run.outcome : 'failed';
+/**
+ * The planner's reading of how a child ended. `timeout` when it was stopped
+ * while still running: the phase's wait expired (`timeout`), or the queue
+ * dead-lettered it at its own `timeout_ms` (`dead` with the error `timeout
+ * exceeded`, or `wall-clock timeout exceeded` from the wall-clock sweep). Any
+ * other end short of `completed` is `failed`: it says nothing about cost.
+ */
+function patternsRunOutcome(status: string, errorText?: string | null): PatternsLastRun['outcome'] {
+  if (status === 'completed' || status === 'timeout') return status;
+  return status === 'dead' && /^(wall-clock )?timeout exceeded$/.test(errorText ?? '') ? 'timeout' : 'failed';
+}
+
+/** Record a child's cost. `outcome` is the child's final status (or the phase's `timeout`), `error_text` the job's recorded cause. */
+export async function recordPatternsLastRun(engine: BrainEngine, run: { duration_ms: number; reflections: number; outcome: string; error_text?: string | null }): Promise<void> {
+  const outcome = patternsRunOutcome(run.outcome, run.error_text);
   const record: PatternsLastRun = { duration_ms: run.duration_ms, reflections: run.reflections, at: new Date().toISOString(), outcome, budget_skips: 0 };
   await engine.setConfig(PATTERNS_LAST_RUN_KEY, JSON.stringify(record)).catch(() => undefined);
 }
