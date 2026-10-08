@@ -42,9 +42,13 @@ test('managed public atom extraction publishes searchable atoms and replays with
       const result = await runPhaseExtractAtoms(engine, opts);
       expect(result.status).toBe('ok');
       expect(result.details?.atoms_extracted).toBe(1);
-      const atoms = await engine.executeRaw<{ slug: string; visibility: string }>("SELECT slug,frontmatter->>'visibility' AS visibility FROM pages WHERE type='atom'");
+      const atoms = await engine.executeRaw<{ slug: string; visibility: string; dream_generated: string; raw_source: string }>(
+        "SELECT slug,frontmatter->>'visibility' AS visibility,frontmatter->>'dream_generated' AS dream_generated,frontmatter->>'raw_source' AS raw_source FROM pages WHERE type='atom'");
       expect(atoms).toHaveLength(1);
       expect(atoms[0].visibility).toBe('private');
+      // #5211: a managed publication keeps the dream-output marker and its raw trace.
+      expect(atoms[0].dream_generated).toBe('true');
+      expect(atoms[0].raw_source).toBe(page.slug);
       expect(await engine.executeRaw('SELECT c.id FROM content_chunks c JOIN pages p ON p.id=c.page_id WHERE p.slug=$1', [atoms[0].slug])).not.toHaveLength(0);
       await runPhaseExtractAtoms(engine, opts);
       expect(calls).toBe(1);

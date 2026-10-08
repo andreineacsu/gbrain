@@ -1195,10 +1195,10 @@ export async function runPhaseExtractAtoms(
             item.kind === 'page'
               ? await resolvePageAtomSlug(engine, atom.title, item.slug, sourceId, undatedDate, pageAtomTitles)
               : atomSlug(atom.title, srcRef, undefined, undatedDate);
-          const originFrontmatter =
-            item.kind === 'transcript'
-              ? { source_path: item.filePath }
-              : { source_slug: item.slug };
+          // #5211: atoms are dream output: the anti-loop marker, plus the raw
+          // trace doctor's raw_provenance check asks of a marked page (#1978).
+          const originFrontmatter = { dream_generated: true, raw_source: srcRef,
+            ...(item.kind === 'transcript' ? { source_path: item.filePath } : { source_slug: item.slug }) };
           // #4733 fail-closed: never let the upsert repoint an atom that is
           // bound to a DIFFERENT source page (pre-#4733 rows / hash collision).
           if (item.kind === 'page') {
