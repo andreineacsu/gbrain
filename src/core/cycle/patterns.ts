@@ -370,7 +370,7 @@ export async function runPhasePatterns(
     // #4077: no post-abort derived-state writes (collection is a read, but
     // the reverse-write below dual-writes files).
     throwIfAborted(opts.signal, '[dream] patterns output');
-    const writtenRefs = await collectChildPutPageSlugs(engine, [job.id], cycleSourceId);
+    const writtenRefs = await collectChildWrites(engine, [job.id], cycleSourceId);
 
     // #6052: `finalized` leaves out outputs whose managed publication is held (pending or contended); `held` counts them.
     const { quoteVerify, finalized, held } = await stampPatternOutputs(engine, maintenance, writtenRefs, submitted, config, cycleSourceId, cycleDate, opts.signal);
@@ -732,7 +732,7 @@ export async function groundPatternPages(engine: BrainEngine, maintenance: Maint
 
 // ── Provenance via put_page tool execution rows ─────────────────────
 
-async function collectChildPutPageSlugs(
+async function collectChildWrites(
   engine: BrainEngine,
   childIds: number[],
   sourceId = 'default',
@@ -868,6 +868,6 @@ function makeError(cls: string, code: string, message: string, hint?: string): P
 // Mirrors synthesize.ts's `__testing` block.
 export const __testing = {
   gatherReflections,
-  collectChildPutPageSlugs,
+  collectChildWrites,
   reverseWriteRefs,
 };

@@ -3,7 +3,7 @@
  *
  * #1586 threaded the cycle's resolved source through `synthesize.ts` so dream
  * output lands in the named source's `(source_id, slug)` rows. `patterns.ts`
- * was left on the pre-#1586 shape: `collectChildPutPageSlugs` stamped a literal
+ * was left on the pre-#1586 shape: `collectChildWrites` stamped a literal
  * `'default'` and `reverseWriteRefs` compared against a literal `'default'`.
  *
  * The result on a per-source cycle was a page filed against the wrong source:
@@ -24,7 +24,7 @@ import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
 import { __testing } from '../src/core/cycle/patterns.ts';
 
-const { collectChildPutPageSlugs, reverseWriteRefs } = __testing;
+const { collectChildWrites, reverseWriteRefs } = __testing;
 
 const SOURCE_ID = 'coast';
 const SLUG = 'wiki/personal/patterns/a-pattern';
@@ -71,7 +71,7 @@ afterAll(async () => {
 
 describe('#1586: the patterns phase scopes its writes to the cycle source', () => {
   test('collected refs carry the cycle source, not a hardcoded default', async () => {
-    const refs = await collectChildPutPageSlugs(engine as any, [2001], SOURCE_ID);
+    const refs = await collectChildWrites(engine as any, [2001], SOURCE_ID);
     expect(refs).toHaveLength(1);
     expect(refs[0]!.slug).toBe(SLUG);
     // Pre-fix this was the literal 'default' no matter which source the cycle
@@ -80,12 +80,12 @@ describe('#1586: the patterns phase scopes its writes to the cycle source', () =
   });
 
   test('unscoped callers keep the legacy default source', async () => {
-    const refs = await collectChildPutPageSlugs(engine as any, [2001]);
+    const refs = await collectChildWrites(engine as any, [2001]);
     expect(refs[0]!.source_id).toBe('default');
   });
 
   test('reverse-write resolves the row the child actually wrote', async () => {
-    const refs = await collectChildPutPageSlugs(engine as any, [2001], SOURCE_ID);
+    const refs = await collectChildWrites(engine as any, [2001], SOURCE_ID);
     const count = await reverseWriteRefs(engine as any, brainDir, refs, SOURCE_ID);
     // The lookup is keyed on the ref's source_id, so a ref carrying the cycle
     // source resolves the row the child wrote there.
@@ -93,7 +93,7 @@ describe('#1586: the patterns phase scopes its writes to the cycle source', () =
   });
 
   test('the cycle source is native — its pages stay at brainDir/<slug>.md', async () => {
-    const refs = await collectChildPutPageSlugs(engine as any, [2001], SOURCE_ID);
+    const refs = await collectChildWrites(engine as any, [2001], SOURCE_ID);
     await reverseWriteRefs(engine as any, brainDir, refs, SOURCE_ID);
     expect(existsSync(join(brainDir, `${SLUG}.md`))).toBe(true);
     expect(existsSync(join(brainDir, '.sources', SOURCE_ID, `${SLUG}.md`))).toBe(false);
@@ -102,7 +102,7 @@ describe('#1586: the patterns phase scopes its writes to the cycle source', () =
   test('a foreign source still lands under .sources/<id>/', async () => {
     const foreignDir = mkdtempSync(join(tmpdir(), 'gbrain-patterns-foreign-'));
     try {
-      const refs = await collectChildPutPageSlugs(engine as any, [2001], SOURCE_ID);
+      const refs = await collectChildWrites(engine as any, [2001], SOURCE_ID);
       // brainDir belongs to 'default' here, so 'coast' is foreign to it.
       await reverseWriteRefs(engine as any, foreignDir, refs, 'default');
       expect(existsSync(join(foreignDir, '.sources', SOURCE_ID, `${SLUG}.md`))).toBe(true);
