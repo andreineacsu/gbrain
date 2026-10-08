@@ -14,7 +14,7 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PGLiteEngine } from '../src/core/pglite-engine.ts';
-import { operations, OperationError } from '../src/core/operations.ts';
+import { operations, OperationError, type OperationContext } from '../src/core/operations.ts';
 import {
   BRAIN_TOOL_ALLOWLIST,
   buildBrainTools,
@@ -226,6 +226,65 @@ describe('buildBrainTools', () => {
     expect(() =>
       buildBrainTools({ subagentId: 1, engine, config, sourceId: '../evil' }),
     ).toThrow();
+  });
+});
+
+// #6297: a tool result stays in the subagent's transcript and is sent again on
+// every later turn, so the parsed parts next to `content` cost a second copy of
+// the page on each read.
+describe('brain_get_page result for a subagent (#6297)', () => {
+  const slug = 'wiki/agents/42/recurring-theme';
+  const PAGE = `---
+type: note
+title: Recurring theme
+unverified_claims:
+  - text: A synthetic claim that failed verification.
+    reason: quote_not_in_source
+    detected_at: '2026-09-01'
+---
+
+${'A recurring synthetic theme, restated. '.repeat(40)}
+
+<!-- timeline -->
+
+- 2026-09-01: First synthetic sighting
+- 2026-09-02: Second synthetic sighting
+`;
+  const ctx = (): ToolCtx => ({ engine, jobId: 1, remote: true });
+  const tool = (name: string) => buildBrainTools({ subagentId: 42, engine, config }).find(t => t.name === name)!;
+  const getPageOp = operations.find(o => o.name === 'get_page')!;
+
+  beforeEach(async () => {
+    await tool('brain_put_page').execute({ slug, content: PAGE }, ctx());
+  });
+
+  test('include_content returns the page once, and that one copy still round-trips', async () => {
+    const full = await getPageOp.handler({
+      engine, config, logger: { info: () => {}, warn: () => {}, error: () => {} }, dryRun: false, remote: true, sourceId: 'default',
+    } as OperationContext, { slug, include_content: true }) as Record<string, unknown>;
+    const read = await tool('brain_get_page').execute({ slug, include_content: true }, ctx()) as Record<string, unknown>;
+    expect(read.content).toBe(full.content);
+    expect(read.revision).toBe(full.revision);
+    for (const duplicate of ['compiled_truth', 'timeline', 'frontmatter']) expect(duplicate in read).toBe(false);
+    expect(JSON.stringify(read).length).toBeLessThan(JSON.stringify(full).length * 0.6);
+
+    // A rewrite from the lean read loses nothing: the timeline and the review records are in `content`.
+    const edited = (read.content as string).replace('restated', 'reworded');
+    await tool('brain_put_page').execute({ slug, content: edited, expected_revision: read.revision }, ctx());
+    const row = (await engine.getPage(slug, { sourceId: 'default' }))!;
+    expect(row.compiled_truth).toContain('reworded');
+    expect(row.timeline ?? '').toContain('Second synthetic sighting');
+    expect(row.frontmatter.unverified_claims).toHaveLength(1);
+  });
+
+  test('a read without include_content, or with content_only: false, keeps the parsed parts', async () => {
+    for (const [args, hasContent] of [[{ slug }, false], [{ slug, include_content: true, content_only: false }, true]] as const) {
+      const read = await tool('brain_get_page').execute(args, ctx()) as Record<string, unknown>;
+      expect('content' in read).toBe(hasContent);
+      expect(read.compiled_truth as string).toContain('A recurring synthetic theme');
+      expect(read.timeline as string).toContain('First synthetic sighting');
+      expect((read.frontmatter as Record<string, unknown>).unverified_claims).toHaveLength(1);
+    }
   });
 });
 

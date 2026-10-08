@@ -321,7 +321,13 @@ export function buildBrainTools(opts: BuildBrainToolsOpts): ToolDef[] {
         const params = normalizeOptionalParams(op, raw);
         const validationError = validateParams(op, params);
         if (validationError) throw new Error(`${toolName}: ${validationError}`);
-        const output = await op.handler(opCtx, params);
+        // #6297: a tool result is sent to the model again on every later turn,
+        // so an include_content read takes the content_only projection unless
+        // the call asks for the full shape with content_only: false. `content`
+        // already holds the frontmatter, body and timeline that the full shape
+        // repeats next to it.
+        const leanRead = op.name === 'get_page' && params.include_content === true && params.content_only !== false;
+        const output = await op.handler(opCtx, leanRead ? { ...params, content_only: true } : params);
         const rejection = op.name === 'put_page' ? putPageRejection(output) : null;
         if (rejection) throw new Error(rejection);
         return output;
