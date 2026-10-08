@@ -32,6 +32,11 @@ in `dream.patterns.last_run`:
 This is state, not a setting: `gbrain config set` refuses it, and
 `gbrain config unset dream.patterns.last_run` resets it.
 
+`outcome` is `timeout` when the child was still running at its limit: the
+phase stopped waiting for it, or the job was killed at its own timeout (it
+ends `dead` with the error `timeout exceeded`). Any other end short of
+`completed` is `failed`.
+
 An in-cycle run sizes itself from that record:
 
 - With history, it estimates milliseconds per reflection with a 1.25× margin
@@ -51,7 +56,13 @@ A direct `gbrain dream --phase patterns` has no cycle deadline: it keeps its
 full size (up to 100 reflections) and records `last_run` like an in-cycle
 run. It is the skip's `fix`; it is a paid run, so ask the user first.
 
-The linear cost model has not been measured on a real paid run yet.
+The estimate assumes run time grows with the number of reflections. That does
+not hold on every brain: the child also reads the existing pattern pages, and
+where those are large, reading them and writing the updates takes most of the
+run. On one measured brain a 25-reflection run took longer than a
+100-reflection run. There, the halving stops the same batch from being
+submitted again after a timeout, but a smaller batch is not certain to finish
+sooner.
 
 ## Changelog
 
