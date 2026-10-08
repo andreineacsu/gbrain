@@ -606,6 +606,50 @@ test('managed patterns scopes evidence and publishes through the real admitted s
   });
 }, 90_000);
 
+test('#6302: a patterns child that only appends timeline entries has them grounded, stamped and counted, and a failing one stays out', async () => {
+  await fixture(async (engine, sourceId, root) => {
+    const ctx = { engine, sourceId, remote: false as const, config: { engine: engine.kind, embedding_disabled: true },
+      dryRun: false, logger: { info() {}, warn() {}, error() {} } };
+    const put = (slug: string, content: string) => submitPageMutation(ctx, { operation: 'put_page', params: { slug, content, request_id: randomUUID() } });
+    for (let i = 0; i < 3; i++) await put(`wiki/personal/reflections/example-${i}`, `---\ntitle: Reflection ${i}\ntype: note\n---\nI keep saying "ship smaller pieces" when projects stall (${i}).`);
+    const slug = 'wiki/personal/patterns/small-pieces';
+    await put(slug, "---\ntitle: Small pieces\ntype: note\ndream_generated: true\nquote_verified_at: '2026-01-01'\n---\nEarlier you wrote \"an older quote from a reflection outside this run\".");
+    await engine.setConfig('dream.patterns.enabled', 'true');
+    await engine.setConfig('models.dream.patterns', 'anthropic:claude-sonnet-4-6');
+    await engine.setConfig('agent.use_gateway_loop', 'true');
+    await engine.executeRaw('UPDATE persistence_brain SET enabled=true WHERE singleton=1');
+    const entry = (id: string, summary: string) => ({ type: 'tool-call' as const, toolCallId: id, toolName: 'brain_add_timeline_entry',
+      input: { slug, date: '2026-02-02', summary, source: 'wiki/personal/reflections/example-0' } });
+    let calls = 0;
+    __setChatTransportForTests(async opts => {
+      calls++;
+      return { text: calls === 1 ? '' : 'Updated the pattern.', blocks: calls === 1
+        ? [entry('grounded', 'You said "ship smaller pieces" again'), entry('unfounded', 'You wrote "deploy every friday night without tests"')]
+        : [{ type: 'text', text: 'Updated the pattern.' }], stopReason: calls === 1 ? 'tool_calls' : 'end',
+      usage: { input_tokens: 100, output_tokens: 100, cache_read_tokens: 0, cache_creation_tokens: 0 }, model: opts.model!, providerId: 'anthropic' };
+    });
+    try {
+      await withEnv({ ANTHROPIC_API_KEY: 'sk-test-maintenance' }, async () => {
+        const result = await runPhasePatterns(engine, { brainDir: root, sourceId, dryRun: false, once: true, cycleDate: '2026-02-03' });
+        expect(result.status).toBe('ok');
+        expect(result.summary).toBe('1 pattern page(s) written/updated (completed)');
+        expect(result.details).toMatchObject({ patterns_written: 1, quote_verify: { pages: 1, quarantined: 1, repaired: 0 } });
+        const page = (await engine.readPageSnapshot(slug, { sourceId }))!;
+        expect(page.page.compiled_truth).toContain('an older quote from a reflection outside this run');
+        expect(page.page.timeline).toContain('You said "ship smaller pieces" again');
+        expect(page.page.timeline).not.toContain('deploy every friday night');
+        expect(page.page.frontmatter).toMatchObject({ quote_verified_at: '2026-02-03', raw_trace_exempt: true, dream_generated: true });
+        expect(page.page.frontmatter.unverified_claims as unknown[]).toHaveLength(1);
+        expect((await engine.getTimeline(slug, { sourceId })).map(r => r.summary)).toEqual(['You said "ship smaller pieces" again']);
+        expect(parseMarkdown(readFileSync(join(root, `${slug}.md`), 'utf8'))).toEqual(parseMarkdown(serializePageToMarkdown(page.page, page.tags)));
+        await submitPageMutation(ctx, { operation: 'add_timeline_entry', params: { slug, date: '2026-02-04', summary: 'A later entry',
+          source: 'wiki/personal/reflections/example-1', request_id: randomUUID() } });
+        expect((await engine.readPageSnapshot(slug, { sourceId }))!.page.timeline).not.toContain('deploy every friday night');
+      });
+    } finally { __setChatTransportForTests(null); }
+  });
+}, 90_000);
+
 test('#6236: a held claim-source rewrite of an existing pattern page submits no patterns child (0 model calls)', async () => {
   await fixture(async (engine, sourceId, root) => {
     for (let i = 0; i < 3; i++) await seed(engine, sourceId, `wiki/personal/reflections/example-${i}`);

@@ -165,13 +165,19 @@ async function submitMaintenance(engine: BrainEngine, authority: MaintenanceAuth
 /** #5523: a Life Chronicle timeline row projected onto the depth page in the same publication. */
 export interface MaintenanceEventProjection { depth_slug: string; date: string; summary: string; }
 
+/**
+ * `projectionWriter: 'editing'` (#6302): a publication bound to the revision it
+ * read also removes the materialized timeline bullets it dropped from that
+ * revision, rows included; the default preserving publication renders them back.
+ */
 export async function publishMaintenancePage(engine: BrainEngine, authority: MaintenanceAuthority, slug: string,
-  content: string, options: { requestId?: string; expectedRevision: string | null; file?: boolean;
-    eventProjection?: MaintenanceEventProjection }): Promise<Record<string, unknown>> {
+  content: string, options: { requestId?: string; file?: boolean; eventProjection?: MaintenanceEventProjection }
+    & ({ expectedRevision: string | null; projectionWriter?: undefined } | { expectedRevision: string; projectionWriter: 'editing' })): Promise<Record<string, unknown>> {
   const projection = options.eventProjection ? { event_projection: options.eventProjection } : {};
+  const writer = options.projectionWriter ? { projection_writer: options.projectionWriter } : {};
   return submitMaintenance(engine, authority, slug, { kind: 'managed_maintenance_page', content,
-    expected_revision: options.expectedRevision, ...projection }, options.requestId ?? maintenanceRequestId({ authority: authority.writer,
-    slug, content, revision: options.expectedRevision, file: options.file ?? true, ...projection }), options.file);
+    expected_revision: options.expectedRevision, ...projection, ...writer }, options.requestId ?? maintenanceRequestId({ authority: authority.writer,
+    slug, content, revision: options.expectedRevision, file: options.file ?? true, ...projection, ...writer }), options.file);
 }
 
 /** A maintenance request with its own intent kind, keyed by the intent (a retry replays its receipt). */

@@ -50,6 +50,8 @@ import { resolveCycleDate } from './cycle-date.ts';
 import { clearPatternsSourceDeaths, patternsBreakerSkip } from './dream-breaker.ts';
 import { dedupePatternClaimSources, withClaimSources } from './pattern-claim-sources.ts';
 import { publishOrHold } from '../persistence/accepted-pending.ts';
+import type { TimelineEntryWriteInput } from '../timeline-write-through.ts';
+import type { PageSnapshot } from '../page-state/types.ts';
 
 export interface PatternsPhaseOpts {
   brainDir: string;
@@ -370,7 +372,7 @@ export async function runPhasePatterns(
     // #4077: no post-abort derived-state writes (collection is a read, but
     // the reverse-write below dual-writes files).
     throwIfAborted(opts.signal, '[dream] patterns output');
-    const writtenRefs = await collectChildWrites(engine, [job.id], cycleSourceId);
+    const writtenRefs = await collectChildWrites(engine, [job.id], cycleSourceId, `${config.outputSlugPrefix}/`);
 
     // #6052: `finalized` leaves out outputs whose managed publication is held (pending or contended); `held` counts them.
     const { quoteVerify, finalized, held } = await stampPatternOutputs(engine, maintenance, writtenRefs, submitted, config, cycleSourceId, cycleDate, opts.signal);
@@ -648,14 +650,25 @@ When done, briefly list the pattern slugs you wrote/updated in your final messag
  * outputs. Returns the grounding counts (null when dream.quote_verify is off), the written refs whose managed
  * publications all landed, and the number of pages whose publication is held for a later cycle.
  */
-async function stampPatternOutputs(engine: BrainEngine, maintenance: MaintenanceAuthority | null, written: Array<{ slug: string; source_id: string }>,
+async function stampPatternOutputs(engine: BrainEngine, maintenance: MaintenanceAuthority | null, written: ChildWrite[],
   reflections: ReflectionRef[], config: { outputSlugPrefix: string; sourceSlugPrefix: string }, sourceId: string, cycleDate: string, signal?: AbortSignal) {
   const heldSlugs = new Set<string>();
   const quoteVerify = await groundPatternPages(engine, maintenance, written, reflections, config.outputSlugPrefix, sourceId, cycleDate, signal, heldSlugs);
-  await stampProvenance(engine, maintenance, written.filter(ref => ref.slug.startsWith(`${config.outputSlugPrefix}/`)), cycleDate, config.sourceSlugPrefix, sharedSeat(reflections), signal, heldSlugs);
+  const outputs = await dreamOutputRefs(engine, written.filter(ref => ref.slug.startsWith(`${config.outputSlugPrefix}/`)), sourceId);
+  await stampProvenance(engine, maintenance, outputs, cycleDate, config.sourceSlugPrefix, sharedSeat(reflections), signal, heldSlugs);
   // Holds are recorded for this cycle's source only, so a ref in any other source is never excused from verification.
   const finalized = written.filter(ref => ref.source_id !== sourceId || !heldSlugs.has(ref.slug));
   return { quoteVerify, finalized, held: heldSlugs.size };
+}
+
+/** C-8 (#6302): a page the child only appended to existed before its first write, so it is dream output only when already stamped. */
+async function dreamOutputRefs(engine: BrainEngine, refs: ChildWrite[], sourceId: string): Promise<ChildWrite[]> {
+  const appendedOnly = refs.filter(ref => ref.appended && !ref.rewritten).map(ref => ref.slug);
+  if (appendedOnly.length === 0) return refs;
+  const dream = new Set((await engine.executeRaw<{ slug: string }>(
+    `SELECT slug FROM pages WHERE source_id = $1 AND slug = ANY($2::text[]) AND deleted_at IS NULL AND frontmatter->>'dream_generated' = 'true'`,
+    [sourceId, appendedOnly])).map(row => row.slug));
+  return refs.filter(ref => !ref.appended || ref.rewritten || dream.has(ref.slug));
 }
 
 async function stampProvenance(engine: BrainEngine, maintenance: MaintenanceAuthority | null,
@@ -683,12 +696,22 @@ async function stampProvenance(engine: BrainEngine, maintenance: MaintenanceAuth
  * dream.quote_verify (default on). Returns null when disabled. With `heldSlugs`
  * a managed publish that is pending or contended (publicationHold) is recorded
  * there and the loop moves on; without it every publish error propagates.
+ * #6302: the timeline entries a ref appended are grounded one by one
+ * (pattern-appended-entries.ts). The rest of a page is grounded whole when the
+ * child rewrote it, or when it is dream output no run has checked yet; on a
+ * page the child only appended to, it keeps the grounding of the runs that
+ * wrote it, against reflections this run may not have. The whole-page check
+ * leaves materialized bullets alone: they are timeline history, or this run's
+ * appended entries. A page with appended entries is written back as an editing
+ * writer (publishGroundedPage).
  */
-export async function groundPatternPages(engine: BrainEngine, maintenance: MaintenanceAuthority | null, refs: Array<{ slug: string; source_id: string }>,
+export async function groundPatternPages(engine: BrainEngine, maintenance: MaintenanceAuthority | null, refs: ChildWrite[],
   reflections: ReflectionRef[], outputSlugPrefix: string, sourceId: string, cycleDate: string, signal?: AbortSignal, heldSlugs?: Set<string>):
   Promise<{ pages: number; quarantined: number; repaired: number } | null> {
   const { dreamQuoteVerifyEnabled, groundSource, verifyBody } = await import('./synthesize-verify.ts');
   if (!await dreamQuoteVerifyEnabled(engine)) return null;
+  const bySlug = new Map(refs.map(ref => [ref.slug, ref]));
+  const { groundAppendedEntries } = await import('./pattern-appended-entries.ts');
   const leftover = await engine.executeRaw<{ slug: string }>(
     `SELECT slug FROM pages WHERE source_id = $1 AND slug LIKE $2 AND deleted_at IS NULL
        AND frontmatter->>'dream_generated' = 'true' AND frontmatter->>'quote_verified_at' IS NULL`, [sourceId, `${outputSlugPrefix}/%`]);
@@ -699,64 +722,102 @@ export async function groundPatternPages(engine: BrainEngine, maintenance: Maint
     [sourceId, reflections.map(r => r.slug)]);
   const sources = sourcePages.map(p => groundSource(p.slug, `${p.compiled_truth}\n\n${p.timeline ?? ''}`, { tolerant: true }));
   const stats = { pages: 0, quarantined: 0, repaired: 0 };
-  const { serializePageToMarkdown } = await import('../markdown.ts');
   for (const slug of slugs) {
     throwIfAborted(signal, '[dream] patterns quote verify');
     const snapshot = await engine.readPageSnapshot(slug, { sourceId });
     if (!snapshot) continue;
-    const ct = verifyBody(snapshot.page.compiled_truth, sources, { checks: 'quotes' });
-    const tl = verifyBody(snapshot.page.timeline ?? '', sources, { checks: 'quotes' });
-    const quarantined = [...ct.quarantined, ...tl.quarantined];
+    const ref = bySlug.get(slug), fm = snapshot.page.frontmatter;
+    const whole = !ref?.appended || ref.rewritten === true || ((fm.dream_generated === true || fm.dream_generated === 'true') && !fm.quote_verified_at);
+    const entries = ref?.appended ? groundAppendedEntries(snapshot.page.timeline ?? '', slug, ref.appended, sources) : null;
+    const timeline = entries?.body ?? snapshot.page.timeline ?? '';
+    const ct = whole ? verifyBody(snapshot.page.compiled_truth, sources, { checks: 'quotes' }) : null;
+    const tl = whole ? verifyBody(timeline, sources, { checks: 'quotes', skipMaterialized: true }) : null;
+    const checked = [entries, ct, tl].filter(check => check !== null);
+    const quarantined = checked.flatMap(check => check.quarantined);
     stats.pages++;
     stats.quarantined += quarantined.length;
-    stats.repaired += ct.normalized + ct.near + tl.normalized + tl.near;
+    stats.repaired += checked.reduce((sum, check) => sum + check.normalized + check.near, 0);
     // #6236: the reflection list is stored once per page (lossless), not on every claim.
-    const { frontmatter } = withClaimSources({ ...snapshot.page.frontmatter, quote_verified_at: cycleDate },
+    const { frontmatter } = withClaimSources({ ...fm, quote_verified_at: cycleDate },
       quarantined.map(c => ({ ...c, detected_at: cycleDate })), sources.map(x => x.path));
-    const page = { ...snapshot.page,
-      compiled_truth: ct.body.trim() ? ct.body : (await import('./synthesize-verify.ts')).ALL_CLAIMS_QUARANTINED_BODY,
-      timeline: tl.body, frontmatter };
-    const content = serializePageToMarkdown(page, snapshot.tags);
-    if (maintenance) {
-      const { publishMaintenancePage } = await import('../persistence/prepared-maintenance.ts');
-      const publish = () => publishMaintenancePage(engine, maintenance, slug, content, { expectedRevision: snapshot.revision });
-      if (!heldSlugs) await publish();
-      else if (await publishOrHold(publish)) heldSlugs.add(slug);
-    } else {
-      const [{ importFromContent }, { isAvailable }] = await Promise.all([import('../import-file.ts'), import('../ai/gateway.ts')]);
-      await importFromContent(engine, slug, content, { noEmbed: !isAvailable('embedding'), sourceId, preserveGateMarkers: true });
-    }
+    await publishGroundedPage(engine, maintenance, snapshot, { ...snapshot.page,
+      compiled_truth: !ct ? snapshot.page.compiled_truth : ct.body.trim() ? ct.body : (await import('./synthesize-verify.ts')).ALL_CLAIMS_QUARANTINED_BODY,
+      timeline: tl?.body ?? timeline, frontmatter }, sourceId, entries !== null, heldSlugs);
   }
   return stats;
 }
 
-// ── Provenance via put_page tool execution rows ─────────────────────
+/**
+ * Write a grounded page back. `editing` (#6302), for a page whose appended
+ * entries were grounded: the write is an editing one bound to the revision it
+ * read, so the timeline rows of the entries it removed go with them, where a
+ * preserving write would render a removed materialized bullet back from its row.
+ */
+async function publishGroundedPage(engine: BrainEngine, maintenance: MaintenanceAuthority | null, snapshot: PageSnapshot, page: Page,
+  sourceId: string, editing: boolean, heldSlugs?: Set<string>): Promise<void> {
+  const { serializePageToMarkdown } = await import('../markdown.ts');
+  const content = serializePageToMarkdown(page, snapshot.tags);
+  if (maintenance) {
+    const { publishMaintenancePage } = await import('../persistence/prepared-maintenance.ts');
+    const publish = () => publishMaintenancePage(engine, maintenance, page.slug, content,
+      editing ? { expectedRevision: snapshot.revision, projectionWriter: 'editing' } : { expectedRevision: snapshot.revision });
+    if (!heldSlugs) await publish();
+    else if (await publishOrHold(publish)) heldSlugs.add(page.slug);
+    return;
+  }
+  const [{ importFromContent }, { isAvailable }, { prepareCanonicalProjections }] = await Promise.all([
+    import('../import-file.ts'), import('../ai/gateway.ts'), import('../persistence/canonical-projections.ts')]);
+  const project = editing ? await prepareCanonicalProjections(engine, { type: page.type, title: page.title, compiled_truth: page.compiled_truth,
+    timeline: page.timeline ?? '', frontmatter: page.frontmatter, tags: snapshot.tags }, page.slug, sourceId, snapshot, 'editing') : undefined;
+  await importFromContent(engine, page.slug, content, { noEmbed: !isAvailable('embedding'), sourceId, preserveGateMarkers: true,
+    ...(project ? { beforeCommit: async (tx: BrainEngine) => { await project(tx); } } : {}) });
+}
+
+// ── Provenance via put_page / add_timeline_entry tool execution rows ─
+
+/** A page the patterns child wrote: `rewritten` with put_page, `appended` (#6302) the timeline entries it added. */
+export interface ChildWrite { slug: string; source_id: string; rewritten?: boolean; appended?: TimelineEntryWriteInput[] }
 
 async function collectChildWrites(
   engine: BrainEngine,
   childIds: number[],
   sourceId = 'default',
-): Promise<Array<{ slug: string; source_id: string }>> {
+  outputPrefix?: string,
+): Promise<ChildWrite[]> {
   if (childIds.length === 0) return [];
   // v0.32.8: subagent put_page tool schema doesn't expose source_id (subagents
   // are scoped to a single source). #1586: stamp the cycle's resolved source —
   // children write there via SubagentHandlerData.source_id — so reverseWriteRefs
   // can pass it through getPage and pick the correct (source_id, slug) row
   // instead of whatever the DB happens to return. Unset → legacy 'default'.
-  const rows = await engine.executeRaw<{ slug: string }>(
-    `SELECT DISTINCT
-            COALESCE(input->>'slug', (input #>> '{}')::jsonb->>'slug') AS slug
-       FROM subagent_tool_executions
-      WHERE job_id = ANY($1::int[])
-        AND tool_name = 'brain_put_page'
-        AND status = 'complete'
-      ORDER BY 1`,
+  // #6302: the child updates existing pattern pages mostly with add_timeline_entry, so those pages count as written too;
+  // a repeated entry the writer skipped as a duplicate changed nothing. Timeline-only writes outside `outputPrefix` stay out.
+  // #745: an input stored double-encoded (a jsonb string scalar) is decoded first.
+  const rows = await engine.executeRaw<{ tool_name: string; slug: string | null; date: string | null; summary: string | null; source: string | null;
+    detail: string | null; reason: string | null }>(
+    `SELECT tool_name, i->>'slug' AS slug, i->>'date' AS date, i->>'summary' AS summary, i->>'source' AS source, i->>'detail' AS detail, reason
+       FROM (SELECT id, tool_name, output->>'reason' AS reason,
+                    CASE WHEN jsonb_typeof(input) = 'string' THEN (input #>> '{}')::jsonb ELSE input END AS i
+               FROM subagent_tool_executions
+              WHERE job_id = ANY($1::int[])
+                AND tool_name IN ('brain_put_page', 'brain_add_timeline_entry')
+                AND status = 'complete') t
+      ORDER BY id`,
     [childIds],
   );
-  return rows
-    .map(r => r.slug)
-    .filter((s): s is string => typeof s === 'string' && s.length > 0)
-    .map(slug => ({ slug, source_id: sourceId }));
+  const writes = new Map<string, ChildWrite>();
+  for (const row of rows) {
+    if (typeof row.slug !== 'string' || row.slug.length === 0) continue;
+    const timeline = row.tool_name === 'brain_add_timeline_entry';
+    if (timeline && row.reason === 'duplicate') continue;
+    const write = writes.get(row.slug) ?? { slug: row.slug, source_id: sourceId };
+    writes.set(row.slug, write);
+    if (!timeline) write.rewritten = true;
+    // The same fields the timeline writer renders the entry from (persistence/semantic-pages.ts).
+    else (write.appended ??= []).push({ date: String(row.date), summary: String(row.summary), source: row.source ?? '', detail: row.detail ?? '' });
+  }
+  return [...writes.values()].filter(write => write.rewritten || !outputPrefix || write.slug.startsWith(outputPrefix))
+    .sort((a, b) => (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
 }
 
 // ── Reverse-write ────────────────────────────────────────────────────
@@ -869,5 +930,6 @@ function makeError(cls: string, code: string, message: string, hint?: string): P
 export const __testing = {
   gatherReflections,
   collectChildWrites,
+  stampPatternOutputs,
   reverseWriteRefs,
 };

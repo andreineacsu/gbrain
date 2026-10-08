@@ -70,6 +70,7 @@ import { normalizePageFences } from '../fence-repair/import-step.ts';
 import { prepareAutomaticLinks } from '../persistence/links-preparation.ts';
 import { isAutoLinkEnabled } from '../link-extraction.ts';
 import { resolveCycleDate, utcDate } from './cycle-date.ts';
+import { truncateUtf8 } from '../text-safe.ts';
 
 /** Minimum quoted-span inner length considered a "quote" (shorter spans are
  * scare quotes / titles, not transcript quotations). */
@@ -1014,9 +1015,10 @@ function blank(s: string, ranges: Array<[number, number]>): string {
   return out;
 }
 
-function clip(s: string, n = PROVENANCE_TEXT_CHARS): string {
+/** Whitespace-flattened text cut to `n` characters, never splitting a surrogate pair (the records land in JSONB). */
+export function clip(s: string, n = PROVENANCE_TEXT_CHARS): string {
   const flat = s.replace(/\s+/g, ' ').trim();
-  return flat.length > n ? `${flat.slice(0, n - 3)}...` : flat;
+  return flat.length > n ? `${truncateUtf8(flat, n - 3)}...` : flat;
 }
 
 /**
@@ -1026,8 +1028,10 @@ function clip(s: string, n = PROVENANCE_TEXT_CHARS): string {
  * other unit is left exactly as it was. `checks: 'quotes'` grounds quotes and
  * their speaker attribution only (no number, date or decision checks), for
  * writers whose prose legitimately derives numbers from its sources.
+ * `skipMaterialized` leaves every materialized bullet unchecked, for a caller
+ * with no pre-run revision that checks the run's own marked entries separately.
  */
-export function verifyBody(body: string, sources: GroundedSource[], opts: { priorNorm?: string; checks?: 'all' | 'quotes'; exemptNumericKeys?: ReadonlySet<string> } = {}): BodyVerification {
+export function verifyBody(body: string, sources: GroundedSource[], opts: { priorNorm?: string; checks?: 'all' | 'quotes'; exemptNumericKeys?: ReadonlySet<string>; skipMaterialized?: boolean } = {}): BodyVerification {
   const { spans, unbalanced } = extractQuoteSpans(body);
   const masked = maskNonProse(body);
   const failures: Record<ClaimFailure, number> = { quote_not_in_source: 0, quote_crosses_speakers: 0, speaker_mismatch: 0, number_not_in_source: 0, decision_misattributed: 0 };
@@ -1042,7 +1046,7 @@ export function verifyBody(body: string, sources: GroundedSource[], opts: { prio
   // bullet absent from the pre-run revision was materialized during the run
   // (with its stored detail); an edit under a bullet that already existed is
   // verified like any other new unit. A new page has no history to render.
-  const history = opts.priorNorm === undefined ? [] : materializedHistoryRanges(body)
+  const history = opts.priorNorm === undefined ? (opts.skipMaterialized ? materializedHistoryRanges(body) : []) : materializedHistoryRanges(body)
     .filter(([start, end]) => !opts.priorNorm!.includes(normForGrounding(body.slice(start, end).split('\n')[1] ?? '')));
   for (const u of claimUnits(body, spans)) {
     const text = body.slice(u.start, u.end);

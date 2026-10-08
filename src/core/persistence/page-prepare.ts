@@ -342,8 +342,11 @@ export async function preparePageMutation(engine: BrainEngine, row: WriteRequest
     }
   }
   const projected = !(row.operation === 'remember' || row.operation.startsWith('takes_') || (row.operation === 'extract_facts' && p.kind === 'managed_facts_entity'));
-  const writer = (row.operation === 'put_page' || row.operation === 'edit_page') && p.kind !== 'managed_maintenance_page'
-    && (preparedIntent !== undefined || typeof p.expected_revision === 'string') ? 'editing' : 'preserving';
+  // #6302: a local maintenance publication bound to the revision it read may ask to edit (publishMaintenancePage `projectionWriter`).
+  const writer = ((row.operation === 'put_page' || row.operation === 'edit_page') && p.kind !== 'managed_maintenance_page'
+    && (preparedIntent !== undefined || typeof p.expected_revision === 'string'))
+    || (p.kind === 'managed_maintenance_page' && p.projection_writer === 'editing' && typeof p.expected_revision === 'string' && !row.authority.remote)
+    ? 'editing' : 'preserving';
   // #5969 (D3): only an ordinary put_page intent carries a timeline section; every other writer keeps the shared policy.
   const timelinePolicy = row.operation === 'put_page' ? timelineWritePolicy(p, row.authority.remote, writer) : undefined;
   if (timelinePolicy && typeof content === 'string') await assertTimelineNotOmitted(engine, { intent: p, remote: row.authority.remote, writer,
