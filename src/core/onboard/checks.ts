@@ -58,6 +58,20 @@ async function safeCount(engine: BrainEngine, sql: string, params: unknown[] = [
   }
 }
 
+/** #5432: a check whose input query failed says "not verified" (warn), never ok. */
+function notVerifiedResult(name: string, what: string, err: unknown): OnboardCheckResult {
+  const reason = redactConnectionInfo(err instanceof Error ? err.message : String(err)).slice(0, 200);
+  return {
+    check: {
+      name,
+      status: 'warn',
+      message: `Not verified: ${what} failed (${reason}). Fix the cause, then re-run \`gbrain doctor\`.`,
+      details: { code: 'not_verified', verified: false, reason, fix: 'gbrain doctor', docs: 'docs/guides/troubleshooting.md#not-verified-doctor-checks' },
+    },
+    remediations: [],
+  };
+}
+
 const VISIBLE_ENTITY_PREDICATE = `p.type IN ('person', 'company', 'organization', 'entity')
   AND p.deleted_at IS NULL
   AND ${QUARANTINE_FILTER_FRAGMENT}`;
@@ -182,16 +196,7 @@ export async function checkEmbedStaleness(
   try {
     staleCount = await engine.countStaleChunks();
   } catch (e) {
-    const reason = redactConnectionInfo(e instanceof Error ? e.message : String(e)).slice(0, 200);
-    return {
-      check: {
-        name: 'embed_staleness',
-        status: 'warn',
-        message: `Not verified: the stale-chunk count failed (${reason}). Fix the cause, then re-run \`gbrain doctor\`.`,
-        details: { code: 'not_verified', verified: false, reason, fix: 'gbrain doctor', docs: 'docs/guides/troubleshooting.md#not-verified-doctor-checks' },
-      },
-      remediations: [],
-    };
+    return notVerifiedResult('embed_staleness', 'the stale-chunk count', e);
   }
   const remediations: RemediationStep[] = [];
   let status: 'ok' | 'warn' | 'fail' = 'ok';
