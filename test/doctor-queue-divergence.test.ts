@@ -116,6 +116,66 @@ describe('queue_health — healthy queue stays quiet', () => {
   });
 });
 
+describe('queue_health — prompt_too_long deaths name their dream phase (#6303)', () => {
+  // The submission key (live, or released into data on death) says which dream
+  // phase submitted the child, the same rule the paid-loop breaker counts by;
+  // an unkeyed child in a private dream-inline queue is a patterns child.
+  type Seed = { live?: string; released?: string; queue?: string };
+  async function deadSubagent(error: string, seed: Seed = {}): Promise<number> {
+    const [row] = await base.executeRaw<{ id: number }>(
+      `INSERT INTO minion_jobs (submission_authority, name, queue, status, error_text, idempotency_key, data, created_at, updated_at, finished_at)
+       VALUES ('{"version":1,"kind":"application"}'::jsonb, 'subagent', $4, 'dead', $1, $2, $3::text::jsonb, now(), now(), now())
+       RETURNING id`,
+      [error, seed.live ?? null, JSON.stringify(seed.released ? { __released_idempotency_key: seed.released } : {}), seed.queue ?? 'dream-inline-test'],
+    );
+    return Number(row!.id);
+  }
+
+  const synthKey = 'dream:synth-v2:default:filename:a.txt:0123456789abcdef:c1of2';
+  it.each([
+    {
+      label: 'patterns deaths (live key, released key, unkeyed in a dream-inline queue) get the patterns advice, not the synthesize one',
+      seed: [{ live: 'dream:patterns:aaa' }, { released: 'dream:patterns:bbb' }, {}] as Seed[],
+      contains: ['3 dream patterns subagent job(s) dead-lettered with prompt_too_long', 'dream.patterns.lookback_days', 'models.dream.patterns'],
+      excludes: ['gbrain dream --phase synthesize', 'synthesize subagent'],
+      byPhase: { patterns: 3 },
+    },
+    {
+      label: 'synthesize deaths keep the synthesize advice',
+      seed: [{ live: synthKey }] as Seed[],
+      contains: ['1 dream synthesize subagent job(s) dead-lettered with prompt_too_long', 'dream.synthesize.max_prompt_tokens'],
+      excludes: ['dream patterns subagent', 'dream.patterns.lookback_days'],
+      byPhase: { synthesize: 1 },
+    },
+    {
+      label: 'a death outside dream is not blamed on a dream phase and names the newest job',
+      seed: [{ queue: 'default' }, { queue: 'default' }] as Seed[],
+      contains: ['2 other subagent job(s) (not submitted by dream synthesize or patterns) dead-lettered with prompt_too_long'],
+      excludes: ['dream.synthesize.max_prompt_tokens', 'dream.patterns.lookback_days'],
+      byPhase: { other: 2 },
+      namesNewestJob: true,
+    },
+    {
+      label: 'deaths of both phases in one window get one line each',
+      seed: [{ live: 'dream:patterns:ddd' }, { live: synthKey }] as Seed[],
+      contains: ['1 dream synthesize subagent job(s)', '1 dream patterns subagent job(s)'],
+      excludes: ['other subagent job(s)'],
+      byPhase: { synthesize: 1, patterns: 1 },
+    },
+  ])('$label', async ({ seed, contains, excludes, byPhase, namesNewestJob }) => {
+    const ids: number[] = [];
+    for (const s of seed) ids.push(await deadSubagent('prompt_too_long: prompt is too long: 250000 tokens > 200000 maximum', s));
+    // A patterns child that died at its timeout is not a prompt_too_long death.
+    await deadSubagent('timeout exceeded', { live: 'dream:patterns:ccc' });
+    const check = await computeQueueHealthCheck(pgLike, { readWorkers: () => [{ queue: 'default' }] });
+    expect(check.status).toBe('warn');
+    for (const text of contains) expect(check.message).toContain(text);
+    for (const text of excludes) expect(check.message).not.toContain(text);
+    if (namesNewestJob) expect(check.message).toContain(`gbrain jobs get ${Math.max(...ids)}`);
+    expect(check.details?.prompt_too_long_by_phase).toEqual(byPhase);
+  });
+});
+
 describe('malformed_path_pages discovery check (buildChecks seam)', () => {
   it('warns naming the count + slug when a page is backed by a bracketed filename', async () => {
     await base.executeRaw(

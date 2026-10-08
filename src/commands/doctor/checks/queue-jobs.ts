@@ -9,9 +9,36 @@ import { resolveEnvNumber } from '../../../core/env-number.ts';
 import type { Check } from '../../doctor.ts';
 import { checkError, doctorVerify } from '../check-fix.ts';
 import { queueWorkerAlive, runWaitingJobsFix } from '../../../core/minions/no-worker.ts';
+import { DREAM_INLINE_PRIVATE_QUEUE_PREFIX } from '../../../core/minions/queue.ts';
+import { DREAM_BREAKER_KEY_PREFIXES } from '../../../core/cycle/dream-breaker.ts';
 
 /** Local alias; the shared warn-once memo lives in core so it can't fork per module. */
 const _resolveEnvNumber = resolveEnvNumber;
+
+const PROMPT_TOO_LONG_PHASES = ['synthesize', 'patterns', 'other'] as const;
+type PromptTooLongPhase = (typeof PROMPT_TOO_LONG_PHASES)[number];
+
+/** queue_health's prompt_too_long line, with the advice for the phase whose children died (#6303). */
+function promptTooLongProblem(phase: PromptTooLongPhase, count: number, newestId: number): string {
+  if (phase === 'synthesize') {
+    return `${count} dream synthesize subagent job(s) dead-lettered with prompt_too_long in last 24h. ` +
+      `Their transcripts exceeded the model's input context. ` +
+      `Fix: \`gbrain dream --phase synthesize --dry-run --json\` to identify fat transcripts; ` +
+      `set \`dream.synthesize.max_prompt_tokens\` to bound the per-chunk budget, or use a ` +
+      `larger-context model (Opus 4.7 = 1M tokens vs Sonnet 4.6 = 200K).`;
+  }
+  if (phase === 'patterns') {
+    return `${count} dream patterns subagent job(s) dead-lettered with prompt_too_long in last 24h. ` +
+      `The reflections and pages each child read exceeded the model's input context ` +
+      `(\`dream.synthesize.max_prompt_tokens\` does not apply to patterns). ` +
+      `Fix: set \`models.dream.patterns\` to a larger-context model; a shorter \`dream.patterns.lookback_days\` ` +
+      `helps only while the window holds fewer than 100 reflections (a run reads at most 100). ` +
+      `Repeated deaths trip the paid-loop breaker: \`gbrain doctor --only dream_paid_loop --json\`.`;
+  }
+  return `${count} other subagent job(s) (not submitted by dream synthesize or patterns) dead-lettered with ` +
+    `prompt_too_long in last 24h: the prompt exceeded the model's input context. ` +
+    `Inspect the newest with \`gbrain jobs get ${newestId}\`.`;
+}
 
 /**
  * v0.41.18.0 batch_retry_health doctor check (codex H-9 thresholds).
@@ -87,15 +114,31 @@ export async function computeQueueHealthCheck(
     );
     const rssKillCount = Number(rssKillRows[0]?.cnt ?? 0);
 
-    const promptTooLongRows: Array<{ cnt: number }> = await engine.executeRaw(
-      `SELECT count(*)::int AS cnt
-         FROM minion_jobs
-        WHERE name = 'subagent'
-          AND status = 'dead'
-          AND finished_at > now() - interval '24 hours'
-          AND error_text LIKE 'prompt_too_long:%'`,
+    // #6303: the dream phase that submitted a child is in its submission key
+    // (live, or released into data when the job died), the rule the paid-loop
+    // breaker counts by (src/core/cycle/dream-breaker.ts). Synthesize always
+    // keys its children; patterns keys them only under managed persistence, so
+    // an unkeyed child in a private dream-inline queue is a patterns child.
+    // Other unkeyed children (agent runs) are `other`.
+    const [synthKeyPrefix, patternsKeyPrefix] = DREAM_BREAKER_KEY_PREFIXES;
+    const promptTooLongRows: Array<{ phase: PromptTooLongPhase; cnt: number; newest_id: number }> = await engine.executeRaw(
+      `SELECT CASE WHEN left(dream_key, length($1::text)) = $1 THEN 'synthesize'
+                   WHEN left(dream_key, length($2::text)) = $2 THEN 'patterns'
+                   WHEN dream_key IS NULL AND left(queue, length($3::text)) = $3 THEN 'patterns'
+                   ELSE 'other' END AS phase,
+              count(*)::int AS cnt, max(id)::int AS newest_id
+         FROM (SELECT id, queue, COALESCE(idempotency_key, data->>'__released_idempotency_key') AS dream_key
+                 FROM minion_jobs
+                WHERE name = 'subagent'
+                  AND status = 'dead'
+                  AND finished_at > now() - interval '24 hours'
+                  AND error_text LIKE 'prompt_too_long:%') dead
+        GROUP BY 1`,
+      [synthKeyPrefix, patternsKeyPrefix, DREAM_INLINE_PRIVATE_QUEUE_PREFIX],
     );
-    const promptTooLongCount = Number(promptTooLongRows[0]?.cnt ?? 0);
+    const promptTooLong = PROMPT_TOO_LONG_PHASES
+      .map(phase => ({ phase, row: promptTooLongRows.find(r => r.phase === phase) }))
+      .filter((p): p is { phase: PromptTooLongPhase; row: (typeof promptTooLongRows)[number] } => Number(p.row?.cnt ?? 0) > 0);
 
     const oldWaitingHours = opts.oldWaitingHours
       ?? _resolveEnvNumber('GBRAIN_QUEUE_NO_WORKER_WARN_HOURS', 1);
@@ -160,6 +203,9 @@ export async function computeQueueHealthCheck(
         null,
       ),
       worker_alive: waitingByQueue.every((r) => liveWorkerQueues.has(r.queue)),
+      ...(promptTooLong.length > 0
+        ? { prompt_too_long_by_phase: Object.fromEntries(promptTooLong.map(p => [p.phase, Number(p.row.cnt)])) }
+        : {}),
     };
 
     const problems: string[] = [];
@@ -253,15 +299,7 @@ export async function computeQueueHealthCheck(
         );
       }
     } catch { /* best-effort — divergence probes never break doctor */ }
-    if (promptTooLongCount > 0) {
-      problems.push(
-        `${promptTooLongCount} subagent job(s) dead-lettered with prompt_too_long in last 24h. ` +
-        `Dream/synthesize transcripts exceeded the model's input context. ` +
-        `Fix: \`gbrain dream --phase synthesize --dry-run --json\` to identify fat transcripts; ` +
-        `set \`dream.synthesize.max_prompt_tokens\` to bound the per-chunk budget, or use a ` +
-        `larger-context model (Opus 4.7 = 1M tokens vs Sonnet 4.6 = 200K).`
-      );
-    }
+    for (const { phase, row } of promptTooLong) problems.push(promptTooLongProblem(phase, Number(row.cnt), Number(row.newest_id)));
 
     if (problems.length === 0) {
       return {
